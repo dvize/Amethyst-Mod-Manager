@@ -194,8 +194,9 @@ def find_prefix(steam_id: str) -> Path | None:
     Steam stores per-game Proton prefixes under:
         <steam_root>/steamapps/compatdata/<steam_id>/pfx/
 
-    Searches every known Steam root candidate and returns the first pfx/
-    directory that exists on disk, or None if not found.
+    Searches every known Steam root candidate first, then falls back to
+    extra library folders parsed from libraryfolders.vdf (e.g. SD card or
+    secondary drive libraries), since compatdata lives alongside the game.
 
     Args:
         steam_id: The Steam App ID as a string, e.g. '377160' for Fallout 4.
@@ -203,10 +204,28 @@ def find_prefix(steam_id: str) -> Path | None:
     if not steam_id:
         return None
 
+    # Primary: check known Steam root candidates
     for steam_root in _STEAM_CANDIDATES:
         pfx = steam_root / "steamapps" / "compatdata" / steam_id / "pfx"
         if pfx.is_dir():
             return pfx
+
+    # Secondary: check extra library folders (SD card, secondary drives, etc.)
+    # parse_vdf_libraries returns steamapps/common paths; parent is steamapps/
+    seen: set[Path] = set()
+    for steam_root in _STEAM_CANDIDATES:
+        vdf_path = steam_root / "steamapps" / _VDF_FILENAME
+        if not vdf_path.is_file():
+            continue
+        for common in parse_vdf_libraries(vdf_path):
+            steamapps = common.parent
+            resolved = steamapps.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            pfx = steamapps / "compatdata" / steam_id / "pfx"
+            if pfx.is_dir():
+                return pfx
 
     return None
 
