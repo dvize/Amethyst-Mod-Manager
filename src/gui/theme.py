@@ -72,34 +72,21 @@ FS16 = _pt_to_px(16)
 
 
 def init_fonts(widget) -> None:
-    """Rescale FONT_* constants for CTk widgets.
+    """Lock the app to its design DPI so global OS scaling doesn't resize it.
 
-    CTk widgets handle their own DPI scaling, so they need point sizes
-    adjusted inversely to the Tk scaling factor.  The FS* pixel sizes
-    are fixed at init and never change — negative pixel values bypass
-    Tk's scaling entirely.
+    Tk honours the system's global UI scaling factor via `tk scaling`, which
+    inflates every point size and widget dimension at >100% scale.  We want
+    the app to look identical regardless of what the user's OS scale is set
+    to, so we reset `tk scaling` back to _BASELINE (96 DPI / 72 pt = 1.3333)
+    immediately after the window is created.
+
+    The FS* negative-pixel sizes bypass Tk scaling entirely and need no
+    adjustment here.
     """
-    global FONT_NORMAL, FONT_BOLD, FONT_SMALL, FONT_MONO, FONT_SEP, FONT_HEADER
-
     try:
-        scaling = float(widget.tk.call("tk", "scaling"))
+        widget.tk.call("tk", "scaling", _BASELINE)
     except Exception:
-        return  # leave defaults untouched
-
-    if abs(scaling - _BASELINE) < 0.05:
-        return  # close enough, no adjustment needed
-
-    factor = _BASELINE / scaling  # <1 when scaling > baseline (HiDPI)
-
-    def _s(size: int) -> int:
-        return max(8, round(size * factor))
-
-    FONT_NORMAL = ("Segoe UI", _s(14))
-    FONT_BOLD   = ("Segoe UI", _s(14), "bold")
-    FONT_SMALL  = ("Segoe UI", _s(12))
-    FONT_MONO   = ("Courier New", _s(14))
-    FONT_SEP    = ("Segoe UI", _s(12), "bold")
-    FONT_HEADER = ("Segoe UI", _s(12), "bold")
+        pass
 
 # ---------------------------------------------------------------------------
 # Icons (package-relative: src/gui/theme.py -> src/icons)
