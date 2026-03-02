@@ -52,15 +52,21 @@ FONT_MONO   = ("Courier New", 14)
 FONT_SEP    = ("Segoe UI", 12, "bold")
 FONT_HEADER = ("Segoe UI", 12, "bold")
 
-# Pre-scaled convenience sizes used by canvas/ttk widgets in panel files.
-# These mirror the raw point values used throughout the codebase and are
-# updated by init_fonts() to match the display DPI.
-FS9  = 9
-FS10 = 10
-FS11 = 11
-FS12 = 12
-FS13 = 13
-FS16 = 16
+# Pixel sizes for tk.Label / canvas create_text / ttk.Style font= args.
+# Negative values tell Tk to treat them as pixels rather than points,
+# bypassing Tk's own DPI scaling (which would double-scale on HiDPI).
+# init_fonts() converts the point sizes to the correct pixel count for
+# the actual display scaling factor.
+def _pt_to_px(pt: int, scaling: float) -> int:
+    """Convert point size to negative-pixel size for the given tk scaling."""
+    return -max(8, round(pt * scaling))
+
+FS9  = _pt_to_px(9,  1.3333)
+FS10 = _pt_to_px(10, 1.3333)
+FS11 = _pt_to_px(11, 1.3333)
+FS12 = _pt_to_px(12, 1.3333)
+FS13 = _pt_to_px(13, 1.3333)
+FS16 = _pt_to_px(16, 1.3333)
 
 
 def init_fonts(widget) -> None:
@@ -68,8 +74,8 @@ def init_fonts(widget) -> None:
 
     Tk's scaling factor reflects the system/DE DPI setting.  We treat 1.333
     (96 DPI / 72 pt) as the baseline the font sizes were designed for.
-    Higher values (e.g. 2.0 on a 4K display with 2x DE scaling) mean fonts
-    would render too large, so we scale them down proportionally.
+    All FS* sizes are stored as negative pixel values so Tk doesn't
+    apply its own DPI scaling on top.
     """
     global FONT_NORMAL, FONT_BOLD, FONT_SMALL, FONT_MONO, FONT_SEP, FONT_HEADER
     global FS9, FS10, FS11, FS12, FS13, FS16
@@ -79,29 +85,19 @@ def init_fonts(widget) -> None:
     except Exception:
         return  # leave defaults untouched
 
-    # 1.3333 = 96 DPI / 72 pt — the baseline the fonts were designed for
-    baseline = 1.3333
-    if abs(scaling - baseline) < 0.05:
-        return  # close enough, no adjustment needed
+    FONT_NORMAL = ("Segoe UI", _pt_to_px(14, scaling))
+    FONT_BOLD   = ("Segoe UI", _pt_to_px(14, scaling), "bold")
+    FONT_SMALL  = ("Segoe UI", _pt_to_px(12, scaling))
+    FONT_MONO   = ("Courier New", _pt_to_px(14, scaling))
+    FONT_SEP    = ("Segoe UI", _pt_to_px(12, scaling), "bold")
+    FONT_HEADER = ("Segoe UI", _pt_to_px(12, scaling), "bold")
 
-    factor = baseline / scaling  # <1 when scaling > baseline (HiDPI)
-
-    def _s(size: int) -> int:
-        return max(8, round(size * factor))
-
-    FONT_NORMAL = ("Segoe UI", _s(14))
-    FONT_BOLD   = ("Segoe UI", _s(14), "bold")
-    FONT_SMALL  = ("Segoe UI", _s(12))
-    FONT_MONO   = ("Courier New", _s(14))
-    FONT_SEP    = ("Segoe UI", _s(12), "bold")
-    FONT_HEADER = ("Segoe UI", _s(12), "bold")
-
-    FS9  = _s(9)
-    FS10 = _s(10)
-    FS11 = _s(11)
-    FS12 = _s(12)
-    FS13 = _s(13)
-    FS16 = _s(16)
+    FS9  = _pt_to_px(9,  scaling)
+    FS10 = _pt_to_px(10, scaling)
+    FS11 = _pt_to_px(11, scaling)
+    FS12 = _pt_to_px(12, scaling)
+    FS13 = _pt_to_px(13, scaling)
+    FS16 = _pt_to_px(16, scaling)
 
 # ---------------------------------------------------------------------------
 # Icons (package-relative: src/gui/theme.py -> src/icons)
