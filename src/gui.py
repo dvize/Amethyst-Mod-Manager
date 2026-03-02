@@ -28,6 +28,19 @@ if not os.environ.get("MOD_MANAGER_GAMES"):
             continue
         break
 
+# Override Xft.dpi to 96 before Tk initialises so font rasterisation ignores
+# the OS global scaling setting (e.g. 200% sets Xft.dpi=192, doubling fonts).
+try:
+    subprocess.run(
+        ["xrdb", "-merge"],
+        input="Xft.dpi: 96\n",
+        text=True,
+        timeout=2,
+        check=False,
+    )
+except Exception:
+    pass
+
 import customtkinter as ctk
 
 from gui.theme import ACCENT, ACCENT_HOV, BG_DEEP, BG_HEADER, BG_HOVER, BORDER, FONT_BOLD, FONT_NORMAL, TEXT_MAIN, init_fonts
