@@ -220,6 +220,7 @@ class _UpdateAvailableDialog(ctk.CTkToplevel):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=BG_DEEP)
+        self.tk.call("tk", "scaling", 1.0)
         self.geometry("1400x820")
         self.minsize(900, 600)
         # Thread-safe callback queue — background threads must never call
