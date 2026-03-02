@@ -1043,8 +1043,32 @@ class PluginPanel(ctk.CTkFrame):
             self._data_tree.insert("", "end",
                 text="(filemap.txt not found)", values=("",))
             return
-        self._data_filemap_entries = self._parse_filemap(filemap_path)
+        raw_entries = self._parse_filemap(filemap_path)
+        self._data_filemap_entries = self._resolve_data_entries(raw_entries)
         self._build_data_tree_from_entries(self._data_filemap_entries)
+
+    def _resolve_data_entries(self, entries):
+        """For UE5 games, prefix each entry's path with its resolved deploy destination
+        so the Data tab shows where files will actually land in the game."""
+        from Games.ue5_game import UE5Game
+        game = self._game
+        if not isinstance(game, UE5Game):
+            return entries
+        resolved = []
+        for rel_path, mod_name in entries:
+            rule = game._match_rule(rel_path)
+            if rule is not None:
+                dest = rule.dest
+                final_rel = game._apply_strip(rel_path, rule.strip)
+            else:
+                dest = game.ue5_default_dest
+                final_rel = rel_path.replace("\\", "/")
+            if dest:
+                full_path = dest + "/" + final_rel
+            else:
+                full_path = final_rel
+            resolved.append((full_path, mod_name))
+        return resolved
 
     @staticmethod
     def _parse_filemap(filemap_path: Path):
