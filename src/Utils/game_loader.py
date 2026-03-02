@@ -23,7 +23,7 @@ from pathlib import Path
 
 from Games.base_game import BaseGame
 
-_EXCLUDED_STEMS   = {"__init__", "base_game"}
+_EXCLUDED_STEMS   = {"__init__", "base_game", "ue5_game"}
 _EXCLUDED_FOLDERS = {"Example"}
 
 # Cache so we keep using the same path even if cwd changes later (e.g. after os.chdir in install_mod)
