@@ -217,11 +217,17 @@ class PluginPanel(ctk.CTkFrame):
                 
         refresh_icon = _load_icon("refresh.png", size=(16, 16))
         ctk.CTkButton(
-            exe_bar, text="" if refresh_icon else "↺", image=refresh_icon,  
+            exe_bar, text="" if refresh_icon else "↺", image=refresh_icon,
             width=30, height=30, font=_theme.FONT_SMALL,
             fg_color=BG_PANEL, hover_color=BG_HOVER, text_color=TEXT_MAIN,
             command=self.refresh_exe_list,
         ).pack(side="left", padx=4, pady=6)
+
+        ctk.CTkButton(
+            exe_bar, text="📂", width=30, height=30, font=_theme.FONT_SMALL,
+            fg_color=BG_PANEL, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._open_applications_folder,
+        ).pack(side="left", padx=(0, 4), pady=6)
 
         self._tabs = ctk.CTkTabview(
             self, fg_color=BG_PANEL, corner_radius=4,
@@ -461,6 +467,26 @@ class PluginPanel(ctk.CTkFrame):
         if not game_exe_name:
             return False
         return exe_path.name.lower() == Path(game_exe_name).name.lower()
+
+    def _open_applications_folder(self) -> None:
+        """Open the Profiles/<game>/Applications folder in the file manager."""
+        if self._game is None:
+            self._log("Open Applications folder: no game selected.")
+            return
+        staging = (
+            self._game.get_mod_staging_path()
+            if hasattr(self._game, "get_mod_staging_path") else None
+        )
+        if staging is None:
+            self._log("Open Applications folder: could not determine staging path.")
+            return
+        apps_dir = staging.parent / "Applications"
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(apps_dir)])
+        except Exception as e:
+            self._log(f"Could not open Applications folder: {e}")
 
     def _get_custom_exes_path(self) -> "Path | None":
         """Return path to <game>/Applications/custom_exes.json, or None if no game."""
