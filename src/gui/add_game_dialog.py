@@ -688,19 +688,15 @@ class AddGameDialog(ctk.CTkToplevel):
             return
 
         # Find the directory that actually contains deployed files.
-        # Use get_mod_data_path() only when it points to a subdirectory of the
-        # game root (e.g. Bethesda/BepInEx Data/ folder).  For UE5 games that
-        # scatter files across multiple locations under the game root, scan the
-        # game root itself so nothing is missed.
+        # get_mod_data_path() is the authoritative deploy destination:
+        #   - Bethesda/BepInEx: a Data/ subdir under game_path
+        #   - BG3/Sims 4: the Proton prefix AppData folder (outside game_path)
+        #   - UE5: returns game_path itself (caught by the != check below)
         target_dir = game_path
         if hasattr(self._game, "get_mod_data_path"):
             data_path = self._game.get_mod_data_path()
             if data_path and data_path != game_path:
-                try:
-                    data_path.relative_to(game_path)  # confirms it's a subdir
-                    target_dir = data_path
-                except ValueError:
-                    pass  # not under game_path — fall back to game_path
+                target_dir = data_path
 
         if not target_dir or not target_dir.is_dir():
             return
@@ -712,6 +708,9 @@ class AddGameDialog(ctk.CTkToplevel):
 
         from Utils.deploy import remove_deployed_files
         removed = remove_deployed_files(target_dir)
+
+        if hasattr(self._game, "post_clean_game_folder"):
+            self._game.post_clean_game_folder()
 
         # Brief status update on the dialog's status label
         self._status_label.configure(

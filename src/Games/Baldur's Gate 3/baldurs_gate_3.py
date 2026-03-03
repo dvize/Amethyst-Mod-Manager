@@ -315,3 +315,10 @@ class BaldursGate3(BaseGame):
         write_vanilla_modsettings(modsettings, log_fn=_log)
 
         _log("Restore complete.")
+
+    def post_clean_game_folder(self, log_fn=None) -> None:
+        """Reset modsettings.lsx to vanilla after Clean Game Folder."""
+        if self._prefix_path is None:
+            return
+        modsettings = self._prefix_path / _MODSETTINGS_SUBPATH
+        write_vanilla_modsettings(modsettings, log_fn=log_fn)

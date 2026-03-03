@@ -517,3 +517,9 @@ class BaseGame(ABC):
         if data_path is not None and not data_path.exists():
             errors.append(f"Mod data directory does not exist: {data_path}")
         return errors
+
+    def post_clean_game_folder(self, log_fn=None) -> None:
+        """Called after Clean Game Folder removes deployed files.
+        Override in game handlers that need extra cleanup (e.g. resetting
+        modsettings.lsx to vanilla for BG3).
+        """
