@@ -86,6 +86,23 @@ class Subnautica(BaseGame):
     def loot_masterlist_url(self) -> str:
         return ""
 
+    @property
+    def wizard_tools(self) -> list[WizardTool]:
+        return [
+            WizardTool(
+                id="install_bepinex_subnautica",
+                label="Install BepInEx",
+                description="Download and install BepInEx into the game folder.",
+                dialog_class_path="wizards.bepinex.BepInExWizard",
+                extra={
+                    "download_url": "https://www.nexusmods.com/subnautica/mods/1108?tab=files",
+                    "archive_keywords": ["bepinex", "subnautica"],
+                    "inner_folder": "",
+                    "chmod_files": [],
+                },
+            ),
+        ]
+
     # -----------------------------------------------------------------------
     # Paths
     # -----------------------------------------------------------------------
@@ -257,11 +274,6 @@ class Subnautica(BaseGame):
             _log(f"Restore: clearing {plugins_dir.name}/ and moving {core}/ back ...")
             restored = restore_data_core(plugins_dir, core_dir=core_dir, overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log)
             _log(f"  Restored {restored} file(s). {core}/ removed.")
-        elif plugins_dir.is_dir():
-            _log(f"Restore: no {core}/ found — clearing {plugins_dir.name}/ ...")
-            from Utils.deploy import _clear_dir
-            removed = _clear_dir(plugins_dir)
-            _log(f"  Removed {removed} file(s) from {plugins_dir.name}/.")
 
         _log("Restore complete.")
         
@@ -291,6 +303,23 @@ class Subnautica_Below_Zero(Subnautica):
     def nexus_game_domain(self) -> str:
         return "subnauticabelowzero"
 
+    @property
+    def wizard_tools(self) -> list[WizardTool]:
+        return [
+            WizardTool(
+                id="install_bepinex_subnautica_below_zero",
+                label="Install BepInEx",
+                description="Download and install BepInEx into the game folder.",
+                dialog_class_path="wizards.bepinex.BepInExWizard",
+                extra={
+                    "download_url": "https://www.nexusmods.com/subnauticabelowzero/mods/344?tab=files",
+                    "archive_keywords": ["bepinex", "subnautica", "below"],
+                    "inner_folder": "",
+                    "chmod_files": [],
+                },
+            ),
+        ]
+
 
 class TCG_Card_Shop_Simulator(Subnautica):
 
@@ -318,6 +347,23 @@ class TCG_Card_Shop_Simulator(Subnautica):
     def nexus_game_domain(self) -> str:
         return "tcgcardshopsimulator"
 
+    @property
+    def wizard_tools(self) -> list[WizardTool]:
+        return [
+            WizardTool(
+                id="install_bepinex_tcg",
+                label="Install BepInEx",
+                description="Download and install BepInEx into the game folder.",
+                dialog_class_path="wizards.bepinex.BepInExWizard",
+                extra={
+                    "download_url": "https://www.nexusmods.com/tcgcardshopsimulator/mods/2?tab=files",
+                    "archive_keywords": ["bepinex", "configuration"],
+                    "inner_folder": "",
+                    "chmod_files": [],
+                },
+            ),
+        ]
+
 class Lethal_Company(Subnautica):
 
     @property
@@ -343,6 +389,23 @@ class Lethal_Company(Subnautica):
     @property
     def nexus_game_domain(self) -> str:
         return "lethalcompany"
+
+    @property
+    def wizard_tools(self) -> list[WizardTool]:
+        return [
+            WizardTool(
+                id="install_bepinex_lethal_company",
+                label="Install BepInEx",
+                description="Download and install BepInEx into the game folder.",
+                dialog_class_path="wizards.bepinex.BepInExWizard",
+                extra={
+                    "download_url": "https://www.nexusmods.com/lethalcompany/mods/42?tab=files",
+                    "archive_keywords": ["bepinex"],
+                    "inner_folder": "",
+                    "chmod_files": [],
+                },
+            ),
+        ]
 
 class Valheim(Subnautica):
     @property
