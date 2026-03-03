@@ -43,6 +43,7 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 - Mewgenics
 - Stardew Valley
 - Kingdom Come Deliverance (1 and 2)
+- Hogwarts Legacy
 - Subnautica
 - Subnautica Below Zero
 - The Sims 4
