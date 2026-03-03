@@ -61,6 +61,21 @@ else
     echo "  WARNING: libarchive.so not found on system — install libarchive-dev"
 fi
 
+# ── Step 4b: Bundle 7-Zip static binary ──────────────────────────────
+# 7zzs is a fully static build from the official ip7z/7zip project.
+# It handles BCJ2 and all modern 7z compression methods with no .so deps.
+echo "=== Bundling 7-Zip (7zzs) ==="
+SEVENZIP_URL="https://github.com/ip7z/7zip/releases/download/26.00/7z2600-linux-x64.tar.xz"
+SEVENZIP_TAR="${BUILD_DIR}/7z-linux-x64.tar.xz"
+SEVENZIP_TMP="${BUILD_DIR}/7z-tmp"
+mkdir -p "${APPDIR}/usr/bin" "$SEVENZIP_TMP"
+wget -q -O "$SEVENZIP_TAR" "$SEVENZIP_URL"
+tar -xf "$SEVENZIP_TAR" -C "$SEVENZIP_TMP"
+cp "$SEVENZIP_TMP/7zzs" "${APPDIR}/usr/bin/7zzs"
+chmod +x "${APPDIR}/usr/bin/7zzs"
+rm -rf "$SEVENZIP_TAR" "$SEVENZIP_TMP"
+echo "  Bundled: 7zzs ($(du -h "${APPDIR}/usr/bin/7zzs" | cut -f1))"
+
 # ── Step 5: Copy application code ────────────────────────────────────
 echo "=== Copying application code ==="
 APP_DIR="${APPDIR}/usr/app"
@@ -78,7 +93,7 @@ find "$APP_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || tru
 
 # ── Step 6: Verify LOOT native library ───────────────────────────────
 echo "=== Verifying LOOT native library ==="
-LOOT_SO="$APP_DIR/LOOT/lib/loot/loot.cpython-313-x86_64-linux-gnu.so"
+LOOT_SO="$APP_DIR/LOOT/loot.cpython-313-x86_64-linux-gnu.so"
 if [ -f "$LOOT_SO" ]; then
     echo "  Found: $(basename "$LOOT_SO") ($(du -h "$LOOT_SO" | cut -f1))"
 else

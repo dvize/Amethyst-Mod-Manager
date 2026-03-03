@@ -250,7 +250,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             except Exception as e7:
                 log_fn(f"py7zr failed ({e7}), retrying with 7z…")
             if not _7z_done:
-                _7z_bin = shutil.which("7z") or shutil.which("7za")
+                _7z_bin = shutil.which("7zzs") or shutil.which("7z") or shutil.which("7za")
                 if _7z_bin:
                     shutil.rmtree(extract_dir, ignore_errors=True)
                     os.makedirs(extract_dir, exist_ok=True)

@@ -7,6 +7,9 @@ PYTHON_PREFIX="${APPDIR}/opt/python3.13"
 # Library path for bundled shared libs
 export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
 
+# Bundled binaries (7zzs, etc.)
+export PATH="${APPDIR}/usr/bin:${PATH}"
+
 # Tcl/Tk paths (bundled with python-appimage)
 export TCL_LIBRARY="${APPDIR}/usr/share/tcltk/tcl8.6"
 export TK_LIBRARY="${APPDIR}/usr/share/tcltk/tk8.6"
