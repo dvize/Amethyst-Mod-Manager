@@ -306,6 +306,29 @@ class BaseGame(ABC):
         return ""
 
     @property
+    def wine_dll_overrides(self) -> dict[str, str]:
+        """
+        Wine DLL overrides to apply to the Proton prefix on every deploy.
+
+        Maps DLL name → load order string using Wine's notation:
+          ``"native,builtin"``  — try the Windows DLL first, then Wine's
+          ``"native"``          — Windows DLL only
+          ``"builtin"``         — Wine's built-in only
+          ``"disabled"``        — block the DLL entirely
+
+        These are written into ``user.reg`` under
+        ``[Software\\\\Wine\\\\DllOverrides]`` each time ``deploy()`` runs,
+        so users do not need to configure winecfg manually.
+
+        Example (BepInEx)::
+
+            return {"winhttp": "native,builtin"}
+
+        Return an empty dict (the default) to leave the prefix unchanged.
+        """
+        return {}
+
+    @property
     def restore_before_deploy(self) -> bool:
         """
         When True (the default), the GUI runs restore() before deploy() when

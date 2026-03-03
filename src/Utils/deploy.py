@@ -902,3 +902,103 @@ def _resolve_nocase(root: Path, rel_str: str,
     if current.is_file():
         return current
     return None
+
+
+# ---------------------------------------------------------------------------
+# Wine / Proton prefix helpers
+# ---------------------------------------------------------------------------
+
+def apply_wine_dll_overrides(
+    prefix_path: Path,
+    overrides: dict[str, str],
+    log_fn=None,
+) -> None:
+    """Write DLL override entries into the Proton prefix's user.reg.
+
+    *prefix_path* is the ``pfx/`` directory (the one that contains
+    ``drive_c/`` and ``user.reg``).
+
+    *overrides* maps DLL name → load order string, e.g.
+    ``{"winhttp": "native,builtin"}``.
+
+    The function locates (or creates) the
+    ``[Software\\\\Wine\\\\DllOverrides]`` section in ``user.reg`` and
+    inserts/updates each key.  The file is written atomically so a crash
+    mid-write cannot corrupt the prefix.
+
+    If *prefix_path* does not exist or ``user.reg`` cannot be read the
+    call is a silent no-op (logged as a warning).
+    """
+    _log = log_fn or (lambda _: None)
+
+    if not overrides:
+        return
+
+    user_reg = prefix_path / "user.reg"
+    if not user_reg.is_file():
+        _log(f"Warning: user.reg not found at {user_reg}; skipping DLL overrides.")
+        return
+
+    try:
+        text = user_reg.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        _log(f"Warning: could not read user.reg: {exc}")
+        return
+
+    lines = text.splitlines(keepends=True)
+    section_header = "[Software\\\\Wine\\\\DllOverrides]"
+
+    # Locate the section (case-insensitive header match)
+    section_start: int | None = None
+    section_end: int | None = None  # index of first line after this section
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == section_header.lower():
+            section_start = i
+        elif section_start is not None and stripped.startswith("["):
+            section_end = i
+            break
+
+    if section_start is None:
+        # Section doesn't exist — append it at the end
+        _log(f"[Software\\\\Wine\\\\DllOverrides] not found; appending to user.reg.")
+        if lines and not lines[-1].endswith("\n"):
+            lines.append("\n")
+        lines.append("\n")
+        lines.append(section_header + "\n")
+        for dll, value in overrides.items():
+            lines.append(f'"{dll}"="{value}"\n')
+            _log(f"  DLL override set: {dll} = {value}")
+    else:
+        # Section exists — find existing keys and add/update
+        body_start = section_start + 1
+        body_end = section_end if section_end is not None else len(lines)
+        # Skip the #time= line if present right after the header
+        key_lines = lines[body_start:body_end]
+
+        for dll, value in overrides.items():
+            key_lower = f'"{dll.lower()}"'
+            found = False
+            for j, kline in enumerate(key_lines):
+                if kline.lower().startswith(key_lower + "="):
+                    key_lines[j] = f'"{dll}"="{value}"\n'
+                    found = True
+                    _log(f"  DLL override updated: {dll} = {value}")
+                    break
+            if not found:
+                key_lines.append(f'"{dll}"="{value}"\n')
+                _log(f"  DLL override set: {dll} = {value}")
+
+        lines[body_start:body_end] = key_lines
+
+    # Atomic write via temp file → rename
+    tmp = user_reg.with_suffix(".reg.tmp")
+    try:
+        tmp.write_text("".join(lines), encoding="utf-8")
+        tmp.replace(user_reg)
+    except OSError as exc:
+        _log(f"Warning: could not write user.reg: {exc}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass

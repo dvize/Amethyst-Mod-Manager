@@ -14,7 +14,7 @@ from pathlib import Path
 import stat
 
 from Games.base_game import BaseGame, WizardTool
-from Utils.deploy import LinkMode, deploy_core, deploy_filemap, load_per_mod_strip_prefixes, move_to_core, restore_data_core
+from Utils.deploy import LinkMode, apply_wine_dll_overrides, deploy_core, deploy_filemap, load_per_mod_strip_prefixes, move_to_core, restore_data_core
 from Utils.config_paths import get_profiles_dir
 from Utils.steam_finder import find_prefix
 
@@ -69,6 +69,10 @@ class Subnautica(BaseGame):
     @property
     def plugin_extensions(self) -> list[str]:
         return []
+
+    @property
+    def wine_dll_overrides(self) -> dict[str, str]:
+        return {"winhttp": "native,builtin"}
 
     @property
     def loot_sort_enabled(self) -> bool:
@@ -233,6 +237,10 @@ class Subnautica(BaseGame):
             f"{linked_mod} mod + {linked_core} vanilla "
             f"= {linked_mod + linked_core} total file(s) in {plugins_dir.name}/."
         )
+
+        if self._prefix_path and self.wine_dll_overrides:
+            _log("Applying Wine DLL overrides to Proton prefix ...")
+            apply_wine_dll_overrides(self._prefix_path, self.wine_dll_overrides, log_fn=_log)
 
     def restore(self, log_fn=None, progress_fn=None) -> None:
         """Restore BepInEx/Plugins/ to its vanilla state."""
