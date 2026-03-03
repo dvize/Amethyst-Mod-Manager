@@ -529,9 +529,9 @@ class App(ctk.CTk):
 
         main = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         main.grid(row=1, column=0, sticky="nsew")
-        main.grid_columnconfigure(0, weight=3)
+        main.grid_columnconfigure(0, weight=5)
         main.grid_columnconfigure(1, weight=0)
-        main.grid_columnconfigure(2, weight=2)
+        main.grid_columnconfigure(2, weight=4, minsize=480)
         main.grid_rowconfigure(0, weight=1)
 
         self._mod_panel = ModListPanel(main, log_fn=log)
