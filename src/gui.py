@@ -103,7 +103,8 @@ def _run_installer():
         f"curl -sSL {_APP_UPDATE_INSTALLER_URL} -o \"$SCRIPT\" && "
         f"chmod +x \"$SCRIPT\" && "
         f"bash \"$SCRIPT\" && "
-        f"rm -f \"$SCRIPT\""
+        f"rm -f \"$SCRIPT\" && "
+        f"nohup \"$HOME/Applications/AmethystModManager-x86_64.AppImage\" &>/dev/null &"
     )
 
     # Build a clean environment: start from the current env then strip every
