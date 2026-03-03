@@ -3,10 +3,11 @@ py7zr
 libarchive-c
 Pillow
 lz4
+zstandard
 requests
 websocket-client
 keyring
 importlib_metadata
 backports.tarfile
 importlib_metadata
-PyGObject
+# PyGObject is a system package (python-gobject); accessed via --system-site-packages

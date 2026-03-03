@@ -5,6 +5,7 @@ py7zr
 libarchive-c
 Pillow
 lz4
+zstandard
 requests
 websocket-client
 keyring

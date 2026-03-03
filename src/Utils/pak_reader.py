@@ -20,7 +20,7 @@ File entry layout (272 bytes each):
     4B  offset_low   (uint32)
     2B  offset_high  (uint16)  → full offset = offset_low | (offset_high << 32)
     1B  archive_part
-    1B  flags        (lower nibble: 0=None, 1=Zlib, 2=LZ4)
+    1B  flags        (lower nibble: 0=None, 1=Zlib, 2=LZ4, 3=LZ4HC)
     4B  size_on_disk
     4B  uncompressed_size
 """
@@ -36,6 +36,13 @@ try:
 except ImportError:
     _lz4 = None  # type: ignore[assignment]
 
+try:
+    import zstandard as _zstd
+except ImportError:
+    _zstd = None  # type: ignore[assignment]
+
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"  # 0xFD2FB528 little-endian
+
 _LSPK_SIGNATURE = 0x4B50534C  # "LSPK" little-endian
 _HEADER_SIZE = 40
 _ENTRY_SIZE = 272
@@ -49,16 +56,67 @@ def _require_lz4() -> None:
         )
 
 
+def _lz4_decompress_resilient(data: bytes, uncompressed_size: int) -> bytes:
+    """Decompress LZ4 data, retrying with larger buffers if the stored size is wrong.
+
+    Some mod authors produce PAK files where the stored uncompressed_size is
+    zero, too small, or otherwise inaccurate.  We first try relative multiples
+    of the stored value, then fall back to a range of absolute sizes so that
+    even a completely wrong hint still succeeds.
+    """
+    candidates: list[int] = []
+
+    if uncompressed_size > 0:
+        # Try the stored hint and small multiples first.
+        for mult in (1, 2, 4, 8, 16, 32):
+            candidates.append(uncompressed_size * mult)
+
+    # Absolute fallback sizes: 64 KB → 128 MB in powers of two.
+    for exp in range(16, 28):  # 65536 … 134217728
+        candidates.append(1 << exp)
+
+    last_exc: Exception | None = None
+    seen: set[int] = set()
+    for size in candidates:
+        if size in seen:
+            continue
+        seen.add(size)
+        try:
+            return _lz4.decompress(data, uncompressed_size=size)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+    raise ValueError(f"LZ4 decompression failed after retries: {last_exc}") from last_exc
+
+
 def _decompress(data: bytes, flags: int, uncompressed_size: int) -> bytes:
-    """Decompress a chunk according to LSPK compression flags."""
+    """Decompress a chunk according to LSPK compression flags.
+
+    Newer versions of Larian's packing tools use zstd for entries even when
+    the flags field may nominally indicate LZ4/LZ4HC (method 3 was reassigned
+    to zstd in recent tooling).  We detect by magic bytes so both old and new
+    archives work correctly.
+    """
     method = flags & 0x0F
     if method == 0:
         return data
     if method == 1:
         return zlib.decompress(data)
-    if method == 2:
+    # Magic-byte detection overrides the stored method: newer Larian tools
+    # write zstd-compressed data regardless of the flag nibble value.
+    if len(data) >= 4 and data[:4] == _ZSTD_MAGIC:
+        if _zstd is None:
+            raise ImportError(
+                "The 'zstandard' package is required to read this .pak file.\n"
+                "Install it with:  pip install zstandard"
+            )
+        dctx = _zstd.ZstdDecompressor()
+        max_out = max(uncompressed_size * 4, 1 << 20)  # at least 1 MiB headroom
+        return dctx.decompress(data, max_output_size=max_out)
+    if method in (2, 3):
+        # 2 = LZ4, 3 = LZ4HC — decompression is identical for both
         _require_lz4()
-        return _lz4.decompress(data, uncompressed_size=uncompressed_size)
+        return _lz4_decompress_resilient(data, uncompressed_size)
     raise ValueError(f"Unknown LSPK compression method: {method}")
 
 
@@ -92,9 +150,7 @@ def extract_meta_lsx(pak_path: Path | str) -> str | None:
         compressed_data = f.read(compressed_size)
 
         uncompressed_size = num_files * _ENTRY_SIZE
-        file_list = _lz4.decompress(
-            compressed_data, uncompressed_size=uncompressed_size
-        )
+        file_list = _lz4_decompress_resilient(compressed_data, uncompressed_size)
 
         # -- Scan entries for meta.lsx ----------------------------------------
         for i in range(num_files):
@@ -117,6 +173,21 @@ def extract_meta_lsx(pak_path: Path | str) -> str | None:
             f.seek(file_offset)
             raw = f.read(size_on_disk)
             content = _decompress(raw, entry_flags, unc_size)
-            return content.decode("utf-8")
+
+            # Some PAK files store meta.lsx wrapped in an additional zlib
+            # layer (magic bytes 0x78 0x9C / 0x78 0x01 / 0x78 0xDA).
+            if len(content) >= 2 and content[0] == 0x78 and content[1] in (
+                0x01, 0x5E, 0x9C, 0xDA
+            ):
+                try:
+                    content = zlib.decompress(content)
+                except zlib.error:
+                    pass  # not actually zlib; decode as-is
+
+            try:
+                return content.decode("utf-8")
+            except UnicodeDecodeError:
+                # Last resort: latin-1 is lossless for arbitrary bytes.
+                return content.decode("latin-1")
 
     return None
