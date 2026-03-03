@@ -18,6 +18,7 @@
 - **FOMOD support** — Full Fomod support with last selections saved.
 - **LOOT support** — Plugins for games that use LOOT can be sorted using LOOT.
 - **Nexus API Support** — Integration with features provided by the Nexus Mods Api
+- **Root Folder builder** — Files placed in the managers root folder separator are deployed to the games root folder and cleaned up on restore.
 
 ## Install
 
@@ -46,6 +47,7 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 - Hogwarts Legacy
 - Subnautica
 - Subnautica Below Zero
+- Resident Evil Requiem
 - The Sims 4
 - Tcg Card Shop Simulator
 - Valheim
@@ -85,6 +87,7 @@ The manager supports many supporting applications used to mod games. Place the a
 | Working | **Synthesis** | Requires .net10 sdk and .net5 runtime installed into the prefix (Use the proton tools window to do this) |
 | Working | **Bodyslide and Outfits Studio** | Add as a mod > Deploy > refresh the exe list > Run the exe and it should work |
 | Working | **Witcher 3 Script merger** | Game path added to config automatically |
+| Working | **Witcher 3 Script merger Fresh and Automated Edition** | Game path added to config automatically. Requires .net 8 Runtime installed into the prefix |
 
 The other xedit applications for the other games also work as well as the quickautoclean applications.
 
