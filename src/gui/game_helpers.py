@@ -65,7 +65,21 @@ def _profiles_for_game(game_name: str) -> list[str]:
     return names if names else ["default"]
 
 
-def _create_profile(game_name: str, profile_name: str) -> Path:
+def profile_uses_specific_mods(profile_dir: Path) -> bool:
+    """Return True if this profile stores its own mods folder inside itself."""
+    settings_path = profile_dir / "profile_settings.json"
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        return bool(data.get("profile_specific_mods", False))
+    except (OSError, ValueError):
+        return False
+
+
+def _create_profile(
+    game_name: str,
+    profile_name: str,
+    profile_specific_mods: bool = False,
+) -> Path:
     """Create a new profile folder, copying modlist.txt from default."""
     game = _GAMES.get(game_name)
     if game is not None:
@@ -79,11 +93,26 @@ def _create_profile(game_name: str, profile_name: str) -> Path:
         plugins.touch()
     modlist = profile_dir / "modlist.txt"
     if not modlist.exists():
-        default_modlist = profiles_root / "profiles" / "default" / "modlist.txt"
-        if default_modlist.exists():
-            shutil.copy2(default_modlist, modlist)
-        else:
+        if profile_specific_mods:
+            # Profile-specific mods folder starts empty — don't inherit the
+            # default modlist which references the shared mods directory.
             modlist.touch()
+        else:
+            default_modlist = profiles_root / "profiles" / "default" / "modlist.txt"
+            if default_modlist.exists():
+                shutil.copy2(default_modlist, modlist)
+            else:
+                modlist.touch()
+    if profile_specific_mods:
+        settings_path = profile_dir / "profile_settings.json"
+        settings_path.write_text(
+            json.dumps({"profile_specific_mods": True}, indent=2),
+            encoding="utf-8",
+        )
+        # Create the profile-specific mods and overwrite directories up front
+        # so they exist as soon as the profile is selected.
+        (profile_dir / "mods").mkdir(exist_ok=True)
+        (profile_dir / "overwrite").mkdir(exist_ok=True)
     return profile_dir
 
 

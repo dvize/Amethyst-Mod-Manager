@@ -207,8 +207,8 @@ class ResidentEvilRequiem(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         reframework_dir = self._game_path / self.mods_dir
-        filemap = self.get_profile_root() / "filemap.txt"
-        staging = self.get_mod_staging_path()
+        filemap = self.get_effective_filemap_path()
+        staging = self.get_effective_mod_staging_path()
         core = self.mods_dir + "_Core"
 
         if not filemap.is_file():
@@ -263,7 +263,7 @@ class ResidentEvilRequiem(BaseGame):
         _log(f"Restore: clearing {reframework_dir.name}/ and moving {core}/ back if present ...")
         restored = restore_data_core(
             reframework_dir, core_dir=core_dir,
-            overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log
+            overwrite_dir=self.get_effective_overwrite_path(), log_fn=_log
         )
         if restored > 0:
             _log(f"  Restored {restored} file(s). {core}/ removed.")

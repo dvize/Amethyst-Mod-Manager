@@ -294,7 +294,7 @@ class PluginPanel(ctk.CTkFrame):
                     exes.append(candidate)
 
             staging = (
-                self._game.get_mod_staging_path()
+                self._game.get_effective_mod_staging_path()
                 if hasattr(self._game, "get_mod_staging_path") else None
             )
 
@@ -352,7 +352,7 @@ class PluginPanel(ctk.CTkFrame):
         # Sort: game exe first, then Applications/, then custom/filemap entries, alpha within each
         apps_dir_root = None
         if self._game and hasattr(self._game, "get_mod_staging_path"):
-            staging = self._game.get_mod_staging_path()
+            staging = self._game.get_effective_mod_staging_path()
             apps_dir_root = staging.parent / "Applications"
 
         custom_set = set(self._load_custom_exes())
@@ -433,7 +433,7 @@ class PluginPanel(ctk.CTkFrame):
         if self._game is None:
             return None
         staging = (
-            self._game.get_mod_staging_path()
+            self._game.get_effective_mod_staging_path()
             if hasattr(self._game, "get_mod_staging_path") else None
         )
         if staging is None:
@@ -499,7 +499,7 @@ class PluginPanel(ctk.CTkFrame):
             self._log("Open Applications folder: no game selected.")
             return
         staging = (
-            self._game.get_mod_staging_path()
+            self._game.get_effective_mod_staging_path()
             if hasattr(self._game, "get_mod_staging_path") else None
         )
         if staging is None:
@@ -518,7 +518,7 @@ class PluginPanel(ctk.CTkFrame):
         if self._game is None:
             return None
         staging = (
-            self._game.get_mod_staging_path()
+            self._game.get_effective_mod_staging_path()
             if hasattr(self._game, "get_mod_staging_path") else None
         )
         if staging is None:
@@ -706,7 +706,7 @@ class PluginPanel(ctk.CTkFrame):
                     restore_root_folder(root_folder_dir, game_root, log_fn=_tlog)
 
                 profile_root = game.get_profile_root()
-                staging = game.get_mod_staging_path()
+                staging = game.get_effective_mod_staging_path()
                 modlist_path = profile_root / "profiles" / profile / "modlist.txt"
                 filemap_out = profile_root / "filemap.txt"
                 if modlist_path.is_file():
@@ -954,7 +954,7 @@ class PluginPanel(ctk.CTkFrame):
             return
 
         staging = (
-            game.get_mod_staging_path()
+            game.get_effective_mod_staging_path()
             if hasattr(game, "get_mod_staging_path") else None
         )
         if staging is None:
@@ -989,7 +989,7 @@ class PluginPanel(ctk.CTkFrame):
             return
 
         staging = (
-            game.get_mod_staging_path()
+            game.get_effective_mod_staging_path()
             if hasattr(game, "get_mod_staging_path") else None
         )
         if staging is None:
@@ -1025,7 +1025,7 @@ class PluginPanel(ctk.CTkFrame):
             return
 
         staging = (
-            game.get_mod_staging_path()
+            game.get_effective_mod_staging_path()
             if hasattr(game, "get_mod_staging_path") else None
         )
         if staging is None:
@@ -1366,7 +1366,7 @@ class PluginPanel(ctk.CTkFrame):
                             raw_stem = os.path.splitext(raw_stem)[0]
                         suggestions = suggest_mod_names(raw_stem)
                         folder_name = suggestions[0] if suggestions else raw_stem
-                        meta_path = (game.get_mod_staging_path()
+                        meta_path = (game.get_effective_mod_staging_path()
                                      / folder_name / "meta.ini")
                         if meta_path.parent.is_dir():
                             write_meta(meta_path, meta)
@@ -1537,7 +1537,7 @@ class PluginPanel(ctk.CTkFrame):
                             raw_stem = os.path.splitext(raw_stem)[0]
                         suggestions = suggest_mod_names(raw_stem)
                         folder_name = suggestions[0] if suggestions else raw_stem
-                        meta_path = (game.get_mod_staging_path()
+                        meta_path = (game.get_effective_mod_staging_path()
                                      / folder_name / "meta.ini")
                         if meta_path.parent.is_dir():
                             write_meta(meta_path, meta)
@@ -1699,7 +1699,7 @@ class PluginPanel(ctk.CTkFrame):
                             raw_stem = os.path.splitext(raw_stem)[0]
                         suggestions = suggest_mod_names(raw_stem)
                         folder_name = suggestions[0] if suggestions else raw_stem
-                        meta_path = (game.get_mod_staging_path()
+                        meta_path = (game.get_effective_mod_staging_path()
                                      / folder_name / "meta.ini")
                         if meta_path.parent.is_dir():
                             write_meta(meta_path, meta)
@@ -1916,7 +1916,7 @@ class PluginPanel(ctk.CTkFrame):
             return
 
         game_path = game.get_game_path()
-        staging_root = game.get_mod_staging_path()
+        staging_root = game.get_effective_mod_staging_path()
 
         # Ensure vanilla plugins are present in the in-memory list before
         # sorting (they are never written to plugins.txt).

@@ -384,7 +384,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             file_list = _resolve_direct_files(extract_dir)
             log_fn(f"Direct install — {len(file_list)} file(s) to install.")
 
-        dest_root = game.get_mod_staging_path() / mod_name
+        dest_root = game.get_effective_mod_staging_path() / mod_name
         replace_selected_only = False
         replace_all = False
         if dest_root.exists():
@@ -456,7 +456,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         if post_strip_prefixes:
             file_list = _apply_strip_prefixes_to_file_list(file_list, post_strip_prefixes)
 
-        dest_root = game.get_mod_staging_path() / mod_name
+        dest_root = game.get_effective_mod_staging_path() / mod_name
         was_existing_mod = dest_root.exists()
         if replace_all and dest_root.exists():
             shutil.rmtree(dest_root)

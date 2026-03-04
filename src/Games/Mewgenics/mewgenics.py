@@ -211,7 +211,7 @@ class Mewgenics(BaseGame):
         modlist_path = self.get_profile_root() / "profiles" / profile / "modlist.txt"
         if not modlist_path.is_file():
             return "-modpaths"
-        staging = self.get_mod_staging_path().resolve()
+        staging = self.get_effective_mod_staging_path().resolve()
         entries = read_modlist(modlist_path)
         enabled = [e for e in entries if e.enabled and not e.is_separator]
         paths: list[str] = []
@@ -326,7 +326,7 @@ class Mewgenics(BaseGame):
         _log("Unpack complete.")
 
         # 2. Remove modded files (backup vanilla first), then deploy current mods
-        filemap = self.get_profile_root() / "filemap.txt"
+        filemap = self.get_effective_filemap_path()
         backup_dir = self.get_profile_root() / _VANILLA_BACKUP_DIR
         removed = _remove_filemap_paths_from_dir(
             unpack_dir, filemap, _log, progress_fn, phase="Removing mod files",
@@ -337,7 +337,7 @@ class Mewgenics(BaseGame):
         elif filemap.is_file():
             _log("No modded files to remove.")
 
-        staging = self.get_mod_staging_path()
+        staging = self.get_effective_mod_staging_path()
         profile_dir = self.get_profile_root() / "profiles" / profile
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
 
@@ -402,7 +402,7 @@ class Mewgenics(BaseGame):
         _log("Unpack complete.")
 
         # 2. Remove modded files (paths from filemap.txt)
-        filemap = self.get_profile_root() / "filemap.txt"
+        filemap = self.get_effective_filemap_path()
         removed = _remove_filemap_paths_from_dir(
             unpack_dir, filemap, _log, progress_fn, phase="Removing mod files"
         )

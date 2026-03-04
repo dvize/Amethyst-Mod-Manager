@@ -372,8 +372,8 @@ class StandardCustomGame(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         data_dir = self.get_mod_data_path()
-        filemap  = self.get_profile_root() / "filemap.txt"
-        staging  = self.get_mod_staging_path()
+        filemap  = self.get_effective_filemap_path()
+        staging  = self.get_effective_mod_staging_path()
 
         if data_dir is None:
             raise RuntimeError("Mod data path could not be resolved.")
@@ -413,7 +413,7 @@ class StandardCustomGame(BaseGame):
         _log(f"Restore: clearing {data_dir.name}/ and moving {data_dir.name}_Core/ back ...")
         restored = restore_data_core(
             data_dir,
-            overwrite_dir=self.get_profile_root() / "overwrite",
+            overwrite_dir=self.get_effective_overwrite_path(),
             log_fn=_log,
         )
         _log(f"  Restored {restored} file(s). {data_dir.name}_Core/ removed.")
@@ -438,8 +438,8 @@ class RootCustomGame(StandardCustomGame):
             raise RuntimeError("Game path is not configured.")
 
         game_root = self._game_path
-        filemap   = self.get_profile_root() / "filemap.txt"
-        staging   = self.get_mod_staging_path()
+        filemap   = self.get_effective_filemap_path()
+        staging   = self.get_effective_mod_staging_path()
 
         if not filemap.is_file():
             raise RuntimeError(f"filemap.txt not found: {filemap}\nRun 'Build Filemap' before deploying.")
@@ -461,7 +461,7 @@ class RootCustomGame(StandardCustomGame):
         _log = log_fn or (lambda _: None)
         if self._game_path is None:
             raise RuntimeError("Game path is not configured.")
-        filemap   = self.get_profile_root() / "filemap.txt"
+        filemap   = self.get_effective_filemap_path()
         game_root = self._game_path
         _log("Restore: removing mod files and restoring vanilla files ...")
         removed = restore_filemap_from_root(filemap, game_root, log_fn=_log)

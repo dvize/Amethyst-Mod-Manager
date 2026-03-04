@@ -307,9 +307,9 @@ class SkyrimSE(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         data_dir      = self._game_path / "Data"
-        filemap       = self.get_profile_root() / "filemap.txt"
-        staging       = self.get_mod_staging_path()
-        overwrite_dir = self.get_profile_root() / "overwrite"
+        filemap       = self.get_effective_filemap_path()
+        staging       = self.get_effective_mod_staging_path()
+        overwrite_dir = self.get_effective_overwrite_path()
 
         if not data_dir.is_dir():
             raise RuntimeError(f"Data directory not found: {data_dir}")
@@ -364,8 +364,8 @@ class SkyrimSE(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         data_dir      = self._game_path / "Data"
-        staging       = self.get_mod_staging_path()
-        overwrite_dir = self.get_profile_root() / "overwrite"
+        staging       = self.get_effective_mod_staging_path()
+        overwrite_dir = self.get_effective_overwrite_path()
 
         # Move ShaderCache back to overwrite/ before wiping Data/.
         _log("Restore: saving ShaderCache to overwrite/ ...")

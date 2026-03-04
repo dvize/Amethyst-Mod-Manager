@@ -197,8 +197,8 @@ class Witcher3(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         game_root = self._game_path
-        filemap   = self.get_profile_root() / "filemap.txt"
-        staging   = self.get_mod_staging_path()
+        filemap   = self.get_effective_filemap_path()
+        staging   = self.get_effective_mod_staging_path()
 
         if not filemap.is_file():
             raise RuntimeError(
@@ -227,7 +227,7 @@ class Witcher3(BaseGame):
         if self._game_path is None:
             raise RuntimeError("Game path is not configured.")
 
-        filemap   = self.get_profile_root() / "filemap.txt"
+        filemap   = self.get_effective_filemap_path()
         game_root = self._game_path
 
         _log("Restore: removing mod files and restoring vanilla files ...")

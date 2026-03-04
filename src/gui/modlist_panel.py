@@ -137,6 +137,8 @@ class ModListPanel(ctk.CTkFrame):
         self._hover_idx: int = -1         # entry index under the mouse cursor
         self._highlighted_mod: str | None = None  # mod highlighted by plugin panel selection
         self._modlist_path: Path | None = None
+        self._staging_root: Path | None = None
+        self._filemap_path: Path | None = None
         self._strip_prefixes:    set[str] = set()
         self._mod_strip_prefixes: dict[str, list[str]] = {}  # mod name -> top-level folders to ignore
         self._install_extensions: set[str] = set()
@@ -333,6 +335,8 @@ class ModListPanel(ctk.CTkFrame):
         self._game = game
         profile_dir = game.get_profile_root() / "profiles" / profile
         self._modlist_path = profile_dir / "modlist.txt"
+        self._staging_root = game.get_effective_mod_staging_path()
+        self._filemap_path = self._staging_root.parent / "filemap.txt"
         self._strip_prefixes    = game.mod_folder_strip_prefixes | getattr(game, "mod_folder_strip_prefixes_post", set())
         self._install_extensions = getattr(game, "mod_install_extensions", set())
         self._root_deploy_folders = getattr(game, "mod_root_deploy_folders", set())
@@ -831,7 +835,7 @@ class ModListPanel(ctk.CTkFrame):
             self._entries = []
         else:
             # Sync any mods in the mods folder not yet in modlist.txt
-            mods_dir = self._modlist_path.parent.parent.parent / "mods"
+            mods_dir = self._staging_root
             sync_modlist_with_mods_folder(self._modlist_path, mods_dir)
             self._load_root_folder_state()
             self._load_mod_strip_prefixes()
@@ -870,7 +874,7 @@ class ModListPanel(ctk.CTkFrame):
         self._update_mods.clear()
         if self._modlist_path is None:
             return
-        mods_dir = self._modlist_path.parent.parent.parent / "mods"
+        mods_dir = self._staging_root
         if not mods_dir.is_dir():
             return
         for entry in self._entries:
@@ -892,7 +896,7 @@ class ModListPanel(ctk.CTkFrame):
         self._missing_reqs_detail.clear()
         if self._modlist_path is None:
             return
-        mods_dir = self._modlist_path.parent.parent.parent / "mods"
+        mods_dir = self._staging_root
         if not mods_dir.is_dir():
             return
         for entry in self._entries:
@@ -936,7 +940,7 @@ class ModListPanel(ctk.CTkFrame):
         self._endorsed_mods.clear()
         if self._modlist_path is None:
             return
-        mods_dir = self._modlist_path.parent.parent.parent / "mods"
+        mods_dir = self._staging_root
         if not mods_dir.is_dir():
             return
         for entry in self._entries:
@@ -958,7 +962,7 @@ class ModListPanel(ctk.CTkFrame):
         self._install_datetimes.clear()
         if self._modlist_path is None:
             return
-        mods_dir = self._modlist_path.parent.parent.parent / "mods"
+        mods_dir = self._staging_root
         if not mods_dir.is_dir():
             return
         today = datetime.now().date()
@@ -2297,7 +2301,7 @@ class ModListPanel(ctk.CTkFrame):
         mod_folder: Path | None = None
         plugin_files: list[str] = []
         if self._modlist_path is not None:
-            staging_root = self._modlist_path.parent.parent.parent / "mods"
+            staging_root = self._staging_root
             if not is_sep:
                 mod_dir = staging_root / entry.name
                 mod_folder = mod_dir
@@ -2381,7 +2385,7 @@ class ModListPanel(ctk.CTkFrame):
 
         if not is_separator and not is_synthetic and self._modlist_path is not None:
             mod_name_capture = self._entries[idx].name
-            staging_root = self._modlist_path.parent.parent.parent / "mods"
+            staging_root = self._staging_root
             meta_path = staging_root / mod_name_capture / "meta.ini"
             if meta_path.is_file():
                 try:
@@ -2541,10 +2545,10 @@ class ModListPanel(ctk.CTkFrame):
         # Delete the mod folder from staging and drop it from the index
         if self._modlist_path is not None:
             # Staging path is <profiles_root>/<game>/mods/<mod_name>
-            staging = self._modlist_path.parent.parent.parent / "mods" / entry.name
+            staging = self._staging_root / entry.name
             if staging.is_dir():
                 shutil.rmtree(staging)
-            index_path = self._modlist_path.parent.parent.parent / "modindex.txt"
+            index_path = self._staging_root.parent / "modindex.txt"
             remove_from_mod_index(index_path, [entry.name])
         # Remove from lists
         self._entries.pop(idx)
@@ -2603,8 +2607,8 @@ class ModListPanel(ctk.CTkFrame):
         staging_root = None
         index_path = None
         if self._modlist_path is not None:
-            staging_root = self._modlist_path.parent.parent.parent / "mods"
-            index_path = self._modlist_path.parent.parent.parent / "modindex.txt"
+            staging_root = self._staging_root
+            index_path = self._staging_root.parent / "modindex.txt"
         removed_names: list[str] = []
         # Remove from highest index first to avoid shifting
         for i in sorted(indices, reverse=True):
@@ -2652,7 +2656,7 @@ class ModListPanel(ctk.CTkFrame):
             return
         # Rename staging folder on disk
         if self._modlist_path is not None:
-            staging_root = self._modlist_path.parent.parent.parent / "mods"
+            staging_root = self._staging_root
             old_folder = staging_root / entry.name
             new_folder = staging_root / new_name
             if old_folder.is_dir():
@@ -3331,7 +3335,7 @@ class ModListPanel(ctk.CTkFrame):
         game = _GAMES.get(topbar._game_var.get()) if topbar else None
         domain = (game.nexus_game_domain if game and game.is_configured() else "") or ""
 
-        staging_root = self._modlist_path.parent.parent.parent / "mods"
+        staging_root = self._staging_root
         meta_path = staging_root / mod_name / "meta.ini"
         if not meta_path.is_file():
             self._log(f"{mod_name}: No meta.ini found.")
@@ -3589,7 +3593,7 @@ class ModListPanel(ctk.CTkFrame):
                     # Update meta.ini
                     try:
                         if self._modlist_path is not None:
-                            staging_root = self._modlist_path.parent.parent.parent / "mods"
+                            staging_root = self._staging_root
                             meta_path = staging_root / mod_name / "meta.ini"
                             if meta_path.is_file():
                                 m = read_meta(meta_path)
@@ -3625,7 +3629,7 @@ class ModListPanel(ctk.CTkFrame):
                     # Update meta.ini
                     try:
                         if self._modlist_path is not None:
-                            staging_root = self._modlist_path.parent.parent.parent / "mods"
+                            staging_root = self._staging_root
                             meta_path = staging_root / mod_name / "meta.ini"
                             if meta_path.is_file():
                                 m = read_meta(meta_path)
@@ -3649,7 +3653,7 @@ class ModListPanel(ctk.CTkFrame):
             return
         if self._modlist_path is None:
             return
-        staging_root = self._modlist_path.parent.parent.parent / "mods"
+        staging_root = self._staging_root
         meta_path = staging_root / mod_name / "meta.ini"
         if not meta_path.is_file():
             self._log(f"Nexus: No metadata for {mod_name}")
@@ -3776,8 +3780,8 @@ class ModListPanel(ctk.CTkFrame):
         """Open the conflict detail dialog for a mod."""
         if self._modlist_path is None:
             return
-        filemap_path = self._modlist_path.parent.parent.parent / "filemap.txt"
-        staging_root = self._modlist_path.parent.parent.parent / "mods"
+        filemap_path = self._filemap_path
+        staging_root = self._staging_root
 
         # Build winner map: lowercase_rel -> (original_rel, winning_mod)
         winning_map: dict[str, tuple[str, str]] = {}
@@ -3915,7 +3919,7 @@ class ModListPanel(ctk.CTkFrame):
             )
             return
         # Create the staging folder
-        staging = self._modlist_path.parent.parent.parent / "mods" / mod_name
+        staging = self._staging_root / mod_name
         staging.mkdir(parents=True, exist_ok=True)
         # Write a minimal meta.ini so MO2 recognizes the folder (incl. installed in MO2 format)
         installed = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -3970,7 +3974,7 @@ class ModListPanel(ctk.CTkFrame):
             self._log("No configured game selected.")
             return
 
-        staging = game.get_mod_staging_path()
+        staging = game.get_effective_mod_staging_path()
         enabled_names = {e.name for e in self._entries if e.enabled and not e.is_separator}
         self._update_btn.configure(text="Checking...", state="disabled")
         log_fn = self._log
@@ -4215,8 +4219,8 @@ class ModListPanel(ctk.CTkFrame):
         self._filemap_dirty = False
 
         modlist_path        = self._modlist_path
-        staging             = modlist_path.parent.parent.parent / "mods"
-        output              = modlist_path.parent.parent.parent / "filemap.txt"
+        staging             = self._staging_root
+        output              = self._filemap_path
         strip_prefixes      = self._strip_prefixes
         install_extensions  = self._install_extensions
         root_deploy_folders = self._root_deploy_folders

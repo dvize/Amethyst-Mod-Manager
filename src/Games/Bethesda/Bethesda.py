@@ -290,8 +290,8 @@ class Fallout_3(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         data_dir = self._game_path / "Data"
-        filemap  = self.get_profile_root() / "filemap.txt"
-        staging  = self.get_mod_staging_path()
+        filemap  = self.get_effective_filemap_path()
+        staging  = self.get_effective_mod_staging_path()
 
         if not data_dir.is_dir():
             raise RuntimeError(f"Data directory not found: {data_dir}")
@@ -342,7 +342,7 @@ class Fallout_3(BaseGame):
         data_dir = self._game_path / "Data"
 
         _log("Restore: clearing Data/ and moving Data_Core/ back ...")
-        restored = restore_data_core(data_dir, overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log)
+        restored = restore_data_core(data_dir, overwrite_dir=self.get_effective_overwrite_path(), log_fn=_log)
         _log(f"  Restored {restored} file(s). Data_Core/ removed.")
 
         self._remove_plugins_txt_symlink(_log)

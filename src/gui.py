@@ -494,7 +494,7 @@ class App(ctk.CTk):
                 raw_stem = os.path.splitext(raw_stem)[0]
             suggestions = _suggest_mod_names(raw_stem)
             folder_name = suggestions[0] if suggestions else raw_stem
-            meta_path = game.get_mod_staging_path() / folder_name / "meta.ini"
+            meta_path = game.get_effective_mod_staging_path() / folder_name / "meta.ini"
             if meta_path.parent.is_dir():
                 write_meta(meta_path, meta)
                 log(f"Nexus: Saved metadata (mod {meta.mod_id}, v{meta.version})")
@@ -545,8 +545,8 @@ class App(ctk.CTk):
         self._plugin_panel = PluginPanel(
             main, log_fn=log,
             get_filemap_path=lambda: (
-                str(self._mod_panel._modlist_path.parent.parent.parent / "filemap.txt")
-                if self._mod_panel._modlist_path else None
+                str(self._mod_panel._filemap_path)
+                if self._mod_panel._filemap_path else None
             ),
         )
         self._plugin_panel.grid(row=0, column=2, sticky="nsew")
@@ -554,8 +554,8 @@ class App(ctk.CTk):
         def _on_filemap_rebuilt():
             # 1. Sync plugins.txt from the updated filemap
             filemap_path_str = (
-                str(self._mod_panel._modlist_path.parent.parent.parent / "filemap.txt")
-                if self._mod_panel._modlist_path else None
+                str(self._mod_panel._filemap_path)
+                if self._mod_panel._filemap_path else None
             )
             if (filemap_path_str
                     and self._plugin_panel._plugins_path is not None
@@ -640,10 +640,14 @@ class App(ctk.CTk):
                     initial_game.get_profile_root()
                     / "profiles" / profile / "plugins.txt"
                 )
+                # Set the active profile dir so get_effective_mod_staging_path works.
+                initial_game.set_active_profile_dir(
+                    initial_game.get_profile_root() / "profiles" / profile
+                )
                 self._plugin_panel._plugins_path = plugins_path
                 self._plugin_panel._plugin_extensions = initial_game.plugin_extensions
                 self._plugin_panel._vanilla_plugins = _vanilla_plugins_for_game(initial_game)
-                self._plugin_panel._staging_root = initial_game.get_mod_staging_path()
+                self._plugin_panel._staging_root = initial_game.get_effective_mod_staging_path()
                 data_path = initial_game.get_mod_data_path() if hasattr(initial_game, 'get_mod_data_path') else None
                 self._plugin_panel._data_dir = data_path
                 self._plugin_panel._game = initial_game

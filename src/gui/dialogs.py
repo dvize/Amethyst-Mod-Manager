@@ -1092,13 +1092,13 @@ class _ProfileNameDialog(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent, fg_color=BG_DEEP)
         self.title("New Profile")
-        self.geometry("360x130")
+        self.geometry("360x175")
         self.resizable(False, False)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.after(100, self._make_modal)
 
-        self.result: str | None = None
+        self.result: tuple[str, bool] | None = None
         self._build()
 
     def _make_modal(self):
@@ -1125,8 +1125,21 @@ class _ProfileNameDialog(ctk.CTkToplevel):
         self._entry.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
         self._entry.bind("<Return>", lambda _e: self._on_ok())
 
+        self._specific_mods_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self,
+            text="Use Profile Specific Mods",
+            variable=self._specific_mods_var,
+            font=FONT_NORMAL,
+            text_color=TEXT_MAIN,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOV,
+            border_color=BORDER,
+            checkmark_color="white",
+        ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+
         bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=44)
-        bar.grid(row=2, column=0, sticky="ew")
+        bar.grid(row=3, column=0, sticky="ew")
         bar.grid_propagate(False)
         ctk.CTkFrame(bar, fg_color=BORDER, height=1, corner_radius=0).pack(
             side="top", fill="x"
@@ -1145,7 +1158,7 @@ class _ProfileNameDialog(ctk.CTkToplevel):
     def _on_ok(self):
         name = self._var.get().strip()
         if name:
-            self.result = name
+            self.result = (name, self._specific_mods_var.get())
         self.grab_release()
         self.destroy()
 
@@ -1746,7 +1759,7 @@ class _ExeConfigDialog(ctk.CTkToplevel):
             game.get_game_path() if hasattr(game, "get_game_path") else None
         )
         self._mods_path: "Path | None" = (
-            game.get_mod_staging_path() if hasattr(game, "get_mod_staging_path") else None
+            game.get_effective_mod_staging_path() if hasattr(game, "get_effective_mod_staging_path") else None
         )
         self._overwrite_path: "Path | None" = (
             self._mods_path.parent / "overwrite" if self._mods_path else None

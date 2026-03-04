@@ -279,14 +279,14 @@ class UE5Game(BaseGame):
         if game_path is None:
             raise RuntimeError("Game path is not configured.")
 
-        filemap = self.get_profile_root() / "filemap.txt"
+        filemap = self.get_effective_filemap_path()
         if not filemap.is_file():
             raise RuntimeError(
                 f"filemap.txt not found: {filemap}\n"
                 "Run 'Build Filemap' before deploying."
             )
 
-        staging = self.get_mod_staging_path()
+        staging = self.get_effective_mod_staging_path()
         profile_dir = self.get_profile_root() / "profiles" / profile
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
         overwrite_dir = staging.parent / "overwrite"

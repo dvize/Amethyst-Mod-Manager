@@ -126,7 +126,10 @@ class TopBar(ctk.CTkFrame):
                 profile_names = _profiles_for_game(initial_game_name)
             else:
                 raise
-        self._profile_var = tk.StringVar(value=profile_names[0])
+        _initial_game_obj = _gh._GAMES.get(initial_game_name)
+        _last_profile = _initial_game_obj.get_last_active_profile() if _initial_game_obj else "default"
+        _initial_profile = _last_profile if _last_profile in profile_names else profile_names[0]
+        self._profile_var = tk.StringVar(value=_initial_profile)
         self._profile_menu = ctk.CTkOptionMenu(
             self, values=profile_names, variable=self._profile_var,
             width=160, height=32, font=FONT_NORMAL,
@@ -216,6 +219,9 @@ class TopBar(ctk.CTkFrame):
 
     def _on_profile_change(self, value: str):
         self._log(f"Profile: {value}")
+        game = _gh._GAMES.get(self._game_var.get())
+        if game:
+            game.save_last_active_profile(value)
         self._reload_mod_panel()
 
     def _on_wizard(self):
@@ -253,7 +259,9 @@ class TopBar(ctk.CTkFrame):
         # Refresh profile dropdown for the new game
         profiles = _profiles_for_game(value)
         self._profile_menu.configure(values=profiles)
-        self._profile_var.set(profiles[0])
+        game_obj = _gh._GAMES.get(value)
+        last = game_obj.get_last_active_profile() if game_obj else "default"
+        self._profile_var.set(last if last in profiles else profiles[0])
         self._update_wizard_visibility()
         self._reload_mod_panel()
 
@@ -264,21 +272,25 @@ class TopBar(ctk.CTkFrame):
             return
         game = _gh._GAMES.get(self._game_var.get())
         if game and game.is_configured():
+            # Tell the game which profile directory is active so that
+            # get_effective_mod_staging_path() can resolve profile-specific mods.
+            profile_dir = (
+                game.get_profile_root()
+                / "profiles" / self._profile_var.get()
+            )
+            game.set_active_profile_dir(profile_dir)
             # Update plugin panel paths BEFORE load_game, because load_game
             # triggers _rebuild_filemap → _on_filemap_rebuilt which reads
             # _plugins_path. If we update after, the old game's path is used.
             # Also clear _plugin_entries immediately so any pending save callbacks
             # cannot write the old game's plugins to the new game's file.
             if hasattr(app, "_plugin_panel"):
-                plugins_path = (
-                    game.get_profile_root()
-                    / "profiles" / self._profile_var.get() / "plugins.txt"
-                )
+                plugins_path = profile_dir / "plugins.txt"
                 app._plugin_panel._plugin_entries = []
                 app._plugin_panel._plugins_path = plugins_path
                 app._plugin_panel._plugin_extensions = game.plugin_extensions
                 app._plugin_panel._vanilla_plugins = _vanilla_plugins_for_game(game)
-                app._plugin_panel._staging_root = game.get_mod_staging_path()
+                app._plugin_panel._staging_root = game.get_effective_mod_staging_path()
                 data_path = game.get_mod_data_path() if hasattr(game, 'get_mod_data_path') else None
                 app._plugin_panel._data_dir = data_path
                 app._plugin_panel._game = game
@@ -308,13 +320,13 @@ class TopBar(ctk.CTkFrame):
         self.winfo_toplevel().wait_window(dialog)
         if dialog.result is None:
             return
-        name = dialog.result
+        name, use_specific_mods = dialog.result
         # Reject names that clash with 'default' or already exist
         existing = _profiles_for_game(game_name)
         if name in existing:
             self._log(f"Profile '{name}' already exists.")
             return
-        _create_profile(game_name, name)
+        _create_profile(game_name, name, profile_specific_mods=use_specific_mods)
         self._log(f"Profile '{name}' created.")
         profiles = _profiles_for_game(game_name)
         self._profile_menu.configure(values=profiles)
@@ -377,6 +389,12 @@ class TopBar(ctk.CTkFrame):
             self._game_var.set(picker.result)
             _save_last_game(picker.result)
             self._update_wizard_visibility()
+            # Reset profile dropdown for the newly selected game BEFORE reloading
+            new_profiles = _profiles_for_game(picker.result)
+            self._profile_menu.configure(values=new_profiles)
+            game_obj = _gh._GAMES.get(picker.result)
+            last_profile = game_obj.get_last_active_profile() if game_obj else "default"
+            self._profile_var.set(last_profile if last_profile in new_profiles else new_profiles[0])
             self._reload_mod_panel()
             return
         dialog = AddGameDialog(self.winfo_toplevel(), game)
@@ -489,6 +507,14 @@ class TopBar(ctk.CTkFrame):
                 self.after(0, lambda d=done, t=total, p=phase: status_bar.set_progress(d, t, p))
 
             try:
+                # Restore must use the last-deployed profile's paths so that
+                # runtime files (ShaderCache, saves, etc.) are moved back to
+                # the correct overwrite/ folder, not the currently-active one.
+                last_deployed = game.get_last_deployed_profile()
+                if last_deployed:
+                    game.set_active_profile_dir(
+                        game.get_profile_root() / "profiles" / last_deployed
+                    )
                 if getattr(game, "restore_before_deploy", True) and hasattr(game, "restore"):
                     try:
                         game.restore(log_fn=_tlog, progress_fn=_progress)
@@ -497,12 +523,17 @@ class TopBar(ctk.CTkFrame):
                 if root_folder_dir.is_dir() and game_root:
                     restore_root_folder(root_folder_dir, game_root, log_fn=_tlog)
 
+                # Switch to the target profile before building the filemap and deploying.
+                game.set_active_profile_dir(
+                    game.get_profile_root() / "profiles" / profile
+                )
+
                 # Rebuild filemap.txt before deploy so any files rescued into
                 # overwrite/ during restore are included with [Overwrite] priority.
                 profile_root = game.get_profile_root()
-                staging      = game.get_mod_staging_path()
+                staging      = game.get_effective_mod_staging_path()
                 modlist_path = profile_root / "profiles" / profile / "modlist.txt"
-                filemap_out  = profile_root / "filemap.txt"
+                filemap_out  = staging.parent / "filemap.txt"
                 if modlist_path.is_file():
                     try:
                         build_filemap(
@@ -526,6 +557,10 @@ class TopBar(ctk.CTkFrame):
                 game.deploy(log_fn=_tlog, profile=profile, progress_fn=_progress,
                             mode=deploy_mode)
 
+                # Record this profile as the last successfully deployed so that
+                # a future restore knows which overwrite/ folder to use.
+                game.save_last_deployed_profile(profile)
+
                 rf_allowed = getattr(game, "root_folder_deploy_enabled", True)
                 if rf_allowed and root_folder_enabled and root_folder_dir.is_dir() and game_root:
                     count = deploy_root_folder(root_folder_dir, game_root,
@@ -535,6 +570,10 @@ class TopBar(ctk.CTkFrame):
             except Exception as e:
                 self.after(0, lambda err=e: self._log(f"Deploy error: {err}"))
             finally:
+                # Ensure active profile dir always reflects the UI selection on exit.
+                game.set_active_profile_dir(
+                    game.get_profile_root() / "profiles" / profile
+                )
                 self.after(0, lambda: self._set_deploy_buttons_enabled(True))
                 self.after(1500, status_bar.clear_progress)
 
@@ -564,6 +603,14 @@ class TopBar(ctk.CTkFrame):
                 self.after(0, lambda d=done, t=total, p=phase: status_bar.set_progress(d, t, p))
 
             try:
+                # Use the last-deployed profile's paths for restore so runtime
+                # files go back to the right overwrite/ folder.
+                current_profile = self._profile_var.get()
+                last_deployed = game.get_last_deployed_profile()
+                if last_deployed:
+                    game.set_active_profile_dir(
+                        game.get_profile_root() / "profiles" / last_deployed
+                    )
                 if hasattr(game, "restore"):
                     game.restore(log_fn=_tlog, progress_fn=_progress)
                 else:
@@ -574,6 +621,10 @@ class TopBar(ctk.CTkFrame):
                 _success[0] = False
                 self.after(0, lambda err=e: self._log(f"Restore error: {err}"))
             finally:
+                # Always restore _active_profile_dir to the currently-selected profile.
+                game.set_active_profile_dir(
+                    game.get_profile_root() / "profiles" / current_profile
+                )
                 self.after(0, lambda: self._set_deploy_buttons_enabled(True))
                 self.after(1500, status_bar.clear_progress)
                 if _success[0]:

@@ -10,6 +10,7 @@ To add support for a new game:
 
 from __future__ import annotations
 
+import json
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -428,9 +429,125 @@ class BaseGame(ABC):
             return self._staging_path
         return self.get_mod_staging_path().parent
 
+    # Active profile directory — set by the UI whenever the user switches profiles.
+    _active_profile_dir: "Path | None" = None
+
+    def set_active_profile_dir(self, profile_dir: "Path | None") -> None:
+        """Record which profile folder is currently active.
+
+        Call this whenever the user selects a profile so that
+        :meth:`get_effective_mod_staging_path` can decide whether to route
+        mods into the profile-specific folder or the shared folder.
+        """
+        self._active_profile_dir = profile_dir
+
+    def get_effective_mod_staging_path(self) -> Path:
+        """Return the mods staging path that should be used for the active profile.
+
+        If the active profile has the ``profile_specific_mods`` flag set in its
+        ``profile_settings.json``, returns ``<profile_dir>/mods/`` so that all
+        mod files are kept inside the profile folder itself.
+
+        Otherwise falls back to the standard :meth:`get_mod_staging_path`
+        (shared ``mods/`` folder next to ``profiles/``), which preserves the
+        existing behaviour for all profiles without the flag.
+        """
+        if self._active_profile_dir is not None:
+            try:
+                # Import here to avoid a circular import at module level.
+                from gui.game_helpers import profile_uses_specific_mods  # type: ignore
+                if profile_uses_specific_mods(self._active_profile_dir):
+                    return self._active_profile_dir / "mods"
+            except Exception:
+                pass
+        return self.get_mod_staging_path()
+
+    def get_effective_overwrite_path(self) -> Path:
+        """Return the overwrite directory for the active profile.
+
+        For profiles with the ``profile_specific_mods`` flag the overwrite
+        folder lives inside the profile directory itself (a sibling of the
+        profile-specific ``mods/`` folder).  For all other profiles it
+        falls back to ``<profile_root>/overwrite/``, which is the original
+        shared location that sits alongside the shared ``mods/`` folder.
+
+        This is always consistent with :meth:`get_effective_mod_staging_path`:
+        ``overwrite/`` is a sibling of ``mods/`` regardless of which root they
+        live under.
+        """
+        return self.get_effective_mod_staging_path().parent / "overwrite"
+
+    def get_effective_filemap_path(self) -> Path:
+        """Return the filemap.txt path for the active profile.
+
+        For profile-specific-mods profiles this is ``<profile_dir>/filemap.txt``
+        so that each profile maintains its own independent filemap.
+        For normal profiles it falls back to ``<profile_root>/filemap.txt``.
+        """
+        return self.get_effective_mod_staging_path().parent / "filemap.txt"
+
     # -----------------------------------------------------------------------
     # Configuration persistence
     # -----------------------------------------------------------------------
+
+    @property
+    def _deploy_state_file(self) -> Path:
+        """Path to deploy_state.json for this game.
+
+        Stores the name of the last profile that was successfully deployed so
+        that restore() can direct runtime-generated files (ShaderCache, saves,
+        etc.) to the correct overwrite folder even when the user has since
+        switched to a different profile.
+        """
+        return self._paths_file.parent / "deploy_state.json"
+
+    def get_last_deployed_profile(self) -> str:
+        """Return the name of the last successfully deployed profile, or 'default'."""
+        try:
+            data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            return data.get("last_deployed") or "default"
+        except (OSError, ValueError):
+            return "default"
+
+    def save_last_deployed_profile(self, profile_name: str) -> None:
+        """Persist profile_name as the last successfully deployed profile."""
+        try:
+            self._deploy_state_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            data["last_deployed"] = profile_name
+            self._deploy_state_file.write_text(
+                json.dumps(data, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def get_last_active_profile(self) -> str:
+        """Return the name of the last active profile for this game, or 'default'."""
+        try:
+            data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            return data.get("last_active_profile") or "default"
+        except (OSError, ValueError):
+            return "default"
+
+    def save_last_active_profile(self, profile_name: str) -> None:
+        """Persist profile_name as the last active profile for this game."""
+        try:
+            self._deploy_state_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            data["last_active_profile"] = profile_name
+            self._deploy_state_file.write_text(
+                json.dumps(data, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     @property
     def _paths_file(self) -> Path:

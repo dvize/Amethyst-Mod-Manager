@@ -229,8 +229,8 @@ class BaldursGate3(BaseGame):
             raise RuntimeError("Prefix path is not configured.")
 
         mods_dir = self._prefix_path / _MODS_SUBPATH
-        filemap  = self.get_profile_root() / "filemap.txt"
-        staging  = self.get_mod_staging_path()
+        filemap  = self.get_effective_filemap_path()
+        staging  = self.get_effective_mod_staging_path()
         modlist  = self.get_profile_root() / "profiles" / profile / "modlist.txt"
 
         mods_dir.mkdir(parents=True, exist_ok=True)
@@ -262,7 +262,7 @@ class BaldursGate3(BaseGame):
 
         # Step 4 (optional): deploy root-targeted files (e.g. bin/) to game root
         linked_root = 0
-        filemap_root = self.get_profile_root() / "filemap_root.txt"
+        filemap_root = self.get_effective_mod_staging_path().parent / "filemap_root.txt"
         if filemap_root.is_file() and self._game_path:
             _log("Step 4: Deploying root-targeted files (bin/, …) to game root ...")
             linked_root, _ = deploy_filemap_to_root(
@@ -298,7 +298,7 @@ class BaldursGate3(BaseGame):
         mods_dir = self._prefix_path / _MODS_SUBPATH
 
         # Undo root-targeted files (bin/, …) placed into game root
-        filemap_root = self.get_profile_root() / "filemap_root.txt"
+        filemap_root = self.get_effective_mod_staging_path().parent / "filemap_root.txt"
         if self._game_path:
             removed_root = restore_filemap_from_root(
                 filemap_root, self._game_path, log_fn=_log,
@@ -307,7 +307,7 @@ class BaldursGate3(BaseGame):
                 _log(f"  Removed {removed_root} root-deployed file(s).")
 
         _log("Restore: clearing Mods/ and moving Mods_Core/ back ...")
-        restored = restore_data_core(mods_dir, overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log)
+        restored = restore_data_core(mods_dir, overwrite_dir=self.get_effective_overwrite_path(), log_fn=_log)
         _log(f"  Restored {restored} file(s). Mods_Core/ removed.")
 
         _log("Restore: resetting modsettings.lsx to vanilla ...")

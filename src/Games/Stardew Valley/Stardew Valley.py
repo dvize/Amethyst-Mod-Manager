@@ -203,8 +203,8 @@ class StardewValley(BaseGame):
             raise RuntimeError("Game path is not configured.")
 
         plugins_dir = self._game_path / self.mods_dir
-        filemap     = self.get_profile_root() / "filemap.txt"
-        staging     = self.get_mod_staging_path()
+        filemap     = self.get_effective_filemap_path()
+        staging     = self.get_effective_mod_staging_path()
         core        = self.mods_dir + "_Core"
 
         if not filemap.is_file():
@@ -252,7 +252,7 @@ class StardewValley(BaseGame):
         
         if core_dir.is_dir():
             _log(f"Restore: clearing {plugins_dir.name}/ and moving {core}/ back ...")
-            restored = restore_data_core(plugins_dir, core_dir=core_dir, overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log)
+            restored = restore_data_core(plugins_dir, core_dir=core_dir, overwrite_dir=self.get_effective_overwrite_path(), log_fn=_log)
             _log(f"  Restored {restored} file(s). {core}/ removed.")
         else:
             _log(f"Restore: no {core}/ found — nothing to restore.")

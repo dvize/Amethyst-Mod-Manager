@@ -197,8 +197,8 @@ class TheSims4(BaseGame):
             raise RuntimeError("Prefix path is not configured.")
 
         mods_dir = self._prefix_path / _MODS_SUBPATH
-        filemap  = self.get_profile_root() / "filemap.txt"
-        staging  = self.get_mod_staging_path()
+        filemap  = self.get_effective_filemap_path()
+        staging  = self.get_effective_mod_staging_path()
 
         mods_dir.mkdir(parents=True, exist_ok=True)
 
@@ -243,7 +243,7 @@ class TheSims4(BaseGame):
         mods_dir = self._prefix_path / _MODS_SUBPATH
 
         _log("Restore: clearing Mods/ and moving Mods_Core/ back ...")
-        restored = restore_data_core(mods_dir, overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log)
+        restored = restore_data_core(mods_dir, overwrite_dir=self.get_effective_overwrite_path(), log_fn=_log)
         _log(f"  Restored {restored} file(s). Mods_Core/ removed.")
 
         _log("Restore complete.")

@@ -208,8 +208,8 @@ class Example(BaseGame):
         #      self._game_path / "Mods" for Stardew Valley, etc.
         mods_dir = self._game_path / "TODO_mods_dir"
 
-        filemap = self.get_profile_root() / "filemap.txt"
-        staging = self.get_mod_staging_path()
+        filemap = self.get_effective_filemap_path()
+        staging = self.get_effective_mod_staging_path()
 
         # Step 1: Back up the vanilla mod folder so we can restore it later.
         # Moves mods_dir/ → mods_dir_Core/ (e.g. Data/ → Data_Core/).
@@ -244,4 +244,4 @@ class Example(BaseGame):
         # Clears mods_dir/ and moves core_dir/ back in its place,
         # returning the game to its pre-deploy vanilla state.
         if core_dir.is_dir():
-            restore_data_core(mods_dir, core_dir=core_dir, overwrite_dir=self.get_profile_root() / "overwrite", log_fn=_log)
+            restore_data_core(mods_dir, core_dir=core_dir, overwrite_dir=self.get_effective_overwrite_path(), log_fn=_log)
