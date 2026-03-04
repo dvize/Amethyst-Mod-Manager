@@ -31,8 +31,10 @@ ue5      — uses the UE5 multi-target manifest deploy; with no routing
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -48,7 +50,7 @@ from Utils.deploy import (
     restore_data_core,
     restore_filemap_from_root,
 )
-from Utils.config_paths import get_profiles_dir, get_custom_games_dir
+from Utils.config_paths import get_profiles_dir, get_custom_games_dir, get_custom_game_images_dir
 
 _PROFILES_DIR = get_profiles_dir()
 
@@ -131,6 +133,53 @@ def delete_custom_game_definition(game_id: str) -> None:
     folder = get_custom_games_dir()
     target = folder / f"{game_id}.json"
     target.unlink(missing_ok=True)
+
+
+def download_missing_custom_game_images(
+    on_done: "callable[[str], None] | None" = None,
+) -> None:
+    """
+    For every custom game definition that has an ``image_url`` but no
+    cached banner image yet, download and cache the image in a background
+    thread.  Safe to call at any time; games that already have a cached
+    image are skipped.
+
+    Parameters
+    ----------
+    on_done:
+        Optional callback invoked with the *game_id* after each image is
+        successfully saved.  It is called from the worker thread — if you
+        need to update the UI, use ``widget.after(0, ...)`` inside the
+        callback.
+    """
+    images_dir = get_custom_game_images_dir()
+
+    def _download_one(game_id: str, url: str) -> None:
+        try:
+            import requests
+            from PIL import Image as _PilImage
+
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            img = _PilImage.open(io.BytesIO(resp.content)).convert("RGBA")
+            out = images_dir / f"{game_id}.png"
+            img.save(out, "PNG")
+            if on_done is not None:
+                on_done(game_id)
+        except Exception:
+            pass  # silent – don't crash on missing images
+
+    for defn in load_custom_game_definitions():
+        game_id = defn.get("game_id") or _make_game_id(defn.get("name", ""))
+        url = defn.get("image_url", "").strip()
+        if not url:
+            continue
+        cached = images_dir / f"{game_id}.png"
+        if cached.is_file():
+            continue  # already cached
+        threading.Thread(
+            target=_download_one, args=(game_id, url), daemon=True
+        ).start()
 
 
 def _make_game_id(name: str) -> str:
@@ -465,6 +514,39 @@ class Ue5CustomGame(UE5Game):
     @property
     def is_custom(self) -> bool:
         return True
+
+    # ------------------------------------------------------------------
+    # Paths
+    # ------------------------------------------------------------------
+
+    def get_game_path(self) -> Path | None:
+        """If mod_data_path names a subfolder of the install dir, resolve it.
+
+        Mirrors how OblivionRemastered / HogwartsLegacy work: the user sets
+        their Steam install directory as the game path, and we automatically
+        descend into the named subfolder (e.g. 'OblivionRemastered' or
+        'Phoenix') to find the actual game root.  Case-insensitive so it
+        works on both Proton/Windows and Linux.
+        """
+        if self._game_path is None:
+            return None
+        subdir = self._defn.get("mod_data_path", "").strip("/\\")
+        if not subdir:
+            return self._game_path
+        # Exact match first
+        sub = self._game_path / subdir
+        if sub.is_dir():
+            return sub
+        # Case-insensitive scan
+        needle = subdir.lower()
+        try:
+            for child in self._game_path.iterdir():
+                if child.is_dir() and child.name.lower() == needle:
+                    return child
+        except OSError:
+            pass
+        # Fallback: user may have pointed directly at the subfolder already
+        return self._game_path
 
     # ------------------------------------------------------------------
     # Advanced mod-handling properties (read from JSON definition)

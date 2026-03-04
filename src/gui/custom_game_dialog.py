@@ -221,13 +221,14 @@ class CustomGameDialog(ctk.CTkToplevel):
         ).pack(side="left", padx=12, pady=8)
 
         # Body
-        body = ctk.CTkScrollableFrame(
+        self._body = ctk.CTkScrollableFrame(
             self, fg_color=BG_PANEL, corner_radius=0,
             scrollbar_button_color=BG_HEADER,
             scrollbar_button_hover_color=ACCENT,
         )
-        body.grid(row=1, column=0, sticky="nsew")
-        body.grid_columnconfigure(0, weight=1)
+        self._body.grid(row=1, column=0, sticky="nsew")
+        self._body.grid_columnconfigure(0, weight=1)
+        body = self._body
 
         row = 0
 
@@ -250,7 +251,7 @@ class CustomGameDialog(ctk.CTkToplevel):
         row = self._section(body, row, "Executable Filename")
         ctk.CTkLabel(
             body,
-            text="The .exe filename used to locate the game in Steam / Heroic libraries.",
+            text="The .exe location from the games root folder. eg. bin/bg3.exe for BG3 or SkyrimSELauncher.exe for Skyrim SE",
             font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
         ).grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
         row += 1
@@ -290,6 +291,7 @@ class CustomGameDialog(ctk.CTkToplevel):
         )
         lbl_sec.grid(row=row, column=0, sticky="ew", padx=16, pady=(6, 2))
         self._data_path_widgets.append(lbl_sec)
+        self._data_path_lbl_sec = lbl_sec
         row += 1
 
         lbl_hint = ctk.CTkLabel(
@@ -304,6 +306,7 @@ class CustomGameDialog(ctk.CTkToplevel):
         )
         lbl_hint.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
         self._data_path_widgets.append(lbl_hint)
+        self._data_path_lbl_hint = lbl_hint
         row += 1
 
         ent_dp = ctk.CTkEntry(
@@ -313,6 +316,7 @@ class CustomGameDialog(ctk.CTkToplevel):
         )
         ent_dp.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 10))
         self._data_path_widgets.append(ent_dp)
+        self._data_path_entry = ent_dp
         row += 1
 
         # ---- Optional: Steam ID ----
@@ -376,6 +380,13 @@ class CustomGameDialog(ctk.CTkToplevel):
         # ---- Advanced Options ----
         row = self._divider(body, row)
         row = self._section(body, row, "Advanced Options  (optional)")
+        ctk.CTkLabel(
+            body,
+            text="Used to change the folder structure of an installed mod to match what is required by the manager.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+            wraplength=self.WIDTH - 60,
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 6))
+        row += 1
 
         _adv_fields = [
             (
@@ -402,7 +413,7 @@ class CustomGameDialog(ctk.CTkToplevel):
             (
                 "mod_install_prefix",
                 self._prefix_var,
-                "Mod Install Prefix",
+                "Prepend Prefix",
                 "Path segment prepended to every installed file.  "
                 "e.g. 'mods' so files land at mods/<ModName>/…",
             ),
@@ -512,6 +523,9 @@ class CustomGameDialog(ctk.CTkToplevel):
         )
         self._validation_label.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 10))
 
+        # Bind scroll wheel for Linux (Button-4 / Button-5)
+        self.after(100, self._bind_mousewheel_recursive)
+
         # Button bar
         btn_bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=52)
         btn_bar.grid(row=2, column=0, sticky="ew")
@@ -557,12 +571,47 @@ class CustomGameDialog(ctk.CTkToplevel):
         return row + 1
 
     def _update_data_path_visibility(self):
-        state = "normal" if self._deploy_var.get() == "standard" else "disabled"
+        deploy = self._deploy_var.get()
+        state = "disabled" if deploy == "root" else "normal"
         for w in self._data_path_widgets:
             try:
                 w.configure(state=state)
             except Exception:
                 pass
+        if deploy == "ue5":
+            self._data_path_lbl_sec.configure(text="Game Sub-folder  (optional)")
+            self._data_path_lbl_hint.configure(
+                text=(
+                    "Location of the folder from root where deployed mods are sent to.  e.g. 'Data , BepInEx/plugins , Pheonix"
+                )
+            )
+            self._data_path_entry.configure(placeholder_text="e.g. OblivionRemastered")
+        else:
+            self._data_path_lbl_sec.configure(text="Mod Sub-folder")
+            self._data_path_lbl_hint.configure(
+                text=(
+                    "Path relative to the game root where mod files are installed. "
+                    "e.g. 'Data' for Bethesda games, 'BepInEx/plugins' for BepInEx. "
+                    "Leave empty to target the game root directly."
+                )
+            )
+            self._data_path_entry.configure(placeholder_text="e.g. Data   (leave empty for game root)")
+
+    def _scroll_body(self, direction: int):
+        """Scroll the body canvas by *direction* units."""
+        try:
+            self._body._parent_canvas.yview_scroll(direction, "units")
+        except Exception:
+            pass
+
+    def _bind_mousewheel_recursive(self, widget=None):
+        """Recursively bind Linux scroll-wheel events to every child widget."""
+        if widget is None:
+            widget = self._body
+        widget.bind("<Button-4>", lambda e: self._scroll_body(-2), add="+")
+        widget.bind("<Button-5>", lambda e: self._scroll_body(2), add="+")
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child)
 
     def _make_modal(self):
         try:
@@ -631,7 +680,7 @@ class CustomGameDialog(ctk.CTkToplevel):
         name       = self._name_var.get().strip()
         exe        = self._exe_var.get().strip()
         deploy     = self._deploy_var.get()
-        data_path  = self._data_path_var.get().strip() if deploy == "standard" else ""
+        data_path  = self._data_path_var.get().strip() if deploy in ("standard", "ue5") else ""
         steam_id   = self._steam_var.get().strip()
         nexus      = self._nexus_var.get().strip()
         image_url  = self._image_url_var.get().strip()

@@ -188,6 +188,8 @@ class _GamePickerDialog(ctk.CTkToplevel):
 
         # Keep CTkImage refs alive
         self._img_refs: list = []
+        # game_id → (img_lbl, img_frame) so downloads can update the card live
+        self._img_labels: dict[str, tuple] = {}
 
         for i, name in enumerate(game_names):
             col = i % self._COLS
@@ -223,6 +225,14 @@ class _GamePickerDialog(ctk.CTkToplevel):
         self.geometry(f"{w}x{h}+{x}+{y}")
 
         self.after(50, self._make_modal)
+
+        # Download banner images for any custom games that have an image_url
+        # but no local cache yet (runs in background threads, silent on error)
+        try:
+            from Games.Custom.custom_game import download_missing_custom_game_images
+            download_missing_custom_game_images(on_done=self._on_image_downloaded)
+        except Exception:
+            pass
 
     def _build_card(self, parent, name: str, row: int, col: int):
         game = self._games.get(name)
@@ -274,7 +284,8 @@ class _GamePickerDialog(ctk.CTkToplevel):
                                    text_color=TEXT_DIM)
         img_lbl.place(relx=0.5, rely=0.5, anchor="center")
 
-        # Game name
+        # Register so live image updates can find this card
+        self._img_labels[game_id] = (img_lbl, img_frame)
         ctk.CTkLabel(
             card, text=name, font=("Segoe UI", 12, "bold"), text_color=TEXT_MAIN,
             wraplength=self._CARD_W - 10, anchor="center", justify="center",
@@ -305,6 +316,32 @@ class _GamePickerDialog(ctk.CTkToplevel):
         for w in (card, img_frame, img_lbl):
             w.bind("<Enter>", _enter)
             w.bind("<Leave>", _leave)
+
+    def _on_image_downloaded(self, game_id: str) -> None:
+        """Called (from a worker thread) when a missing banner image has been cached."""
+        def _apply():
+            entry = self._img_labels.get(game_id)
+            if entry is None:
+                return
+            img_lbl, img_frame = entry
+            try:
+                if not img_lbl.winfo_exists():
+                    return
+            except Exception:
+                return
+            img_path = get_custom_game_images_dir() / f"{game_id}.png"
+            if not img_path.is_file():
+                return
+            try:
+                raw = _PilImage.open(img_path).convert("RGBA")
+                tw, th = self._CARD_W - 8, self._IMG_H
+                raw.thumbnail((tw, th), _PilImage.LANCZOS)
+                ctk_img = ctk.CTkImage(light_image=raw, dark_image=raw, size=(raw.width, raw.height))
+                self._img_refs.append(ctk_img)
+                img_lbl.configure(image=ctk_img, text="")
+            except Exception:
+                pass
+        self.after(0, _apply)
 
     def _make_modal(self):
         self.grab_set()
