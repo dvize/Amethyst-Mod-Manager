@@ -199,9 +199,9 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
         dst = dest_root / dst_rel
 
         if is_folder:
-            # Empty destination means copy the folder itself into dest_root
+            # Empty destination means merge folder contents into dest_root
             if not dst_rel:
-                dst = dest_root / src.name
+                dst = dest_root
             if src.is_dir():
                 shutil.copytree(src, dst, dirs_exist_ok=True)
                 copied += 1
