@@ -361,6 +361,15 @@ class TopBar(ctk.CTkFrame):
         game = _gh._GAMES.get(picker.result)
         if game is None:
             return
+        # Game already configured — just switch to it without re-running AddGameDialog
+        if getattr(picker, "selected_only", False):
+            configured = sorted(n for n, g in _gh._GAMES.items() if g.is_configured())
+            self._game_menu.configure(values=configured or ["No games configured"])
+            self._game_var.set(picker.result)
+            _save_last_game(picker.result)
+            self._update_wizard_visibility()
+            self._reload_mod_panel()
+            return
         dialog = AddGameDialog(self.winfo_toplevel(), game)
         self.winfo_toplevel().wait_window(dialog)
         if dialog.result is not None:

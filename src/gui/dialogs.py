@@ -162,6 +162,7 @@ class _GamePickerDialog(ctk.CTkToplevel):
 
         self._games = games or {}
         self._icons_dir = Path(__file__).resolve().parent.parent / "icons" / "games"
+        self.selected_only: bool = False
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -268,15 +269,22 @@ class _GamePickerDialog(ctk.CTkToplevel):
             wraplength=self._CARD_W - 10, anchor="center", justify="center",
         ).grid(row=1, column=0, padx=4, pady=(4, 2), sticky="ew")
 
-        # Add button
-        def _select(n=name):
+        # Add / Select button
+        is_configured = bool(game and game.is_configured())
+
+        def _select(n=name, already=is_configured):
             self.result = n
+            self.selected_only = already
             self.grab_release()
             self.destroy()
 
+        btn_text   = "Select" if is_configured else "Add"
+        btn_fg     = "#2d7a2d" if is_configured else ACCENT
+        btn_hover  = "#3a9a3a" if is_configured else ACCENT_HOV
+
         ctk.CTkButton(
-            card, text="Add", height=26, font=FONT_BOLD,
-            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            card, text=btn_text, height=26, font=FONT_BOLD,
+            fg_color=btn_fg, hover_color=btn_hover, text_color="white",
             command=_select,
         ).grid(row=2, column=0, padx=8, pady=(0, 8), sticky="ew")
 
