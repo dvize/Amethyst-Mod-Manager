@@ -582,7 +582,7 @@ class CustomGameDialog(ctk.CTkToplevel):
             self._data_path_lbl_sec.configure(text="Game Sub-folder  (optional)")
             self._data_path_lbl_hint.configure(
                 text=(
-                    "Location of the folder from root where deployed mods are sent to.  e.g. 'Data , BepInEx/plugins , Pheonix"
+                    "Location of the folder from root where deployed mods are sent to.  e.g. Pheonix for Hogwarts Legacy."
                 )
             )
             self._data_path_entry.configure(placeholder_text="e.g. OblivionRemastered")
@@ -642,27 +642,28 @@ class CustomGameDialog(ctk.CTkToplevel):
 
     def _download_image(self, url: str, game_id: str) -> None:
         """Download the banner image in a background thread and cache it."""
+        def _update_status(text, color):
+            try:
+                if self.winfo_exists():
+                    self._image_status.configure(text=text, text_color=color)
+            except Exception:
+                pass
+
         def _worker():
             try:
                 import requests
                 from PIL import Image as PilImage
                 import io
 
-                self.after(0, lambda: self._image_status.configure(
-                    text="Downloading image…", text_color=TEXT_WARN
-                ))
+                self.after(0, lambda: _update_status("Downloading image…", TEXT_WARN))
                 resp = requests.get(url, timeout=15)
                 resp.raise_for_status()
                 img = PilImage.open(io.BytesIO(resp.content)).convert("RGBA")
                 out = get_custom_game_images_dir() / f"{game_id}.png"
                 img.save(out, "PNG")
-                self.after(0, lambda: self._image_status.configure(
-                    text="Image cached.", text_color=TEXT_OK
-                ))
+                self.after(0, lambda: _update_status("Image cached.", TEXT_OK))
             except Exception as exc:
-                self.after(0, lambda e=exc: self._image_status.configure(
-                    text=f"Image download failed: {e}", text_color=TEXT_ERR
-                ))
+                self.after(0, lambda e=exc: _update_status(f"Image download failed: {e}", TEXT_ERR))
 
         threading.Thread(target=_worker, daemon=True).start()
 

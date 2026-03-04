@@ -217,7 +217,9 @@ class StandardCustomGame(BaseGame):
 
     @property
     def exe_name(self) -> str:
-        return self._defn.get("exe_name", "")
+        # Normalise Windows-style separators so game_path / exe_name resolves
+        # correctly on Linux (e.g. "Binaries\\NMS.exe" → "Binaries/NMS.exe").
+        return self._defn.get("exe_name", "").replace("\\", "/")
 
     @property
     def steam_id(self) -> str:
@@ -497,7 +499,9 @@ class Ue5CustomGame(UE5Game):
 
     @property
     def exe_name(self) -> str:
-        return self._defn.get("exe_name", "")
+        # Normalise Windows-style separators so game_path / exe_name resolves
+        # correctly on Linux (e.g. "Binaries\\NMS.exe" → "Binaries/NMS.exe").
+        return self._defn.get("exe_name", "").replace("\\", "/")
 
     @property
     def steam_id(self) -> str:
