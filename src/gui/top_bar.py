@@ -407,6 +407,13 @@ class TopBar(ctk.CTkFrame):
                 self._game_var.set(picker.result)
                 _save_last_game(picker.result)
                 self._update_wizard_visibility()
+                # Reset profile dropdown for the newly added game BEFORE reloading
+                # so the old game's profiles are not inherited.
+                new_profiles = _profiles_for_game(picker.result)
+                self._profile_menu.configure(values=new_profiles)
+                game_obj = _gh._GAMES.get(picker.result)
+                last_profile = game_obj.get_last_active_profile() if game_obj else "default"
+                self._profile_var.set(last_profile if last_profile in new_profiles else new_profiles[0])
                 self._reload_mod_panel()
 
     def _on_settings(self):
