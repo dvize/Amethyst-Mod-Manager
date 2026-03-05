@@ -1733,7 +1733,8 @@ class _ExeConfigDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, exe_path: "Path", game, saved_args: str = "",
                  custom_exes: "list | None" = None, launch_mode: "str | None" = None,
-                 deploy_before_launch: "bool | None" = None):
+                 deploy_before_launch: "bool | None" = None,
+                 is_hidden: bool = False):
         super().__init__(parent, fg_color=BG_DEEP)
         self.title(f"Configure: {exe_path.name}")
         self.geometry("480x180" if launch_mode is not None else "640x410")
@@ -1751,9 +1752,11 @@ class _ExeConfigDialog(ctk.CTkToplevel):
         self._deploy_before_launch_var = tk.BooleanVar(
             value=True if deploy_before_launch is None else deploy_before_launch
         )
+        self._hide_var = tk.BooleanVar(value=is_hidden)
         self.result: "str | None" = None
         self.launch_mode: "str | None" = None  # set on Save when dropdown is shown
         self.deploy_before_launch: "bool | None" = None  # set on Save when shown
+        self.hide: "bool | None" = None  # set on Save for non-launcher exes
         self.removed: bool = False
 
         self._game_path: "Path | None" = (
@@ -1942,6 +1945,15 @@ class _ExeConfigDialog(ctk.CTkToplevel):
                 fg_color="#8B1A1A", hover_color="#B22222", text_color="white",
                 command=self._on_remove,
             ).pack(side="left", padx=(12, 4), pady=9)
+        # Hide checkbox — not shown for the game's own launcher
+        if not is_game_exe:
+            ctk.CTkCheckBox(
+                bar, text="Hide from dropdown",
+                variable=self._hide_var,
+                font=FONT_SMALL, text_color=TEXT_MAIN,
+                fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+                checkmark_color=BG_DEEP,
+            ).pack(side="left", padx=(12, 4), pady=9)
 
 
     def _on_mod_typed(self, *_):
@@ -1972,7 +1984,7 @@ class _ExeConfigDialog(ctk.CTkToplevel):
         scroll.pack(fill="both", expand=True)
         scroll.grid_columnconfigure(0, weight=1)
         self._mod_popup_scroll = scroll
-        self._populate_mod_popup()
+        self._populate_mod_popup(show_all=True)
 
         popup.bind("<Escape>", lambda _: self._close_mod_popup())
         popup.lift()
@@ -2036,13 +2048,13 @@ class _ExeConfigDialog(ctk.CTkToplevel):
             return
         self._close_mod_popup()
 
-    def _populate_mod_popup(self):
+    def _populate_mod_popup(self, show_all: bool = False):
         scroll = self._mod_popup_scroll
         for w in scroll.winfo_children():
             w.destroy()
         query = self._mod_var.get().casefold()
         names = [n for n, _ in self._mod_entries]
-        filtered = [n for n in names if query in n.casefold()] if query else names
+        filtered = names if (show_all or not query) else [n for n in names if query in n.casefold()]
         for name in filtered:
             btn = ctk.CTkButton(
                 scroll, text=name, anchor="w", font=FONT_SMALL,
@@ -2137,6 +2149,7 @@ class _ExeConfigDialog(ctk.CTkToplevel):
             except OSError:
                 pass
             self.result = final
+            self.hide = self._hide_var.get()
         self.grab_release()
         self.destroy()
 
@@ -2926,3 +2939,176 @@ class _SepColorPickerDialog(ctk.CTkToplevel):
     def _on_cancel_color(self):
         self.grab_release()
         self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# _ExeFilterDialog
+# ---------------------------------------------------------------------------
+
+class _ExeFilterDialog(ctk.CTkToplevel):
+    """Dialog for managing user-added EXE filter entries.
+
+    Shows executables hidden by the user via the Hide checkbox.  Custom
+    EXEs added via '+ Add custom EXE…' always bypass the filter.
+    Built-in noise executables are filtered silently and not shown here.
+
+    Parameters
+    ----------
+    parent:
+        Parent window (used for transient/modal behaviour).
+    load_fn:
+        Callable() → list[str] — returns the current user-added filter names.
+    save_fn:
+        Callable(list[str]) → None — persists the updated user list.
+    refresh_fn:
+        Callable() → None — called after every change so the dropdown
+        reflects the change immediately.
+    """
+
+    def __init__(self, parent, load_fn, save_fn, refresh_fn, **_kwargs):
+        super().__init__(parent, fg_color=BG_DEEP)
+        self.title("EXE Filter List")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        self._load_fn = load_fn
+        self._save_fn = save_fn
+        self._refresh_fn = refresh_fn
+        self._items: list[str] = list(load_fn())
+
+        self._build()
+        _center_dialog(self, parent, 440, 475)
+        self._make_modal()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_modal(self):
+        try:
+            self.grab_set()
+            self.focus_set()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def _build(self):
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self, text="EXE Filter List",
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 2))
+
+        ctk.CTkLabel(
+            self,
+            text=(
+                "User-hidden executables are listed here.\n"
+                "Use the \u2699 Configure button on any EXE to hide or unhide it."
+            ),
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+        ).grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+
+        # Unified scrollable list
+        self._list_frame = ctk.CTkScrollableFrame(
+            self, fg_color=BG_PANEL, corner_radius=6, height=280,
+        )
+        self._list_frame.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self._list_frame.grid_columnconfigure(0, weight=1)
+        self._refresh_list()
+
+        # Add-entry row
+        add_row = ctk.CTkFrame(self, fg_color="transparent")
+        add_row.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 10))
+        add_row.grid_columnconfigure(0, weight=1)
+
+        self._entry_var = tk.StringVar()
+        self._entry_widget = ctk.CTkEntry(
+            add_row, textvariable=self._entry_var, font=FONT_SMALL,
+            fg_color=BG_PANEL, text_color=TEXT_MAIN, border_color=BORDER,
+            placeholder_text="e.g.  my_helper.exe",
+        )
+        self._entry_widget.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ctk.CTkButton(
+            add_row, text="Add", width=72, height=28, font=FONT_SMALL,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            command=self._on_add,
+        ).grid(row=0, column=1)
+
+        self.bind("<Return>", lambda _: self._on_add())
+
+        # Button bar
+        bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=52)
+        bar.grid(row=4, column=0, sticky="ew")
+        bar.grid_propagate(False)
+        ctk.CTkFrame(bar, fg_color=BORDER, height=1, corner_radius=0).pack(
+            side="top", fill="x"
+        )
+        ctk.CTkButton(
+            bar, text="Close", width=80, height=30, font=FONT_NORMAL,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            command=self.destroy,
+        ).pack(side="right", padx=12, pady=10)
+
+    # ------------------------------------------------------------------
+    # List rendering
+    # ------------------------------------------------------------------
+
+    def _refresh_list(self):
+        for w in self._list_frame.winfo_children():
+            w.destroy()
+
+        user_items = sorted(self._items)
+
+        if not user_items:
+            ctk.CTkLabel(
+                self._list_frame,
+                text="(no user-hidden executables)",
+                font=FONT_SMALL, text_color=TEXT_DIM,
+            ).grid(row=0, column=0, pady=10)
+            return
+
+        for row_idx, name in enumerate(user_items):
+            row = ctk.CTkFrame(self._list_frame, fg_color="transparent")
+            row.grid(row=row_idx, column=0, sticky="ew", pady=1)
+            row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                row, text=name, font=FONT_SMALL, text_color=TEXT_MAIN, anchor="w",
+            ).grid(row=0, column=0, sticky="ew", padx=8)
+            ctk.CTkButton(
+                row, text="\u2715", width=28, height=24, font=FONT_SMALL,
+                fg_color=BG_HEADER, hover_color="#8B1A1A", text_color=TEXT_MAIN,
+                command=lambda n=name: self._on_remove(n),
+            ).grid(row=0, column=1, padx=(4, 4))
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def _on_add(self):
+        raw = self._entry_var.get().strip()
+        if not raw:
+            return
+        name = raw.lower()
+        if name not in self._items:
+            self._items.append(name)
+            self._save_fn(self._items)
+            self._refresh_fn()
+        self._entry_var.set("")
+        self._refresh_list()
+        try:
+            self._entry_widget.focus_set()
+        except Exception:
+            pass
+
+    def _on_remove(self, name: str):
+        if name in self._items:
+            self._items.remove(name)
+            self._save_fn(self._items)
+            self._refresh_fn()
+        self._refresh_list()
+

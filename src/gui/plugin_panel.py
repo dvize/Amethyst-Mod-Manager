@@ -37,7 +37,7 @@ from gui.theme import (
 )
 import gui.theme as _theme
 from gui.game_helpers import _GAMES, _vanilla_plugins_for_game
-from gui.dialogs import _PriorityDialog, _ExeConfigDialog, _VRAMrPresetDialog
+from gui.dialogs import _PriorityDialog, _ExeConfigDialog, _VRAMrPresetDialog, _ExeFilterDialog
 from gui.install_mod import install_mod_from_archive
 from gui.mod_name_utils import _suggest_mod_names as suggest_mod_names
 from gui.wizard_dialog import WizardDialog
@@ -47,7 +47,7 @@ from gui.endorsed_mods_panel import EndorsedModsPanel
 from gui.browse_mods_panel import BrowseModsPanel
 from gui.ctk_components import CTkTreeview
 
-from Utils.config_paths import get_exe_args_path
+from Utils.config_paths import get_exe_args_path, get_game_config_dir
 from Utils.filemap import build_filemap
 from Utils.xdg import xdg_open
 from Utils.plugins import (
@@ -165,6 +165,9 @@ class PluginPanel(ctk.CTkFrame):
         # User-locked plugins: plugin name (original case) → bool
         self._plugin_locks: dict[str, bool] = {}
 
+        # Framework status banners (one CTkFrame per framework entry)
+        self._framework_banner_widgets: list[ctk.CTkFrame] = []
+
         # Virtual-list pool (fixed-size widget + canvas item pool for visible rows)
         self._pool_size: int = 60
         self._pool_data_idx: list[int] = []
@@ -232,6 +235,12 @@ class PluginPanel(ctk.CTkFrame):
             command=self._open_applications_folder,
         ).pack(side="left", padx=(0, 4), pady=6)
 
+        ctk.CTkButton(
+            exe_bar, text="⊘", width=30, height=30, font=_theme.FONT_SMALL,
+            fg_color=BG_PANEL, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._on_exe_filter,
+        ).pack(side="left", padx=(0, 4), pady=6)
+
         self._tabs = ctk.CTkTabview(
             self, fg_color=BG_PANEL, corner_radius=4,
             segmented_button_fg_color=BG_HEADER,
@@ -277,6 +286,64 @@ class PluginPanel(ctk.CTkFrame):
         "OutfitStudio.exe",
         "BodySlide x64.exe",
         "BodySlide.exe",
+    })
+
+    # Exe names (lowercase) hidden from the dropdown by default.  These are
+    # helper / sub-process / redistributable executables that are commonly
+    # bundled inside mod tool archives but are never meant to be launched
+    # directly by the user.  Custom EXEs added via '+ Add custom EXE…'
+    # always bypass this filter.  Extend this list here in source when new
+    # noise exes are identified — the change ships with the application.
+    _EXE_FILTER_DEFAULTS: frozenset[str] = frozenset({
+        # DirectXTex utilities (ship with many texture tools / Creation Kit)
+        "texconv.exe",
+        "bc7.exe",
+        "bendr.exe",
+        "optimise.exe",
+        "loose.exe",
+        "layerprep.exe",
+        "filter.exe",
+        "extract.exe",
+        "exclude.exe",
+        "bsa.exe",
+        "prepparallax.exe",
+        "outputqc.exe",
+        "makeunpack.exe",
+        "loosecopy.exe",
+        "extractbsa.exe",
+        "exclusions.exe",
+        "convert.exe",
+        "bendrfilter.exe",
+        "alphanormalsql.exe",
+        "pgtools.exe",
+        "userguide.exe",
+        "lodgen.exe",
+        "lodgenx64.exe",
+        "ssedump.exe",
+        "ssedump64.exe",
+        "texconvx64.exe",
+        "merge.bat",
+        "re-uv.bat",
+        "treelod.exe",
+        "kdiff3.exe",
+        "quickbms.exe",
+        "quickbms_4gb_files.exe",
+        "wcc_lite.exe",
+        "fo4dump.exe",
+        "fo4dump64.exe",
+        "reimport.bat",
+        "reimport2.bat",
+        "reimport2_4gb_files.bat",
+        "reimport3_localizations.bat",
+        "reimport_4gb_files.bat",
+        "fnvdump.exe",
+        "fnvdump64.exe",
+        "fo3dump.exe",
+        "fo3dump64.exe",
+        "tes4dump.exe",
+        "tes4dump64.exe",
+        "tes5dump.exe",
+        "tes5dump64.exe",
     })
 
     def refresh_exe_list(self):
@@ -370,6 +437,15 @@ class PluginPanel(ctk.CTkFrame):
 
         exes.sort(key=_sort_key)
 
+        # Apply exe filter — built-in defaults combined with user-hidden list.
+        # Custom exes always bypass the filter.
+        _filtered_names = self._EXE_FILTER_DEFAULTS | {n.lower() for n in self._load_exe_filter()}
+        if _filtered_names:
+            exes = [
+                p for p in exes
+                if p.name.lower() not in _filtered_names or p in custom_set
+            ]
+
         # Auto-populate exe_args.json with default prefixes for known tools
         if self._game is not None and exes:
             try:
@@ -427,6 +503,7 @@ class PluginPanel(ctk.CTkFrame):
     _EXE_ARGS_FILE = get_exe_args_path()
     _ADD_CUSTOM_SENTINEL = "+ Add custom EXE…"
     _CUSTOM_EXES_FILE = "custom_exes.json"
+    _EXE_FILTER_FILE  = "exe_filter.json"
     _LAUNCH_MODE_FILE = "exe_launch_mode.json"
 
     def _get_launch_mode_path(self) -> "Path | None":
@@ -513,6 +590,29 @@ class PluginPanel(ctk.CTkFrame):
         except Exception as e:
             self._log(f"Could not open Applications folder: {e}")
 
+    def _get_exe_filter_path(self) -> "Path | None":
+        """Return path to ~/.config/AmethystModManager/games/<game>/exe_filter.json."""
+        if self._game is None:
+            return None
+        return get_game_config_dir(self._game.name) / self._EXE_FILTER_FILE
+
+    def _load_exe_filter(self) -> "list[str]":
+        """Return list of exe names (lowercase) that should be hidden from the dropdown."""
+        p = self._get_exe_filter_path()
+        if p is None or not p.is_file():
+            return []
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return [s.lower() for s in data if isinstance(s, str)]
+        except (OSError, ValueError):
+            return []
+
+    def _save_exe_filter(self, names: "list[str]") -> None:
+        p = self._get_exe_filter_path()
+        if p is None:
+            return
+        p.write_text(json.dumps([n.lower() for n in names], indent=2), encoding="utf-8")
+
     def _get_custom_exes_path(self) -> "Path | None":
         """Return path to <game>/Applications/custom_exes.json, or None if no game."""
         if self._game is None:
@@ -547,6 +647,15 @@ class PluginPanel(ctk.CTkFrame):
         ("Executables (*.exe, *.bat)", ["*.exe", "*.bat"]),
         ("All files", ["*"]),
     ]
+
+    def _on_exe_filter(self) -> None:
+        """Open the EXE filter list dialog."""
+        _ExeFilterDialog(
+            self.winfo_toplevel(),
+            load_fn=self._load_exe_filter,
+            save_fn=self._save_exe_filter,
+            refresh_fn=self.refresh_exe_list,
+        )
 
     def _add_custom_exe(self) -> None:
         """Open native file browser (XDG portal / zenity), save chosen exe, refresh list."""
@@ -606,6 +715,10 @@ class PluginPanel(ctk.CTkFrame):
         is_game_exe = self._is_game_exe(exe_path)
         saved_launch_mode = self._load_launch_mode(exe_path.name) if is_game_exe else None
         deploy_before_launch = self._load_deploy_before_launch() if is_game_exe else None
+        # Determine current hidden state from user filter (builtin filter names
+        # are always hidden and can't be toggled, so we only look at the user list).
+        user_filter = {n.lower() for n in self._load_exe_filter()}
+        is_hidden = exe_path.name.lower() in user_filter
         dialog = _ExeConfigDialog(
             self.winfo_toplevel(),
             exe_path=exe_path,
@@ -614,6 +727,7 @@ class PluginPanel(ctk.CTkFrame):
             custom_exes=custom_exes,
             launch_mode=saved_launch_mode,
             deploy_before_launch=deploy_before_launch,
+            is_hidden=is_hidden,
         )
         self.winfo_toplevel().wait_window(dialog)
         if dialog.result is not None:
@@ -626,6 +740,17 @@ class PluginPanel(ctk.CTkFrame):
             remaining = [p for p in custom_exes if p != exe_path]
             self._save_custom_exes(remaining)
             self.refresh_exe_list()
+        if dialog.hide is not None:
+            name = exe_path.name.lower()
+            current = list(self._load_exe_filter())
+            if dialog.hide and name not in current:
+                current.append(name)
+                self._save_exe_filter(current)
+                self.refresh_exe_list()
+            elif not dialog.hide and name in current:
+                current.remove(name)
+                self._save_exe_filter(current)
+                self.refresh_exe_list()
 
     def _exe_var_index(self) -> int:
         """Return the index of the currently selected exe in _exe_paths."""
@@ -1732,7 +1857,7 @@ class PluginPanel(ctk.CTkFrame):
 
     def _build_plugins_tab(self):
         tab = self._tabs.tab("Plugins")
-        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
         tab.grid_columnconfigure(0, weight=1)
 
         self._pheader = ctk.CTkFrame(tab, fg_color=BG_HEADER, corner_radius=0, height=28)
@@ -1740,8 +1865,15 @@ class PluginPanel(ctk.CTkFrame):
         self._pheader.grid_propagate(False)
         self._pheader_labels: list[ctk.CTkLabel] = []
 
+        # Framework status banners (populated by _refresh_framework_banners)
+        self._framework_banners_frame = ctk.CTkFrame(
+            tab, fg_color=BG_PANEL, corner_radius=0
+        )
+        self._framework_banners_frame.grid(row=1, column=0, sticky="ew")
+        self._framework_banners_frame.grid_columnconfigure(0, weight=1)
+
         canvas_frame = tk.Frame(tab, bg=BG_DEEP, bd=0, highlightthickness=0)
-        canvas_frame.grid(row=1, column=0, sticky="nsew")
+        canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
 
@@ -1769,7 +1901,7 @@ class PluginPanel(ctk.CTkFrame):
         self._pcanvas.bind("<ButtonRelease-3>", self._on_plugin_right_click)
 
         toolbar = ctk.CTkFrame(tab, fg_color=BG_PANEL, corner_radius=0, height=36)
-        toolbar.grid(row=2, column=0, sticky="ew")
+        toolbar.grid(row=3, column=0, sticky="ew")
         toolbar.grid_propagate(False)
 
         ctk.CTkButton(
@@ -2094,8 +2226,91 @@ class PluginPanel(ctk.CTkFrame):
     # Plugins tab refresh (canvas-based)
     # ------------------------------------------------------------------
 
+    # Colours for framework status banners
+    _FW_GREEN_BG   = "#1b4d1b"
+    _FW_GREEN_TEXT = "#c8ffc8"
+    _FW_RED_BG     = "#4d1b1b"
+    _FW_RED_TEXT   = "#ffc8c8"
+
+    def _refresh_framework_banners(self) -> None:
+        """Rebuild the framework status banners at the top of the Plugins tab."""
+        # Destroy old banners and hide the container until we know there's content
+        for widget in self._framework_banner_widgets:
+            widget.destroy()
+        self._framework_banner_widgets.clear()
+        self._framework_banners_frame.grid_remove()
+
+        if self._game is None:
+            return
+
+        frameworks: dict[str, str] = {}
+        try:
+            frameworks = self._game.frameworks
+        except Exception:
+            return
+
+        if not frameworks:
+            return
+
+        game_root: "Path | None" = None
+        try:
+            game_root = self._game.get_game_path() if hasattr(self._game, "get_game_path") else None
+        except Exception:
+            pass
+
+        root_folder: "Path | None" = None
+        try:
+            root_folder = self._game.get_profile_root() / "Root_Folder"
+        except Exception:
+            pass
+
+        # Show the container now that we know there's at least one banner to display
+        self._framework_banners_frame.grid(row=1, column=0, sticky="ew")
+
+        for idx, (label, exe) in enumerate(frameworks.items()):
+            exe_path = Path(exe)
+            present = False
+            # Check game root directory
+            if game_root is not None:
+                if (game_root / exe_path).is_file():
+                    present = True
+            # Check profile Root_Folder staging directory
+            if not present and root_folder is not None:
+                if (root_folder / exe_path).is_file():
+                    present = True
+
+            if present:
+                bg    = self._FW_GREEN_BG
+                fg    = self._FW_GREEN_TEXT
+                msg   = f"✔  {label} Installed"
+            else:
+                bg    = self._FW_RED_BG
+                fg    = self._FW_RED_TEXT
+                msg   = f"✘  {label} Not Present"
+
+            row_frame = ctk.CTkFrame(
+                self._framework_banners_frame,
+                fg_color=bg,
+                corner_radius=0,
+                height=22,
+            )
+            row_frame.grid(row=idx, column=0, sticky="ew", padx=0, pady=(1, 0))
+            row_frame.grid_propagate(False)
+
+            ctk.CTkLabel(
+                row_frame,
+                text=msg,
+                font=_theme.FONT_SMALL,
+                text_color=fg,
+                fg_color="transparent",
+                anchor="w",
+            ).pack(side="left", padx=10, fill="y", expand=False)
+
+            self._framework_banner_widgets.append(row_frame)
+
     def _refresh_plugins_tab(self) -> None:
         """Reload plugin entries from plugins.txt and redraw."""
+        self._refresh_framework_banners()
         self._sel_idx = -1
         self._psel_set = set()
         self._drag_idx = -1
