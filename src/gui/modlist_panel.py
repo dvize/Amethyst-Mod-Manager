@@ -424,7 +424,7 @@ class ModListPanel(ctk.CTkFrame):
             fg_color="#c07320", hover_color="#d4832a",
             text_color="#ffffff", font=_theme.FONT_SMALL,
             command=self._on_collections
-        ).pack(side="left", padx=(8, 4), pady=5)
+        )  # hidden for now
 
         # Expand/Collapse all separators toggle
         self._expand_collapse_all_btn = ctk.CTkButton(
@@ -3204,9 +3204,8 @@ class ModListPanel(ctk.CTkFrame):
             ]
             self._mod_strip_prefixes[mod_name] = chosen
             self._save_mod_strip_prefixes()
-            self._rebuild_filemap()
-            self._redraw()
             win.destroy()
+            self._reload()
 
         def _cancel():
             win.destroy()
