@@ -424,7 +424,7 @@ class ModListPanel(ctk.CTkFrame):
             fg_color="#c07320", hover_color="#d4832a",
             text_color="#ffffff", font=_theme.FONT_SMALL,
             command=self._on_collections
-        )  # hidden for now
+        ).pack(side="left", padx=4, pady=5)
 
         # Expand/Collapse all separators toggle
         self._expand_collapse_all_btn = ctk.CTkButton(
