@@ -24,13 +24,14 @@ from gui.game_helpers import _create_profile, _profiles_for_game
 from gui.install_mod import install_mod_from_archive
 from gui.mod_card import CARD_PAD, make_placeholder_image
 from gui.mod_name_utils import _suggest_mod_names
-from Utils.modlist import write_modlist, ModEntry
+from Utils.modlist import write_modlist, read_modlist, ModEntry
+from Nexus.nexus_meta import build_meta_from_download
 
 # Collections-specific card dimensions (5-column grid)
 _COLL_COLS  = 5
 _COLL_W     = 200
 _COLL_IMG_W = 190
-_COLL_IMG_H = 110
+_COLL_IMG_H = 240
 from gui.theme import (
     BG_DEEP,
     BG_PANEL,
@@ -121,7 +122,7 @@ class CollectionCard:
         # Outer card frame
         self.card = ctk.CTkFrame(
             parent,
-            width=_COLL_W, height=320,
+            width=_COLL_W, height=420,
             fg_color=BG_PANEL,
             border_color=BORDER, border_width=1,
             corner_radius=8,
@@ -144,10 +145,28 @@ class CollectionCard:
         )
         self._img_label.pack(padx=5, pady=(6, 3))
 
+        # Button row — fixed-height footer so all cards align consistently (packed first so it's anchored to the bottom)
+        btn_frame = tk.Frame(self.card, bg=BG_PANEL, height=44)
+        btn_frame.pack(side="bottom", fill="x")
+        btn_frame.pack_propagate(False)
+        ctk.CTkButton(
+            btn_frame, text="View",
+            width=_COLL_W - 20, height=28,
+            fg_color=ACCENT, hover_color=ACCENT_HOV,
+            text_color="#ffffff", font=FONT_SMALL,
+            command=on_view,
+        ).place(relx=0.5, rely=0.5, anchor="center")
+
+        # Fixed-height text area — prevents overflow from pushing the button around
+        # Card=420, image=240+9px padding, button=44 → text area ≈ 127px
+        text_frame = tk.Frame(self.card, bg=BG_PANEL, height=127)
+        text_frame.pack(fill="x")
+        text_frame.pack_propagate(False)
+
         # Name
         name_text = col.name or f"Collection {col.id}"
         ctk.CTkLabel(
-            self.card, text=name_text,
+            text_frame, text=name_text,
             font=FONT_BOLD, text_color=TEXT_MAIN,
             wraplength=_COLL_W - 16, justify="left", anchor="w",
         ).pack(padx=8, fill="x")
@@ -155,7 +174,7 @@ class CollectionCard:
         # Stats: downloads, endorsements, mod count
         stats = f"↓{col.total_downloads:,}  ♥{col.endorsements:,}  {col.mod_count} mods"
         ctk.CTkLabel(
-            self.card, text=stats,
+            text_frame, text=stats,
             font=FONT_SMALL, text_color=TEXT_DIM,
             anchor="w",
         ).pack(padx=8, fill="x")
@@ -163,7 +182,7 @@ class CollectionCard:
         # Author
         if col.user_name:
             ctk.CTkLabel(
-                self.card, text=f"by {col.user_name}",
+                text_frame, text=f"by {col.user_name}",
                 font=FONT_SMALL, text_color=TEXT_DIM,
                 anchor="w",
             ).pack(padx=8, fill="x")
@@ -174,18 +193,21 @@ class CollectionCard:
             summary = summary[:_SUMMARY_MAX].rstrip() + "…"
         if summary:
             ctk.CTkLabel(
-                self.card, text=summary,
+                text_frame, text=summary,
                 font=FONT_SMALL, text_color=TEXT_DIM,
                 wraplength=_COLL_W - 16, justify="left", anchor="w",
             ).pack(padx=8, pady=(2, 0), fill="x")
 
-        # Button row
+        # (btn_frame already packed above)
+        btn_frame.pack(side="bottom", fill="x")
+        btn_frame.pack_propagate(False)
         ctk.CTkButton(
-            self.card, text="View",
-            height=28, fg_color=ACCENT, hover_color=ACCENT_HOV,
+            btn_frame, text="View",
+            width=_COLL_W - 20, height=28,
+            fg_color=ACCENT, hover_color=ACCENT_HOV,
             text_color="#ffffff", font=FONT_SMALL,
             command=on_view,
-        ).pack(padx=10, pady=(6, 8), fill="x", side="bottom")
+        ).place(relx=0.5, rely=0.5, anchor="center")
 
     def load_image_async(self, url: str, cache: dict, loading: set, root: tk.Widget):
         """Start async tile image load (same pattern as mod_card.py)."""
@@ -263,6 +285,7 @@ class CollectionDetailDialog(tk.Frame):
         self._schema_order: dict = {}
 
         self._reset_btn = None  # created in _build_ui; shown only when profile exists
+        self._file_id_to_tree_iid: dict[int, str] = {}  # populated by _populate; used to green rows live
 
         self._build_ui()
         self._fetch()
@@ -369,6 +392,7 @@ class CollectionDetailDialog(tk.Frame):
         self._tree.tag_configure("odd", background=BG_ROW)
         self._tree.tag_configure("even", background=BG_PANEL)
         self._tree.tag_configure("unordered", foreground="#888888")
+        self._tree.tag_configure("installed", background="#1e4d1e")
 
         # --- Priority note ---
         note = tk.Label(
@@ -429,6 +453,7 @@ class CollectionDetailDialog(tk.Frame):
 
             # Also fetch collection.json to get the authoritative install order
             schema_order: dict[int, int] = {}  # file_id → 0-based position
+            cj: dict = {}
             if dl_path:
                 try:
                     self.after(0, lambda: self._status_var.set(
@@ -441,6 +466,10 @@ class CollectionDetailDialog(tk.Frame):
                             schema_order[int(fid)] = pos
                 except Exception as exc:
                     self._log(f"CollectionDetail: could not fetch collection.json: {exc}")
+
+            # Cache the full schema dict so _run_install can reuse it without
+            # downloading the archive a second time.
+            self._collection_schema_cache = cj
 
             try:
                 self.after(0, lambda: self._populate(total_size, mod_count, mods, dl_path, schema_order))
@@ -474,6 +503,9 @@ class CollectionDetailDialog(tk.Frame):
         else:
             self._status_var.set(f"{len(mods):,} mod file entries loaded (collection order unavailable)")
 
+        installed_names, file_id_to_folder = self._get_installed_mod_info()
+        self._file_id_to_tree_iid.clear()
+
         for display_i, mod in enumerate(sorted_mods, start=1):
             tag = "odd" if display_i % 2 else "even"
             opt_mark = "\u2713" if mod.optional else ""
@@ -484,12 +516,53 @@ class CollectionDetailDialog(tk.Frame):
                 tag = "unordered"
             else:
                 order_label = str(display_i)
-            self._tree.insert(
+
+            # Highlight rows where the mod is already installed in the collection profile
+            is_installed = False
+            if installed_names is not None:
+                if mod.file_id and mod.file_id in file_id_to_folder:
+                    is_installed = True
+                elif installed_names:
+                    for raw in (mod.mod_name or "", mod.file_name or ""):
+                        if raw:
+                            for s in _suggest_mod_names(raw):
+                                if s and s.lower() in installed_names:
+                                    is_installed = True
+                                    break
+                        if is_installed:
+                            break
+
+            if is_installed:
+                row_tags = ("installed", "unordered") if tag == "unordered" else ("installed",)
+            else:
+                row_tags = (tag,)
+
+            iid = self._tree.insert(
                 "", "end",
                 values=(order_label, mod.mod_name, mod.mod_author, mod.file_name,
                         _fmt_size(mod.size_bytes), opt_mark),
-                tags=(tag,),
+                tags=row_tags,
             )
+            if mod.file_id:
+                self._file_id_to_tree_iid[mod.file_id] = iid
+
+    def _mark_row_installed(self, file_id: int) -> None:
+        """Switch a treeview row to the green 'installed' tag (called on main thread)."""
+        iid = self._file_id_to_tree_iid.get(file_id)
+        if not iid:
+            return
+        try:
+            if not self._tree.exists(iid):
+                return
+            current_tags = self._tree.item(iid, "tags")
+            new_tags = tuple(
+                t for t in current_tags if t not in ("odd", "even")
+            )
+            if "installed" not in new_tags:
+                new_tags = ("installed",) + new_tags
+            self._tree.item(iid, tags=new_tags)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Collection install
@@ -567,18 +640,25 @@ class CollectionDetailDialog(tk.Frame):
         # ------------------------------------------------------------------
         collection_schema: dict = {}
         if download_link_path:
-            try:
-                self.after(0, lambda: self._status_var.set("Downloading collection manifest…"))
-            except Exception:
-                pass
-            try:
-                collection_schema = self._api.get_collection_archive_json(download_link_path)
-                self._log(f"Collection install: parsed collection.json "
-                          f"({len(collection_schema.get('mods', []))} mod entries, "
-                          f"{len(collection_schema.get('plugins', []))} plugins)")
-            except Exception as exc:
-                self._log(f"Collection install: could not download collection.json: {exc} — "
-                          "continuing with GraphQL order")
+            # Reuse the schema already fetched when the detail panel opened,
+            # if available — avoids downloading the archive twice.
+            cached = getattr(self, "_collection_schema_cache", None)
+            if cached:
+                collection_schema = cached
+                self._log("Collection install: reusing cached collection.json")
+            else:
+                try:
+                    self.after(0, lambda: self._status_var.set("Downloading collection manifest…"))
+                except Exception:
+                    pass
+                try:
+                    collection_schema = self._api.get_collection_archive_json(download_link_path)
+                    self._log(f"Collection install: parsed collection.json "
+                              f"({len(collection_schema.get('mods', []))} mod entries, "
+                              f"{len(collection_schema.get('plugins', []))} plugins)")
+                except Exception as exc:
+                    self._log(f"Collection install: could not download collection.json: {exc} — "
+                              "continuing with GraphQL order")
 
         # Build a mapping from file_id → position in collection.json mods array
         # and file_id → pre-converted FOMOD auto-selections (if any)
@@ -735,6 +815,7 @@ class CollectionDetailDialog(tk.Frame):
                     file_id=mod.file_id,
                     progress_cb=_progress_cb,
                     cancel=dl_cancel,
+                    known_file_name=mod.file_name or "",
                 )
             except Exception as exc:
                 self._log(f"Collection install: download failed for '{mod.mod_name}': {exc}")
@@ -802,11 +883,26 @@ class CollectionDetailDialog(tk.Frame):
             archive_path = str(result.file_path)
             auto_fomod = fomod_by_file_id.get(mod.file_id)
 
-            def _do_install(ap=archive_path, cm=mod, af=auto_fomod):
+            def _do_install(ap=archive_path, cm=mod, af=auto_fomod, gd=self._game_domain):
                 try:
+                    # Build metadata from the collection's own fields so
+                    # install_mod_from_archive doesn't need extra API calls.
+                    try:
+                        _pmeta = build_meta_from_download(
+                            game_domain=gd,
+                            mod_id=cm.mod_id,
+                            file_id=cm.file_id,
+                            archive_name=cm.file_name or "",
+                        )
+                        _pmeta.nexus_name = cm.mod_name or ""
+                        _pmeta.author = cm.mod_author or ""
+                        _pmeta.version = cm.version or ""
+                    except Exception:
+                        _pmeta = None
                     install_mod_from_archive(
                         ap, self, self._log, self._game,
                         fomod_auto_selections=af,
+                        prebuilt_meta=_pmeta,
                     )
                 except Exception as exc:
                     self._log(f"Collection install: install failed for '{cm.mod_name}': {exc}")
@@ -842,6 +938,13 @@ class CollectionDetailDialog(tk.Frame):
 
             install_order.append((sort_key, new_folder))
             installed += 1
+
+            # Update the row colour to green on the main thread
+            if mod.file_id:
+                try:
+                    self.after(0, lambda fid=mod.file_id: self._mark_row_installed(fid))
+                except Exception:
+                    pass
 
         # ------------------------------------------------------------------
         # Step 3: Write modlist.txt in collection-defined order
@@ -923,6 +1026,48 @@ class CollectionDetailDialog(tk.Frame):
             profiles_root = get_profiles_dir() / (game.name if game else "")
         profile_dir = profiles_root / "profiles" / profile_name
         return profile_dir if profile_dir.is_dir() else None
+
+    def _get_installed_mod_info(self) -> "tuple[set[str] | None, dict[int, str]]":
+        """Return (lowercased installed mod folder names, file_id→folder_name) for the
+        collection profile.  Returns (None, {}) if the profile doesn't exist.
+        """
+        profile_dir = self._get_profile_dir()
+        if profile_dir is None:
+            return None, {}
+
+        modlist_path = profile_dir / "modlist.txt"
+        try:
+            entries = read_modlist(modlist_path)
+            installed_names: set[str] = {e.name.lower() for e in entries if not e.is_separator}
+        except Exception:
+            installed_names = set()
+
+        # Scan staging for file_id → folder_name (only folders present in modlist)
+        file_id_to_folder: dict[int, str] = {}
+        try:
+            staging_path = self._game.get_effective_mod_staging_path()
+            if staging_path.exists():
+                import configparser as _cp
+                for mod_dir in staging_path.iterdir():
+                    if not mod_dir.is_dir():
+                        continue
+                    if mod_dir.name.lower() not in installed_names:
+                        continue
+                    meta_ini = mod_dir / "meta.ini"
+                    if not meta_ini.is_file():
+                        continue
+                    try:
+                        _parser = _cp.ConfigParser()
+                        _parser.read(str(meta_ini), encoding="utf-8")
+                        fid_str = _parser.get("General", "fileid", fallback="").strip()
+                        if fid_str and fid_str != "0":
+                            file_id_to_folder[int(fid_str)] = mod_dir.name
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return installed_names, file_id_to_folder
 
     def _update_reset_btn_visibility(self):
         """Show/hide the Reset Load Order button based on whether the profile exists."""
@@ -1106,9 +1251,34 @@ class CollectionsDialog(tk.Frame):
     # Build UI
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # URL parsing helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_collection_url(url: str) -> tuple[str, str]:
+        """
+        Extract (slug, game_domain) from a Nexus Mods collection URL.
+
+        Handles patterns like:
+          https://www.nexusmods.com/skyrimspecialedition/collections/x2ezso
+          https://www.nexusmods.com/games/skyrimspecialedition/collections/x2ezso
+          https://next.nexusmods.com/skyrimspecialedition/collections/x2ezso
+        Returns ('', '') if parsing fails.
+        """
+        m = re.search(
+            r'nexusmods\.com/(?:games/)?([^/?#]+)/collections/([A-Za-z0-9_\-]+)',
+            url,
+        )
+        if m:
+            return m.group(2), m.group(1)
+        return '', ''
+
     def _build(self):
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(2, weight=0)
+        self.grid_rowconfigure(2, weight=1)  # canvas row
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(3, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
         # Toolbar
@@ -1148,15 +1318,72 @@ class CollectionsDialog(tk.Frame):
         )
         self._next_btn.pack(side="left", padx=4, pady=4)
 
+        self._url_toggle_btn = tk.Button(
+            toolbar, text="Open URL…",
+            bg="#2d5a8e", fg="#ffffff", activebackground="#3d6faa",
+            activeforeground="#ffffff",
+            relief="flat", font=FONT_SMALL,
+            bd=0, highlightthickness=0, cursor="hand2",
+            command=self._toggle_url_bar,
+        )
+        self._url_toggle_btn.pack(side="left", padx=(4, 4), pady=4)
+
         self._status_label = tk.Label(
             toolbar, text="Loading collections…",
             font=FONT_SMALL, fg=TEXT_DIM, bg=BG_HEADER, anchor="w",
         )
         self._status_label.pack(side="left", padx=8, fill="x", expand=True)
 
+        # URL bar (hidden by default — shown when "Open URL" button is pressed)
+        self._url_bar = tk.Frame(self, bg=BG_HEADER, height=34)
+        self._url_bar.grid(row=1, column=0, sticky="ew")
+        self._url_bar.grid_propagate(False)
+        self._url_bar.grid_remove()   # hidden until toggled
+
+        tk.Label(
+            self._url_bar, text="Collection URL:",
+            font=FONT_SMALL, fg=TEXT_DIM, bg=BG_HEADER,
+        ).pack(side="left", padx=(8, 4), pady=5)
+
+        self._url_var = tk.StringVar()
+        self._url_entry = tk.Entry(
+            self._url_bar,
+            textvariable=self._url_var,
+            bg=BG_ROW, fg=TEXT_MAIN,
+            insertbackground=TEXT_MAIN,
+            relief="flat", font=FONT_SMALL,
+            bd=2, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT,
+        )
+        self._url_entry.pack(side="left", fill="x", expand=True, pady=5)
+        self._url_entry.bind("<Return>", lambda _e: self._go_from_url())
+        self._url_entry.bind(
+            "<Control-a>",
+            lambda _e: (self._url_entry.selection_range(0, "end"), "break")[-1],
+        )
+        self._url_entry.bind("<Escape>", lambda _e: self._toggle_url_bar())
+
+        tk.Button(
+            self._url_bar, text="Go",
+            bg=ACCENT, fg="#ffffff", activebackground=ACCENT_HOV,
+            activeforeground="#ffffff",
+            relief="flat", font=FONT_SMALL,
+            bd=0, highlightthickness=0, cursor="hand2",
+            command=self._go_from_url,
+        ).pack(side="left", padx=(4, 4), pady=5)
+
+        tk.Button(
+            self._url_bar, text="✕",
+            bg="#b33a3a", fg="#ffffff", activebackground="#c94848",
+            activeforeground="#ffffff",
+            relief="flat", font=FONT_SMALL,
+            bd=0, highlightthickness=0, cursor="hand2",
+            command=self._toggle_url_bar,
+        ).pack(side="left", padx=(0, 8), pady=5)
+
         # Scrollable card canvas
         canvas_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
-        canvas_frame.grid(row=1, column=0, sticky="nsew")
+        canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
 
@@ -1185,7 +1412,7 @@ class CollectionsDialog(tk.Frame):
 
         # Search bar
         search_bar = tk.Frame(self, bg=BG_HEADER, height=34)
-        search_bar.grid(row=2, column=0, sticky="ew")
+        search_bar.grid(row=3, column=0, sticky="ew")
         search_bar.grid_propagate(False)
 
         tk.Label(
@@ -1237,6 +1464,48 @@ class CollectionsDialog(tk.Frame):
         else:
             self.place_forget()
             self.destroy()
+
+    # ------------------------------------------------------------------
+    # Open from URL
+    # ------------------------------------------------------------------
+
+    def _toggle_url_bar(self):
+        """Show/hide the URL input bar."""
+        if self._url_bar.winfo_ismapped():
+            self._url_bar.grid_remove()
+            self._url_toggle_btn.configure(bg="#2d5a8e", activebackground="#3d6faa")
+        else:
+            self._url_bar.grid()
+            self._url_toggle_btn.configure(bg="#3d6faa", activebackground="#2d5a8e")
+            self._url_entry.focus_set()
+
+    def _go_from_url(self):
+        """Parse the entered URL and open the matching collection detail."""
+        url = self._url_var.get().strip()
+        if not url:
+            self._status_label.configure(text="Please enter a collection URL.")
+            return
+
+        slug, url_domain = self._parse_collection_url(url)
+        if not slug:
+            self._status_label.configure(
+                text="Could not parse URL — expected …nexusmods.com/…/collections/<slug>"
+            )
+            return
+
+        # Use the domain from the URL when it differs from the current game domain
+        game_domain = url_domain or self._game_domain
+
+        self._status_label.configure(text=f"Loading collection '{slug}'…")
+        self._url_bar.grid_remove()
+        self._url_toggle_btn.configure(bg="#2d5a8e", activebackground="#3d6faa")
+
+        from Nexus.nexus_api import NexusCollection
+        # The detail dialog fetches all data itself; we just need the slug.
+        # Use the slug as a placeholder name — the dialog header will show it
+        # until CollectionDetailDialog populates the real name from the API.
+        col = NexusCollection(slug=slug, name=slug, game_domain=game_domain)
+        self._open_detail(col)
 
     # ------------------------------------------------------------------
     # Canvas / scroll helpers
@@ -1305,21 +1574,25 @@ class CollectionsDialog(tk.Frame):
             self._detail_panel = None
 
     def _regrid_cards(self):
-        total_card_w = self._cols * _COLL_W + (self._cols - 1) * CARD_PAD
-        canvas_w = self._canvas.winfo_width() or (self._cols * (_COLL_W + CARD_PAD * 2))
+        canvas_w = self._canvas.winfo_width() or (_COLL_COLS * (_COLL_W + CARD_PAD * 2))
+        # Compute how many fixed-width cards fit across the available width
+        cols = max(1, canvas_w // (_COLL_W + CARD_PAD * 2))
+        self._cols = cols
+
+        total_card_w = cols * _COLL_W + (cols - 1) * CARD_PAD
         x_pad = max(CARD_PAD, (canvas_w - total_card_w) // 2)
 
         for idx, c in enumerate(self._cards):
-            col = idx % self._cols
-            row = idx // self._cols
+            col = idx % cols
+            row = idx // cols
             c.card.grid(
                 row=row, column=col,
                 padx=(x_pad if col == 0 else CARD_PAD // 2,
-                       x_pad if col == self._cols - 1 else CARD_PAD // 2),
+                       x_pad if col == cols - 1 else CARD_PAD // 2),
                 pady=CARD_PAD,
                 sticky="n",
             )
-        for c in range(self._cols):
+        for c in range(cols):
             self._inner.grid_columnconfigure(c, weight=1)
 
     def _load_images(self):

@@ -1424,10 +1424,8 @@ class PluginPanel(ctk.CTkFrame):
                 return
 
             # Premium user — find the latest MAIN file and download directly
-            mod_info = None
             file_info = None
             try:
-                mod_info = api.get_mod(domain, mod_id)
                 files_resp = api.get_mod_files(domain, mod_id)
                 main_files = [f for f in files_resp.files
                               if f.category_name == "MAIN"]
@@ -1462,6 +1460,7 @@ class PluginPanel(ctk.CTkFrame):
                     )
                 ),
                 cancel=cancel_event_tracked,
+                known_file_name=file_info.file_name,
             )
 
             if result.success and result.file_path:
@@ -1478,33 +1477,20 @@ class PluginPanel(ctk.CTkFrame):
                     if mod_panel:
                         mod_panel.hide_download_progress(cancel=cancel_event_tracked)
                     log_fn(f"Tracked Mods: Installing '{mod_name}'...")
-                    install_mod_from_archive(
-                        str(result.file_path), app, log_fn, game, mod_panel)
-                    # Write Nexus metadata
                     try:
-                        meta = build_meta_from_download(
+                        _prebuilt = build_meta_from_download(
                             game_domain=domain,
                             mod_id=mod_id,
                             file_id=file_info.file_id,
                             archive_name=result.file_name,
-                            mod_info=mod_info,
+                            mod_info=entry,
                             file_info=file_info,
                         )
-                        raw_stem = os.path.splitext(
-                            os.path.basename(str(result.file_path)))[0]
-                        if raw_stem.endswith(".tar"):
-                            raw_stem = os.path.splitext(raw_stem)[0]
-                        suggestions = suggest_mod_names(raw_stem)
-                        folder_name = suggestions[0] if suggestions else raw_stem
-                        meta_path = (game.get_effective_mod_staging_path()
-                                     / folder_name / "meta.ini")
-                        if meta_path.parent.is_dir():
-                            write_meta(meta_path, meta)
-                            log_fn(f"Tracked Mods: Saved metadata "
-                                   f"(mod {meta.mod_id}, v{meta.version})")
-                    except Exception as exc:
-                        log_fn(f"Tracked Mods: Warning — could not save "
-                               f"metadata: {exc}")
+                    except Exception:
+                        _prebuilt = None
+                    install_mod_from_archive(
+                        str(result.file_path), app, log_fn, game, mod_panel,
+                        prebuilt_meta=_prebuilt)
                 app.after(0, _install)
             else:
                 app.after(0, lambda: (
@@ -1604,10 +1590,8 @@ class PluginPanel(ctk.CTkFrame):
                 return
 
             # Premium user — find the latest MAIN file and download directly
-            mod_info = None
             file_info = None
             try:
-                mod_info = api.get_mod(domain, mod_id)
                 files_resp = api.get_mod_files(domain, mod_id)
                 main_files = [f for f in files_resp.files
                               if f.category_name == "MAIN"]
@@ -1642,6 +1626,7 @@ class PluginPanel(ctk.CTkFrame):
                     )
                 ),
                 cancel=cancel_event_endorsed,
+                known_file_name=file_info.file_name,
             )
 
             if result.success and result.file_path:
@@ -1658,33 +1643,20 @@ class PluginPanel(ctk.CTkFrame):
                     if mod_panel:
                         mod_panel.hide_download_progress(cancel=cancel_event_endorsed)
                     log_fn(f"Endorsed Mods: Installing '{mod_name}'...")
-                    install_mod_from_archive(
-                        str(result.file_path), app, log_fn, game, mod_panel)
-                    # Write Nexus metadata
                     try:
-                        meta = build_meta_from_download(
+                        _prebuilt = build_meta_from_download(
                             game_domain=domain,
                             mod_id=mod_id,
                             file_id=file_info.file_id,
                             archive_name=result.file_name,
-                            mod_info=mod_info,
+                            mod_info=entry,
                             file_info=file_info,
                         )
-                        raw_stem = os.path.splitext(
-                            os.path.basename(str(result.file_path)))[0]
-                        if raw_stem.endswith(".tar"):
-                            raw_stem = os.path.splitext(raw_stem)[0]
-                        suggestions = suggest_mod_names(raw_stem)
-                        folder_name = suggestions[0] if suggestions else raw_stem
-                        meta_path = (game.get_effective_mod_staging_path()
-                                     / folder_name / "meta.ini")
-                        if meta_path.parent.is_dir():
-                            write_meta(meta_path, meta)
-                            log_fn(f"Endorsed Mods: Saved metadata "
-                                   f"(mod {meta.mod_id}, v{meta.version})")
-                    except Exception as exc:
-                        log_fn(f"Endorsed Mods: Warning — could not save "
-                               f"metadata: {exc}")
+                    except Exception:
+                        _prebuilt = None
+                    install_mod_from_archive(
+                        str(result.file_path), app, log_fn, game, mod_panel,
+                        prebuilt_meta=_prebuilt)
                 app.after(0, _install)
             else:
                 app.after(0, lambda: (
@@ -1776,10 +1748,8 @@ class PluginPanel(ctk.CTkFrame):
                 app.after(0, _fallback)
                 return
 
-            mod_info = None
             file_info = None
             try:
-                mod_info = api.get_mod(domain, mod_id)
                 files_resp = api.get_mod_files(domain, mod_id)
                 main_files = [f for f in files_resp.files
                               if f.category_name == "MAIN"]
@@ -1814,6 +1784,7 @@ class PluginPanel(ctk.CTkFrame):
                     )
                 ),
                 cancel=cancel_event_browse,
+                known_file_name=file_info.file_name,
             )
 
             if result.success and result.file_path:
@@ -1821,32 +1792,23 @@ class PluginPanel(ctk.CTkFrame):
                     if mod_panel:
                         mod_panel.hide_download_progress(cancel=cancel_event_browse)
                     log_fn(f"Browse: Installing '{mod_name}'...")
-                    install_mod_from_archive(
-                        str(result.file_path), app, log_fn, game, mod_panel)
+                    # Build metadata now (we already have entry + file_info)
+                    # and pass it straight into the installer so it doesn't
+                    # need to fire extra get_mod / get_mod_files API calls.
                     try:
-                        meta = build_meta_from_download(
+                        _prebuilt = build_meta_from_download(
                             game_domain=domain,
                             mod_id=mod_id,
                             file_id=file_info.file_id,
                             archive_name=result.file_name,
-                            mod_info=mod_info,
+                            mod_info=entry,
                             file_info=file_info,
                         )
-                        raw_stem = os.path.splitext(
-                            os.path.basename(str(result.file_path)))[0]
-                        if raw_stem.endswith(".tar"):
-                            raw_stem = os.path.splitext(raw_stem)[0]
-                        suggestions = suggest_mod_names(raw_stem)
-                        folder_name = suggestions[0] if suggestions else raw_stem
-                        meta_path = (game.get_effective_mod_staging_path()
-                                     / folder_name / "meta.ini")
-                        if meta_path.parent.is_dir():
-                            write_meta(meta_path, meta)
-                            log_fn(f"Browse: Saved metadata "
-                                   f"(mod {meta.mod_id}, v{meta.version})")
-                    except Exception as exc:
-                        log_fn(f"Browse: Warning — could not save "
-                               f"metadata: {exc}")
+                    except Exception:
+                        _prebuilt = None
+                    install_mod_from_archive(
+                        str(result.file_path), app, log_fn, game, mod_panel,
+                        prebuilt_meta=_prebuilt)
                 app.after(0, _install)
             else:
                 app.after(0, lambda: (

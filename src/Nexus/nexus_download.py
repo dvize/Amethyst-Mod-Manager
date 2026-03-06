@@ -173,18 +173,22 @@ class NexusDownloader:
         dest_dir: Path | None = None,
         progress_cb: ProgressCallback | None = None,
         cancel: threading.Event | None = None,
+        known_file_name: str = "",
     ) -> DownloadResult:
         """
         Download a file directly (premium users only — no key needed).
 
         Parameters
         ----------
-        game_domain : Nexus game domain.
-        mod_id      : Nexus mod ID.
-        file_id     : Nexus file ID.
-        dest_dir    : Override download directory.
-        progress_cb : Progress callback.
-        cancel      : Cancellation event.
+        game_domain     : Nexus game domain.
+        mod_id          : Nexus mod ID.
+        file_id         : Nexus file ID.
+        dest_dir        : Override download directory.
+        progress_cb     : Progress callback.
+        cancel          : Cancellation event.
+        known_file_name : If the caller already has the archive filename
+                          (e.g. from a prior get_mod_files call), pass it here
+                          to skip an extra get_file_info API call.
 
         Returns
         -------
@@ -210,14 +214,16 @@ class NexusDownloader:
                 mod_id=mod_id, file_id=file_id,
             )
 
-        # Get original filename
-        file_name = ""
-        try:
-            file_info = self._api.get_file_info(
-                game_domain, mod_id, file_id)
-            file_name = file_info.file_name
-        except Exception:
-            pass
+        # Use the caller-supplied filename if available; otherwise fall back to
+        # a dedicated get_file_info call (costs 1 rate-limited request).
+        file_name = known_file_name or ""
+        if not file_name:
+            try:
+                file_info = self._api.get_file_info(
+                    game_domain, mod_id, file_id)
+                file_name = file_info.file_name
+            except Exception:
+                pass
 
         return self._download_from_links(
             links=links,

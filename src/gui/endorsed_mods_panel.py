@@ -246,10 +246,17 @@ class EndorsedModsPanel:
                     if e.get("domain_name", "") == domain
                     and e.get("status", "") == "Endorsed"
                 ]
-                entries: list[EndorsedModEntry] = []
                 total = len(game_endorsed)
 
-                for i, e in enumerate(game_endorsed):
+                # Fetch all mod info in batches of 20 via GraphQL (no rate limit cost)
+                mod_ids = [e.get("mod_id", 0) for e in game_endorsed if e.get("mod_id", 0) > 0]
+                self._parent.after(0, lambda n=total: self._status_label.configure(
+                    text=f"Fetching info for {n} mods…"
+                ))
+                info_map = api.graphql_mod_info_batch([(domain, mid) for mid in mod_ids])
+
+                entries: list[EndorsedModEntry] = []
+                for e in game_endorsed:
                     mod_id = e.get("mod_id", 0)
                     if mod_id <= 0:
                         continue
@@ -259,21 +266,18 @@ class EndorsedModsPanel:
                         endorsed_date=e.get("date", 0),
                         endorsed_status=e.get("status", "Endorsed"),
                     )
-                    try:
-                        info = api.get_mod(domain, mod_id)
-                        entry.name = getattr(info, "name", "") or f"Mod {mod_id}"
-                        entry.author = getattr(info, "author", "")
-                        entry.version = getattr(info, "version", "")
-                        entry.summary = getattr(info, "summary", "")
-                        entry.endorsement_count = getattr(info, "endorsement_count", 0)
-                        entry.downloads_total = getattr(info, "downloads_total", 0)
-                        entry.picture_url = getattr(info, "picture_url", "") or ""
-                    except Exception:
+                    info = info_map.get(mod_id)
+                    if info:
+                        entry.name             = info.name or f"Mod {mod_id}"
+                        entry.author           = info.author
+                        entry.version          = info.version
+                        entry.summary          = info.summary
+                        entry.endorsement_count = info.endorsement_count
+                        entry.downloads_total  = info.downloads_total
+                        entry.picture_url      = info.picture_url or ""
+                    else:
                         entry.name = f"Mod {mod_id}"
                     entries.append(entry)
-                    if (i + 1) % 5 == 0 or (i + 1) == total:
-                        self._parent.after(0, lambda n=i+1, t=total:
-                            self._status_label.configure(text=f"Loading… {n}/{t}"))
 
                 def _done():
                     self._entries = entries

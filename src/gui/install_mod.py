@@ -223,7 +223,8 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
 def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                              game, mod_panel=None,
                              on_installed=None,
-                             fomod_auto_selections: "dict | None" = None) -> None:
+                             fomod_auto_selections: "dict | None" = None,
+                             prebuilt_meta=None) -> None:
     """
     Extract archive to a temp directory, detect FOMOD, run the wizard if
     present, then copy the resolved files into the game's mod staging area.
@@ -574,7 +575,15 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         meta_path = dest_root / "meta.ini"
         _archive = Path(archive_path)
         _game_domain = getattr(game, "nexus_game_domain", "")
-        if _game_domain and _archive.is_file():
+        if prebuilt_meta is not None:
+            # Caller already has full metadata — write it directly, no API calls needed.
+            try:
+                write_meta(meta_path, prebuilt_meta)
+                log_fn(f"Nexus: Saved metadata for '{mod_name}' "
+                       f"(mod {prebuilt_meta.mod_id})")
+            except Exception:
+                pass
+        elif _game_domain and _archive.is_file():
             def _detect_meta():
                 try:
                     app = None

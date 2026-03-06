@@ -359,6 +359,8 @@ class NexusAPI:
         self._key = api_key.strip()
         self._timeout = timeout
         self._rate = NexusRateLimits()
+        self._cached_user: "NexusUser | None" = None
+        self._cached_user_ts: float = 0.0
         self._session = requests.Session()
         self._session.headers.update({
             "APIKEY": self._key,
@@ -389,6 +391,8 @@ class NexusAPI:
         instance._key = ""
         instance._timeout = timeout
         instance._rate = NexusRateLimits()
+        instance._cached_user = None
+        instance._cached_user_ts = 0.0
         instance._session = requests.Session()
         instance._session.headers.update({
             "Authorization": f"Bearer {tokens.access_token}",
@@ -514,10 +518,20 @@ class NexusAPI:
 
     # -- Account ------------------------------------------------------------
 
-    def validate(self) -> NexusUser:
-        """Validate the current API key and return user info."""
+    _VALIDATE_CACHE_TTL = 300.0  # seconds
+
+    def validate(self, bypass_cache: bool = False) -> "NexusUser":
+        """Validate the current API key and return user info.
+
+        Result is cached for 5 minutes so repeated calls (e.g. one per mod
+        install) consume only a single rate-limited request per session.
+        Pass ``bypass_cache=True`` to force a fresh request.
+        """
+        if not bypass_cache and self._cached_user is not None:
+            if time.monotonic() - self._cached_user_ts < self._VALIDATE_CACHE_TTL:
+                return self._cached_user
         data = self._get("/users/validate")
-        return NexusUser(
+        user = NexusUser(
             user_id=data["user_id"],
             name=data["name"],
             email=data.get("email", ""),
@@ -525,6 +539,9 @@ class NexusAPI:
             is_supporter=data.get("is_supporter", False),
             profile_url=data.get("profile_url", ""),
         )
+        self._cached_user = user
+        self._cached_user_ts = time.monotonic()
+        return user
 
     # -- Games --------------------------------------------------------------
 
@@ -970,6 +987,93 @@ class NexusAPI:
                     )
             except Exception as exc:
                 app_log(f"GraphQL batch update check error: {exc}")
+        return results
+
+    def graphql_mod_info_batch(
+        self,
+        ids: list[tuple[str, int]],
+    ) -> "dict[int, NexusModInfo]":
+        """
+        Fetch full display info (name, author, version, summary, picture,
+        endorsements, downloads) for a batch of mods via a single GraphQL
+        request (or a small number of them for large lists).
+
+        Uses the same ``legacyModsByDomain`` endpoint as the update-check
+        batch, but requests the full field set needed for the Tracked/Endorsed
+        panels — replacing N individual ``get_mod()`` REST calls with
+        ceil(N/20) rate-limit-free GraphQL requests.
+
+        Parameters
+        ----------
+        ids : list of (game_domain, mod_id) tuples
+
+        Returns
+        -------
+        dict mapping mod_id → NexusModInfo
+        """
+        query = """
+        query ModInfoBatch($ids: [CompositeDomainWithIdInput!]!) {
+            legacyModsByDomain(ids: $ids) {
+                nodes {
+                    modId
+                    name
+                    summary
+                    version
+                    author
+                    endorsements
+                    downloads
+                    pictureUrl
+                    game { domainName }
+                }
+            }
+        }
+        """
+        results: dict[int, NexusModInfo] = {}
+        batch_size = self._GRAPHQL_UPDATE_BATCH
+        for i in range(0, len(ids), batch_size):
+            batch = ids[i: i + batch_size]
+            variables = {
+                "ids": [{"gameDomain": gd, "modId": mid} for gd, mid in batch]
+            }
+            try:
+                resp = self._session.post(
+                    GRAPHQL_BASE,
+                    json={"query": query, "variables": variables},
+                    timeout=self._timeout,
+                )
+                self._log_response("POST", "GraphQL modInfoBatch", resp)
+                if not resp.ok:
+                    app_log(f"GraphQL modInfoBatch failed: {resp.status_code}")
+                    continue
+                data = resp.json()
+                if "errors" in data:
+                    app_log(f"GraphQL modInfoBatch errors: {data['errors']}")
+                nodes = (
+                    (data.get("data") or {})
+                    .get("legacyModsByDomain") or {}
+                ).get("nodes") or []
+                for n in nodes:
+                    mid = int(n.get("modId", 0))
+                    domain = (n.get("game") or {}).get("domainName", "") or ""
+                    # Use the domain from the input batch if GraphQL doesn't return it
+                    if not domain:
+                        domain = next((gd for gd, bid in batch if bid == mid), "")
+                    results[mid] = NexusModInfo(
+                        mod_id=mid,
+                        name=n.get("name", "") or "",
+                        summary=n.get("summary", "") or "",
+                        description="",
+                        version=n.get("version", "") or "",
+                        author=n.get("author", "") or "",
+                        category_id=0,
+                        game_id=0,
+                        domain_name=domain,
+                        picture_url=n.get("pictureUrl", "") or "",
+                        endorsement_count=int(n.get("endorsements", 0) or 0),
+                        downloads_total=int(n.get("downloads", 0) or 0),
+                    )
+            except Exception as exc:
+                app_log(f"GraphQL modInfoBatch error: {exc}")
         return results
 
     # -- Top mods (GraphQL v2) -----------------------------------------------
