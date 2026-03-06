@@ -246,6 +246,9 @@ class App(ctk.CTk):
         self._nexus_api: NexusAPI | None = None
         self._nexus_downloader: NexusDownloader | None = None
         self._nexus_username: str | None = None
+        # Installs that arrived while a modal dialog had the grab are deferred
+        # here and replayed once the modal closes.
+        self._nxm_install_queue: list = []
         self._init_nexus_api()
         self._update_window_title()
         self._build_layout()
@@ -453,6 +456,37 @@ class App(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _nxm_install(self, result, matched_game, mod_info=None, file_info=None):
+        """Install a downloaded NXM file into the current game.
+
+        If a modal dialog currently holds the Tk grab (e.g. a FOMOD wizard is
+        open), the install is deferred until the modal is dismissed to avoid a
+        deadlock from nested wait_window / grab_set calls.
+        """
+        if self.grab_current() is not None:
+            # A modal is open — queue and poll until it's gone.
+            self._nxm_install_queue.append((result, matched_game, mod_info, file_info))
+            self._poll_nxm_install_queue()
+            return
+        self._nxm_install_impl(result, matched_game, mod_info=mod_info, file_info=file_info)
+
+    def _poll_nxm_install_queue(self):
+        """Retry queued NXM installs once no modal dialog holds the grab."""
+        if not self._nxm_install_queue:
+            return
+        if self.grab_current() is not None:
+            # Still blocked — check again shortly.
+            self.after(300, self._poll_nxm_install_queue)
+            return
+        # Modal is gone — run installs in order, stopping if a new modal opens.
+        while self._nxm_install_queue:
+            result, matched_game, mod_info, file_info = self._nxm_install_queue.pop(0)
+            self._nxm_install_impl(result, matched_game, mod_info=mod_info, file_info=file_info)
+            if self.grab_current() is not None:
+                # This install opened a modal; resume after it closes.
+                self.after(300, self._poll_nxm_install_queue)
+                break
+
+    def _nxm_install_impl(self, result, matched_game, mod_info=None, file_info=None):
         """Install a downloaded NXM file into the current game."""
         log = self._status.log
         game_name = self._topbar._game_var.get()
