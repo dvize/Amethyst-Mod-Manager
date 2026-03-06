@@ -200,6 +200,34 @@ class NexusModUpdateInfo:
     requirements: list["NexusModRequirement"] = field(default_factory=list)  # mod dependencies
 
 
+@dataclass
+class NexusCollection:
+    """A Nexus Mods collection, returned by the GraphQL collections query."""
+    id: int = 0
+    slug: str = ""
+    name: str = ""
+    summary: str = ""
+    user_name: str = ""
+    total_downloads: int = 0
+    endorsements: int = 0
+    mod_count: int = 0
+    tile_image_url: str = ""
+    game_domain: str = ""
+
+
+@dataclass
+class NexusCollectionMod:
+    """A single mod entry inside a collection revision."""
+    mod_id: int = 0
+    file_id: int = 0
+    mod_name: str = ""
+    mod_author: str = ""
+    file_name: str = ""
+    version: str = ""
+    size_bytes: int = 0
+    optional: bool = False
+
+
 # ---------------------------------------------------------------------------
 # API key persistence (system keyring)
 # ---------------------------------------------------------------------------
@@ -1137,6 +1165,266 @@ class NexusAPI:
         self._log_response("DELETE", "/user/tracked_mods", resp)
         resp.raise_for_status()
         return resp.json()
+
+    # -- Collections (GraphQL v2) -------------------------------------------
+
+    _COLLECTIONS_QUERY = """
+    query Collections(
+        $gameDomain: String!
+        $count: Int
+        $offset: Int
+    ) {
+        collectionsV2(
+            filter: { gameDomain: [{ value: $gameDomain }] }
+            count: $count
+            offset: $offset
+            sort: [{ downloads: { direction: DESC } }]
+        ) {
+            nodes {
+                id
+                slug
+                name
+                summary
+                tileImage { url }
+                user { name }
+                game { domainName }
+                latestPublishedRevision { modCount }
+                totalDownloads
+                endorsements
+            }
+        }
+    }
+    """
+
+    @staticmethod
+    def _parse_collection_nodes(nodes: list, game_domain: str) -> list["NexusCollection"]:
+        results: list[NexusCollection] = []
+        for n in nodes:
+            tile = (n.get("tileImage") or {}).get("url", "")
+            user_name = (n.get("user") or {}).get("name", "")
+            rev = n.get("latestPublishedRevision") or {}
+            mod_count = rev.get("modCount", 0) or 0
+            domain = (n.get("game") or {}).get("domainName", game_domain) or game_domain
+            results.append(NexusCollection(
+                id=n.get("id", 0) or 0,
+                slug=n.get("slug", "") or "",
+                name=n.get("name", "") or "",
+                summary=n.get("summary", "") or "",
+                user_name=user_name,
+                total_downloads=n.get("totalDownloads", 0) or 0,
+                endorsements=n.get("endorsements", 0) or 0,
+                mod_count=mod_count,
+                tile_image_url=tile,
+                game_domain=domain,
+            ))
+        return results
+
+    def get_collections(
+        self, game_domain: str, count: int = 20, offset: int = 0
+    ) -> list[NexusCollection]:
+        """
+        Fetch collections for a game domain via GraphQL, sorted by most downloaded.
+        """
+        variables = {"gameDomain": game_domain, "count": count, "offset": offset}
+        try:
+            resp = self._session.post(
+                GRAPHQL_BASE,
+                json={"query": self._COLLECTIONS_QUERY, "variables": variables},
+                timeout=self._timeout,
+            )
+            self._log_response("POST", "GraphQL get_collections", resp)
+            if not resp.ok:
+                app_log(f"GraphQL get_collections failed: {resp.status_code}")
+                return []
+            data = resp.json()
+            if "errors" in data:
+                app_log(f"GraphQL get_collections errors: {data['errors']}")
+                return []
+            nodes = (
+                data.get("data", {})
+                .get("collectionsV2", {})
+                .get("nodes", [])
+            )
+            return self._parse_collection_nodes(nodes, game_domain)
+        except Exception as exc:
+            app_log(f"GraphQL get_collections error: {exc}")
+            return []
+
+    def search_collections(
+        self, game_domain: str, query: str, count: int = 20, offset: int = 0
+    ) -> list[NexusCollection]:
+        """
+        Search collections for a game domain by fetching a large batch and
+        filtering client-side (case-insensitive substring match on name/summary).
+
+        The Nexus GraphQL API does not expose a reliable partial-text search for
+        collections, so we over-fetch and filter locally.
+        """
+        _FETCH_BATCH = 200
+        q_lower = query.lower()
+        try:
+            all_cols = self.get_collections(game_domain, count=_FETCH_BATCH, offset=0)
+            matched = [
+                c for c in all_cols
+                if q_lower in c.name.lower() or q_lower in c.summary.lower()
+            ]
+            return matched[offset: offset + count]
+        except Exception as exc:
+            app_log(f"GraphQL search_collections error: {exc}")
+            return []
+
+    _COLLECTION_DETAIL_QUERY = """
+    query CollectionDetail($slug: String!, $domain: String!) {
+        collection(slug: $slug, domainName: $domain) {
+            name slug totalDownloads
+            latestPublishedRevision {
+                modCount totalSize assetsSizeBytes
+                downloadLink
+                modFiles {
+                    optional
+                    fileId
+                    file {
+                        name version sizeInBytes
+                        mod { modId name author }
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    def get_collection_detail(
+        self, slug: str, game_domain: str
+    ) -> tuple[str, int, int, list[NexusCollectionMod], str]:
+        """
+        Fetch the full mod list for a collection revision.
+
+        Uses a fresh session so this method is safe to call from a background
+        thread without interfering with the shared session used elsewhere.
+
+        Returns
+        -------
+        (collection_name, total_size_bytes, mod_count, mods, download_link_path)
+        """
+        variables = {"slug": slug, "domain": game_domain}
+        # Build headers the same way as the shared session
+        headers = dict(self._session.headers)
+        try:
+            resp = requests.post(
+                GRAPHQL_BASE,
+                json={"query": self._COLLECTION_DETAIL_QUERY, "variables": variables},
+                headers=headers,
+                timeout=max(self._timeout, 90),
+            )
+            self._log_response("POST", "GraphQL get_collection_detail", resp)
+            if not resp.ok:
+                app_log(f"GraphQL get_collection_detail failed: {resp.status_code}")
+                return ("", 0, 0, [])
+            data = resp.json()
+            if "errors" in data:
+                app_log(f"GraphQL get_collection_detail errors: {data['errors']}")
+                return ("", 0, 0, [])
+            col = data.get("data", {}).get("collection") or {}
+            col_name = col.get("name", "") or ""
+            rev = col.get("latestPublishedRevision") or {}
+            total_size = int(rev.get("totalSize") or 0) + int(rev.get("assetsSizeBytes") or 0)
+            mod_count = int(rev.get("modCount") or 0)
+            download_link_path = rev.get("downloadLink") or ""
+            mods: list[NexusCollectionMod] = []
+            for entry in (rev.get("modFiles") or []):
+                f = entry.get("file") or {}
+                mod = f.get("mod") or {}
+                mods.append(NexusCollectionMod(
+                    mod_id=int(mod.get("modId") or 0),
+                    file_id=int(entry.get("fileId") or 0),
+                    mod_name=mod.get("name", "") or "",
+                    mod_author=mod.get("author", "") or "",
+                    file_name=f.get("name", "") or "",
+                    version=f.get("version", "") or "",
+                    size_bytes=int(f.get("sizeInBytes") or 0),
+                    optional=bool(entry.get("optional", False)),
+                ))
+            return (col_name, total_size, mod_count, mods, download_link_path)
+        except Exception as exc:
+            app_log(f"GraphQL get_collection_detail error: {exc}")
+            return ("", 0, 0, [], "")
+
+    def get_collection_archive_json(self, download_link_path: str) -> dict:
+        """
+        Resolve a collection ``downloadLink`` path to an archive CDN URL,
+        download the ``.7z`` archive, extract ``collection.json`` from it,
+        and return the parsed JSON dict.
+
+        Parameters
+        ----------
+        download_link_path:
+            The path returned by GraphQL, e.g.
+            ``/v2/collections/49623/revisions/649988/download_link``.
+
+        Returns
+        -------
+        Parsed ``collection.json`` dict, or empty dict on any failure.
+        """
+        import tempfile
+
+        import py7zr
+        import requests as _requests
+
+        headers = dict(self._session.headers)
+        try:
+            # Step 1: resolve download-link path → CDN URI
+            link_resp = _requests.get(
+                f"https://api.nexusmods.com{download_link_path}",
+                headers=headers,
+                timeout=30,
+            )
+            link_resp.raise_for_status()
+            cdn_url = (link_resp.json().get("download_links") or [{}])[0].get("URI", "")
+            if not cdn_url:
+                app_log("get_collection_archive_json: no CDN URI returned")
+                return {}
+
+            # Step 2: download the archive into a temp file
+            with tempfile.NamedTemporaryFile(suffix=".7z", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                dl_resp = _requests.get(cdn_url, headers=headers, stream=True, timeout=120)
+                dl_resp.raise_for_status()
+                with open(tmp_path, "wb") as fh:
+                    for chunk in dl_resp.iter_content(chunk_size=65536):
+                        if chunk:
+                            fh.write(chunk)
+
+                # Step 3: extract collection.json using a nested temp dir
+                import json as _json
+                import os as _os
+                import tempfile as _tempfile
+                with _tempfile.TemporaryDirectory() as extract_dir:
+                    with py7zr.SevenZipFile(tmp_path, mode="r") as arc:
+                        names = arc.getnames()
+                        target = next(
+                            (n for n in names if n.lstrip("/") == "collection.json"),
+                            None,
+                        )
+                        if target is None:
+                            app_log("get_collection_archive_json: collection.json not found in archive")
+                            return {}
+                        arc.extract(path=extract_dir, targets=[target])
+                    out_path = _os.path.join(extract_dir, target.lstrip("/"))
+                    if not _os.path.isfile(out_path):
+                        app_log("get_collection_archive_json: collection.json not found after extract")
+                        return {}
+                    with open(out_path, "r", encoding="utf-8") as fh:
+                        return _json.load(fh)
+            finally:
+                try:
+                    import os
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        except Exception as exc:
+            app_log(f"get_collection_archive_json error: {exc}")
+            return {}
 
     # -- Helpers ------------------------------------------------------------
 

@@ -102,6 +102,7 @@ from Utils.plugins import (
 )
 from Utils.profile_backup import create_backup
 from Nexus.nexus_api import NexusAPI, NexusAPIError, NexusModRequirement
+from gui.collections_dialog import CollectionsDialog
 from Nexus.nexus_meta import build_meta_from_download, ensure_installed_stamp, read_meta, write_meta
 from Nexus.nexus_update_checker import check_for_updates
 import webbrowser
@@ -414,18 +415,11 @@ class ModListPanel(ctk.CTkFrame):
         bar.grid_propagate(False)
 
         ctk.CTkButton(
-            bar, text="Move Up", width=90, height=26,
-            fg_color=BG_HEADER, hover_color=BG_HOVER,
-            text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
-            command=self._move_up
+            bar, text="Collections", width=100, height=26,
+            fg_color="#c07320", hover_color="#d4832a",
+            text_color="#ffffff", font=_theme.FONT_SMALL,
+            command=self._on_collections
         ).pack(side="left", padx=(8, 4), pady=5)
-
-        ctk.CTkButton(
-            bar, text="Move Down", width=90, height=26,
-            fg_color=BG_HEADER, hover_color=BG_HOVER,
-            text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
-            command=self._move_down
-        ).pack(side="left", padx=4, pady=5)
 
         # Expand/Collapse all separators toggle
         self._expand_collapse_all_btn = ctk.CTkButton(
@@ -3961,8 +3955,38 @@ class ModListPanel(ctk.CTkFrame):
             self._update_info()
 
     # ------------------------------------------------------------------
-    # Move Up / Down buttons
+    # Toolbar button handlers
     # ------------------------------------------------------------------
+
+    def _on_collections(self):
+        """Slide the Collections browser over the modlist panel."""
+        app = self.winfo_toplevel()
+        api = getattr(app, "_nexus_api", None)
+        game = self._game
+        domain = (game.nexus_game_domain if game and game.nexus_game_domain else "") or ""
+        if not domain:
+            self._log("Collections: No game selected or game has no Nexus domain.")
+            return
+        # Destroy any existing panel first (e.g. double-click)
+        self._close_collections()
+        panel = CollectionsDialog(
+            self, game_domain=domain, api=api, game=game,
+            log_fn=self._log,
+            app_root=app,
+            on_close=self._close_collections,
+        )
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._collections_panel = panel
+
+    def _close_collections(self):
+        """Destroy the inline collections panel and restore the modlist."""
+        panel = getattr(self, "_collections_panel", None)
+        if panel is not None:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+            self._collections_panel = None
 
     def _on_check_updates(self):
         """Check for mod updates and missing requirements in one background pass."""

@@ -222,7 +222,8 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
 
 def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                              game, mod_panel=None,
-                             on_installed=None) -> None:
+                             on_installed=None,
+                             fomod_auto_selections: "dict | None" = None) -> None:
     """
     Extract archive to a temp directory, detect FOMOD, run the wizard if
     present, then copy the resolved files into the game's mod staging area.
@@ -231,6 +232,14 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
     on_installed : optional callable()
         Called after a successful install, before the function returns.
         Use this to e.g. delete the source archive or refresh the UI.
+
+    fomod_auto_selections : dict | None
+        When provided, the FOMOD wizard is skipped entirely and these
+        pre-resolved selections are passed straight to ``resolve_files()``.
+        Format: ``{step_name: {group_name: [plugin_name, ...]}}``
+        (same structure as ``saved_selections`` / ``FomodDialog.result``).
+        Intended for collection installs where the author has already
+        chosen the FOMOD options.
     """
     ext = archive_path.lower()
     raw_stem = os.path.splitext(os.path.basename(archive_path))[0]
@@ -327,7 +336,6 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         fomod_result = detect_fomod(extract_dir)
         if fomod_result:
             mod_root, config_path = fomod_result
-            log_fn("FOMOD installer detected — opening wizard...")
             config = parse_module_config(config_path)
 
             if config.name:
@@ -349,35 +357,52 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                         if entry.enabled:
                             installed_files.add(entry.name.lower())
 
-            saved_selections = None
-            game_name = getattr(game, "name", "")
-            if game_name:
-                sel_path = get_fomod_selections_path(game_name, mod_name)
-                if sel_path.is_file():
+            if fomod_auto_selections is not None:
+                # Collection install: use the author's pre-chosen options,
+                # skip the interactive wizard entirely.
+                log_fn("FOMOD installer detected — applying collection author's choices automatically.")
+                final_selections = fomod_auto_selections
+                game_name = getattr(game, "name", "")
+                if game_name:
+                    sel_path = get_fomod_selections_path(game_name, mod_name)
                     try:
-                        with open(sel_path, "r", encoding="utf-8") as f:
-                            saved_selections = json.load(f)
-                        log_fn("Restored previous FOMOD selections.")
+                        with open(sel_path, "w", encoding="utf-8") as f:
+                            json.dump(final_selections, f, indent=2)
                     except Exception:
-                        saved_selections = None
+                        pass
+            else:
+                log_fn("FOMOD installer detected — opening wizard...")
+                saved_selections = None
+                game_name = getattr(game, "name", "")
+                if game_name:
+                    sel_path = get_fomod_selections_path(game_name, mod_name)
+                    if sel_path.is_file():
+                        try:
+                            with open(sel_path, "r", encoding="utf-8") as f:
+                                saved_selections = json.load(f)
+                            log_fn("Restored previous FOMOD selections.")
+                        except Exception:
+                            saved_selections = None
 
-            dialog = FomodDialog(parent_window, config, mod_root,
-                                 installed_files=installed_files,
-                                 saved_selections=saved_selections)
-            parent_window.wait_window(dialog)
-            if dialog.result is None:
-                log_fn("FOMOD install cancelled.")
-                return
+                dialog = FomodDialog(parent_window, config, mod_root,
+                                     installed_files=installed_files,
+                                     saved_selections=saved_selections)
+                parent_window.wait_window(dialog)
+                if dialog.result is None:
+                    log_fn("FOMOD install cancelled.")
+                    return
 
-            if game_name:
-                sel_path = get_fomod_selections_path(game_name, mod_name)
-                try:
-                    with open(sel_path, "w", encoding="utf-8") as f:
-                        json.dump(dialog.result, f, indent=2)
-                except Exception:
-                    pass
+                if game_name:
+                    sel_path = get_fomod_selections_path(game_name, mod_name)
+                    try:
+                        with open(sel_path, "w", encoding="utf-8") as f:
+                            json.dump(dialog.result, f, indent=2)
+                    except Exception:
+                        pass
 
-            file_list = resolve_files(config, dialog.result, installed_files)
+                final_selections = dialog.result
+
+            file_list = resolve_files(config, final_selections, installed_files)
             log_fn(f"FOMOD complete — {len(file_list)} file(s) to install.")
         else:
             mod_root = extract_dir
