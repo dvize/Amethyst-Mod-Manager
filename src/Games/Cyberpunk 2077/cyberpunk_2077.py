@@ -41,7 +41,7 @@ class Cyberpunk2077(BaseGame):
 
     @property
     def exe_name(self) -> str:
-        return "Cyberpunk2077.exe"
+        return "REDprelauncher.exe"
 
     @property
     def steam_id(self) -> str:
