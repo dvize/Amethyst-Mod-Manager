@@ -606,6 +606,7 @@ class TopBar(ctk.CTkFrame):
                     game.get_profile_root() / "profiles" / profile
                 )
                 self.after(0, lambda: self._set_deploy_buttons_enabled(True))
+                self.after(0, self._reload_mod_panel)
                 self.after(1500, status_bar.clear_progress)
 
         self._set_deploy_buttons_enabled(False)
@@ -657,6 +658,7 @@ class TopBar(ctk.CTkFrame):
                     game.get_profile_root() / "profiles" / current_profile
                 )
                 self.after(0, lambda: self._set_deploy_buttons_enabled(True))
+                self.after(0, self._reload_mod_panel)
                 self.after(1500, status_bar.clear_progress)
                 if _success[0]:
                     self.after(0, lambda: _show_mod_notification(self, f"{game_name} Restored", state="success"))
