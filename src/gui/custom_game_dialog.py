@@ -168,10 +168,12 @@ class CustomGameDialog(ctk.CTkToplevel):
         self._conflict_var    = tk.StringVar()  # conflict_ignore_filenames
         self._strip_post_var  = tk.StringVar()  # mod_folder_strip_prefixes_post
         self._prefix_var      = tk.StringVar()  # mod_install_prefix
-        self._req_folders_var = tk.StringVar()  # mod_required_top_level_folders
-        self._auto_strip_var  = tk.BooleanVar(value=False)  # mod_auto_strip_until_required
-        self._heroic_var      = tk.StringVar()  # heroic_app_names
-        self._restore_var     = tk.BooleanVar(value=True)   # restore_before_deploy
+        self._req_folders_var   = tk.StringVar()  # mod_required_top_level_folders
+        self._auto_strip_var    = tk.BooleanVar(value=False)  # mod_auto_strip_until_required
+        self._req_file_types_var = tk.StringVar()  # mod_required_file_types
+        self._install_as_is_var = tk.BooleanVar(value=False)  # mod_install_as_is_if_no_match
+        self._heroic_var        = tk.StringVar()  # heroic_app_names
+        self._restore_var       = tk.BooleanVar(value=True)   # restore_before_deploy
         # wine_dll_overrides stored as a plain string (dll=mode lines), set in _build_ui via textbox
 
         if existing:
@@ -189,6 +191,8 @@ class CustomGameDialog(ctk.CTkToplevel):
             self._prefix_var.set(existing.get("mod_install_prefix", ""))
             self._req_folders_var.set(_set_to_str(existing.get("mod_required_top_level_folders", [])))
             self._auto_strip_var.set(bool(existing.get("mod_auto_strip_until_required", False)))
+            self._req_file_types_var.set(_set_to_str(existing.get("mod_required_file_types", [])))
+            self._install_as_is_var.set(bool(existing.get("mod_install_as_is_if_no_match", False)))
             self._heroic_var.set(_list_to_str(existing.get("heroic_app_names", [])))
             self._restore_var.set(bool(existing.get("restore_before_deploy", True)))
             self._dll_initial = _dll_to_str(existing.get("wine_dll_overrides", {}))
@@ -425,6 +429,13 @@ class CustomGameDialog(ctk.CTkToplevel):
                 "If none match, the user is prompted to set a data directory.",
             ),
             (
+                "mod_required_file_types",
+                self._req_file_types_var,
+                "Required File Types",
+                "Comma-separated file extensions a mod must contain at its root.  "
+                "e.g. .esp, .esm — works standalone or as a fallback after Required Top-Level Folders.",
+            ),
+            (
                 "heroic_app_names",
                 self._heroic_var,
                 "Heroic App Names",
@@ -466,6 +477,27 @@ class CustomGameDialog(ctk.CTkToplevel):
         row += 1
         ctk.CTkSwitch(
             body, text="Enable", variable=self._auto_strip_var,
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+            fg_color=BG_ROW, progress_color=ACCENT,
+        ).grid(row=row, column=0, sticky="w", padx=16, pady=(0, 6))
+        row += 1
+
+        # Install as-is toggle
+        ctk.CTkLabel(
+            body, text="Install As-Is If No Match",
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w",
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(6, 0))
+        row += 1
+        ctk.CTkLabel(
+            body,
+            text="When enabled, if both Required Top-Level Folders and Required File Types "
+                 "checks fail, the mod is installed as-is without showing the prefix dialog.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+            wraplength=self.WIDTH - 60,
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 2))
+        row += 1
+        ctk.CTkSwitch(
+            body, text="Enable", variable=self._install_as_is_var,
             font=FONT_NORMAL, text_color=TEXT_MAIN,
             fg_color=BG_ROW, progress_color=ACCENT,
         ).grid(row=row, column=0, sticky="w", padx=16, pady=(0, 6))
@@ -707,6 +739,8 @@ class CustomGameDialog(ctk.CTkToplevel):
             "mod_install_prefix":             self._prefix_var.get().strip(),
             "mod_required_top_level_folders": _str_to_list(self._req_folders_var.get()),
             "mod_auto_strip_until_required":  self._auto_strip_var.get(),
+            "mod_required_file_types":        _str_to_list(self._req_file_types_var.get()),
+            "mod_install_as_is_if_no_match":  self._install_as_is_var.get(),
             "heroic_app_names":               _str_to_list(self._heroic_var.get()),
             "restore_before_deploy":          self._restore_var.get(),
             "wine_dll_overrides":             _parse_dll_text(
