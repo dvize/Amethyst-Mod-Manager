@@ -397,6 +397,7 @@ class GamePickerPanel(tk.Frame):
         games: dict | None = None,
         on_game_selected=None,
         on_cancel=None,
+        show_custom_game_panel_fn=None,
     ):
         super().__init__(parent, bg=BG_DEEP)
         self._game_names = game_names
@@ -404,6 +405,7 @@ class GamePickerPanel(tk.Frame):
         self._icons_dir = Path(__file__).resolve().parent.parent / "icons" / "games"
         self._on_game_selected = on_game_selected or (lambda n, c: None)
         self._on_cancel = on_cancel or (lambda: None)
+        self._show_custom_game_panel_fn = show_custom_game_panel_fn
 
         self._img_refs: list = []
         self._img_labels: dict = {}           # game_id → (img_lbl, img_frame)
@@ -674,11 +676,17 @@ class GamePickerPanel(tk.Frame):
     # ------------------------------------------------------------------
 
     def _on_define_custom_game(self):
-        from gui.custom_game_dialog import CustomGameDialog
-        dlg = CustomGameDialog(self.winfo_toplevel())
-        self.winfo_toplevel().wait_window(dlg)
-        if dlg.saved_game is not None:
-            self._on_game_selected(dlg.saved_game.name, False)
+        if self._show_custom_game_panel_fn:
+            def _on_done(panel):
+                if panel.saved_game is not None:
+                    self._on_game_selected(panel.saved_game.name, False)
+            self._show_custom_game_panel_fn(None, _on_done)
+        else:
+            from gui.custom_game_dialog import CustomGameDialog
+            dlg = CustomGameDialog(self.winfo_toplevel())
+            self.winfo_toplevel().wait_window(dlg)
+            if dlg.saved_game is not None:
+                self._on_game_selected(dlg.saved_game.name, False)
 
 
 # ---------------------------------------------------------------------------

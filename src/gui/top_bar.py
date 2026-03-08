@@ -59,7 +59,8 @@ from Utils.profile_backup import create_backup
 class TopBar(ctk.CTkFrame):
     def __init__(self, parent, log_fn=None, show_add_game_panel_fn=None,
                  show_reconfigure_panel_fn=None, show_proton_panel_fn=None,
-                 show_wizard_panel_fn=None, show_nexus_panel_fn=None):
+                 show_wizard_panel_fn=None, show_nexus_panel_fn=None,
+                 show_custom_game_panel_fn=None):
         super().__init__(parent, fg_color=BG_PANEL, corner_radius=0, height=46)
         self.grid_propagate(False)
         self._log = log_fn or (lambda msg: None)
@@ -68,6 +69,7 @@ class TopBar(ctk.CTkFrame):
         self._show_proton_panel_fn = show_proton_panel_fn
         self._show_wizard_panel_fn = show_wizard_panel_fn
         self._show_nexus_panel_fn = show_nexus_panel_fn
+        self._show_custom_game_panel_fn = show_custom_game_panel_fn
 
         # Bottom separator line
         ctk.CTkFrame(self, fg_color=BORDER, height=1, corner_radius=0).pack(
@@ -489,27 +491,63 @@ class TopBar(ctk.CTkFrame):
 
         # For user-defined custom games, open the definition editor first
         if getattr(game, "is_custom", False):
-            from gui.custom_game_dialog import CustomGameDialog
-            defn_dlg = CustomGameDialog(self.winfo_toplevel(), existing=getattr(game, "_defn", None))
-            self.winfo_toplevel().wait_window(defn_dlg)
-            if defn_dlg.deleted:
-                self._log(f"Deleted custom game: {game_name}")
-                # Remove from registry and clear configured path
-                _gh._GAMES.pop(game_name, None)
-                game.load_paths()  # wipes in-memory paths
-                configured = sorted(n for n, g in _gh._GAMES.items() if g.is_configured())
-                self._game_menu.configure(values=configured or ["No games configured"])
-                if configured:
-                    self._game_var.set(configured[0])
-                    self._on_game_change(configured[0])
-                else:
-                    self._game_var.set("No games configured")
-                    self._on_game_change("No games configured")
+            existing_defn = getattr(game, "_defn", None)
+            if self._show_custom_game_panel_fn:
+                def _on_custom_game_done(panel):
+                    if panel.deleted:
+                        self._log(f"Deleted custom game: {game_name}")
+                        _gh._GAMES.pop(game_name, None)
+                        game.load_paths()
+                        configured = sorted(n for n, g in _gh._GAMES.items() if g.is_configured())
+                        self._game_menu.configure(values=configured or ["No games configured"])
+                        if configured:
+                            self._game_var.set(configured[0])
+                            self._on_game_change(configured[0])
+                        else:
+                            self._game_var.set("No games configured")
+                            self._on_game_change("No games configured")
+                    elif panel.saved_game is not None:
+                        _load_games()
+                        updated_game = _gh._GAMES.get(panel.saved_game.name) or game
+                        if self._show_reconfigure_panel_fn:
+                            def _on_reconfigure_done(p):
+                                if getattr(p, "removed", False):
+                                    self._log(f"Removed instance: {panel.saved_game.name}")
+                                    updated_game.load_paths()
+                                    configured = sorted(n for n, g in _gh._GAMES.items() if g.is_configured())
+                                    self._game_menu.configure(values=configured or ["No games configured"])
+                                    if configured:
+                                        self._game_var.set(configured[0])
+                                        self._on_game_change(configured[0])
+                                    else:
+                                        self._game_var.set("No games configured")
+                                        self._on_game_change("No games configured")
+                                elif p.result is not None:
+                                    self._log(f"Game path updated: {p.result}")
+                                    self._reload_mod_panel()
+                            self._show_reconfigure_panel_fn(updated_game, _on_reconfigure_done)
+                self._show_custom_game_panel_fn(existing_defn, _on_custom_game_done)
                 return
-            if defn_dlg.saved_game is not None:
-                # Reload registry to pick up definition changes
-                _load_games()
-                game = _gh._GAMES.get(defn_dlg.saved_game.name) or game
+            else:
+                from gui.custom_game_dialog import CustomGameDialog
+                defn_dlg = CustomGameDialog(self.winfo_toplevel(), existing=existing_defn)
+                self.winfo_toplevel().wait_window(defn_dlg)
+                if defn_dlg.deleted:
+                    self._log(f"Deleted custom game: {game_name}")
+                    _gh._GAMES.pop(game_name, None)
+                    game.load_paths()
+                    configured = sorted(n for n, g in _gh._GAMES.items() if g.is_configured())
+                    self._game_menu.configure(values=configured or ["No games configured"])
+                    if configured:
+                        self._game_var.set(configured[0])
+                        self._on_game_change(configured[0])
+                    else:
+                        self._game_var.set("No games configured")
+                        self._on_game_change("No games configured")
+                    return
+                if defn_dlg.saved_game is not None:
+                    _load_games()
+                    game = _gh._GAMES.get(defn_dlg.saved_game.name) or game
 
         if self._show_reconfigure_panel_fn:
             def _on_reconfigure_done(panel):

@@ -532,6 +532,7 @@ class App(ctk.CTk):
             show_proton_panel_fn=self.show_proton_panel,
             show_wizard_panel_fn=self.show_wizard_panel,
             show_nexus_panel_fn=self.show_nexus_panel,
+            show_custom_game_panel_fn=self.show_custom_game_panel,
         )
         self._topbar.grid(row=0, column=0, sticky="ew", pady=(4, 0))
 
@@ -544,6 +545,7 @@ class App(ctk.CTk):
         self._main_frame = main
         self._game_picker_panel = None
         self._reconfigure_panel = None
+        self._custom_game_panel = None
 
         self._mod_panel_container = ctk.CTkFrame(main, fg_color="transparent", corner_radius=0)
         self._mod_panel_container.grid(row=0, column=0, sticky="nsew")
@@ -719,6 +721,7 @@ class App(ctk.CTk):
             games=_GAMES,
             on_game_selected=_on_selected,
             on_cancel=_on_cancel,
+            show_custom_game_panel_fn=self.show_custom_game_panel,
         )
         self._game_picker_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._game_picker_panel.lift()
@@ -758,6 +761,35 @@ class App(ctk.CTk):
         panel = getattr(self, "_reconfigure_panel", None)
         if panel is not None:
             self._reconfigure_panel = None
+            try:
+                panel.place_forget()
+                panel.destroy()
+            except Exception:
+                pass
+
+    # -- Custom game definition panel (inline overlay) ---------------------
+
+    def show_custom_game_panel(self, existing, on_done):
+        """Show the custom game definition panel, overlaying the main content area."""
+        self.hide_custom_game_panel()
+
+        from gui.custom_game_dialog import CustomGamePanel
+
+        def _on_panel_done(panel):
+            self.hide_custom_game_panel()
+            on_done(panel)
+
+        self._custom_game_panel = CustomGamePanel(
+            self._mod_panel_container, existing=existing, on_done=_on_panel_done
+        )
+        self._custom_game_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._custom_game_panel.lift()
+
+    def hide_custom_game_panel(self):
+        """Remove the custom game panel."""
+        panel = getattr(self, "_custom_game_panel", None)
+        if panel is not None:
+            self._custom_game_panel = None
             try:
                 panel.place_forget()
                 panel.destroy()
