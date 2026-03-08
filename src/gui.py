@@ -850,6 +850,7 @@ class App(ctk.CTk):
 
     def show_nexus_panel(self, on_key_changed, log_fn):
         from gui.nexus_settings_dialog import NexusSettingsPanel
+        _game = _GAMES.get(self._topbar._game_var.get())
         self._show_plugin_overlay(
             "_nexus_panel",
             lambda: NexusSettingsPanel(
@@ -857,6 +858,7 @@ class App(ctk.CTk):
                 on_key_changed=on_key_changed,
                 log_fn=log_fn,
                 nexus_api_getter=lambda: self._nexus_api,
+                game_domain_getter=lambda: (getattr(_game, "nexus_game_domain", None) or None),
                 on_done=lambda p: self._hide_plugin_overlay("_nexus_panel"),
             ),
         )
