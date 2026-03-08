@@ -274,7 +274,8 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                              game, mod_panel=None,
                              on_installed=None,
                              fomod_auto_selections: "dict | None" = None,
-                             prebuilt_meta=None) -> None:
+                             prebuilt_meta=None,
+                             disable_extract: bool = False) -> None:
     """
     Extract archive to a temp directory, detect FOMOD, run the wizard if
     present, then copy the resolved files into the game's mod staging area.
@@ -291,6 +292,12 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         (same structure as ``saved_selections`` / ``FomodDialog.result``).
         Intended for collection installs where the author has already
         chosen the FOMOD options.
+
+    disable_extract : bool
+        When True, skip extraction entirely.  The archive file is moved as-is
+        into the mod staging folder (inside a folder named after the archive
+        stem) instead of being extracted.  Useful for games that expect mods
+        to remain in zip/archive format.
     """
     ext = archive_path.lower()
     raw_stem = os.path.splitext(os.path.basename(archive_path))[0]
@@ -299,6 +306,63 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
 
     suggestions = _suggest_mod_names(raw_stem)
     mod_name = suggestions[0] if suggestions else raw_stem
+
+    # ------------------------------------------------------------------
+    # Disable-extract mode: move the archive as-is into the mod folder.
+    # ------------------------------------------------------------------
+    if disable_extract:
+        try:
+            dest_root = game.get_effective_mod_staging_path() / mod_name
+            was_existing_mod = dest_root.exists()
+            if dest_root.exists():
+                replace_dialog = _ReplaceModDialog(parent_window, mod_name)
+                parent_window.wait_window(replace_dialog)
+                if replace_dialog.result == "cancel":
+                    log_fn(f"Install cancelled — '{mod_name}' already exists.")
+                    return
+                if replace_dialog.result == "all":
+                    def _force_remove(func, path, _exc):
+                        os.chmod(path, 0o700)
+                        func(path)
+                    shutil.rmtree(dest_root, onexc=_force_remove)
+            dest_root.mkdir(parents=True, exist_ok=True)
+            archive_filename = os.path.basename(archive_path)
+            dest_file = dest_root / archive_filename
+            if dest_file.exists():
+                dest_file.unlink()
+            shutil.copy2(archive_path, dest_file)
+            log_fn(f"Installed '{mod_name}' (no extract) → {dest_root}")
+
+            _stamp_meta_install_date(dest_root / "meta.ini",
+                                     installation_file=archive_filename)
+
+            if mod_panel is not None and mod_panel._modlist_path is not None:
+                modlist_path = mod_panel._modlist_path
+            else:
+                profile_dir = game.get_profile_root() / "profiles" / "default"
+                modlist_path = profile_dir / "modlist.txt"
+
+            if was_existing_mod:
+                ensure_mod_preserving_position(modlist_path, mod_name, enabled=True)
+            else:
+                prepend_mod(modlist_path, mod_name, enabled=True)
+
+            log_fn(f"Added '{mod_name}' to modlist.")
+            _show_mod_notification(parent_window, f"Installed: {mod_name}")
+
+            if on_installed is not None:
+                try:
+                    on_installed()
+                except Exception:
+                    pass
+
+            if mod_panel is not None:
+                mod_panel.reload_after_install()
+        except Exception as e:
+            import traceback
+            log_fn(f"Install error: {e}")
+            log_fn(traceback.format_exc())
+        return
 
     extract_dir = tempfile.mkdtemp(prefix="modmgr_")
 

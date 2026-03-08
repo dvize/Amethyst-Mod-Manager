@@ -956,6 +956,23 @@ class App(ctk.CTk):
     def hide_deploy_paths_panel(self):
         self._hide_plugin_overlay("_deploy_paths_panel")
 
+    # -- Separator settings panel (overlays plugin panel) -------------------
+
+    def show_sep_settings_panel(self, sep_name, current_path, on_save, current_raw=False):
+        from gui.dialogs import SepSettingsPanel
+        def _factory():
+            def _done(panel):
+                self._hide_plugin_overlay("_sep_settings_panel")
+            return SepSettingsPanel(
+                self._plugin_panel_container,
+                sep_name=sep_name, current_path=current_path,
+                current_raw=current_raw, on_save=on_save, on_done=_done,
+            )
+        self._show_plugin_overlay("_sep_settings_panel", _factory)
+
+    def hide_sep_settings_panel(self):
+        self._hide_plugin_overlay("_sep_settings_panel")
+
     # -- Disable plugins panel (overlays plugin panel) ----------------------
 
     def show_disable_plugins_panel(self, mod_name, plugin_names, disabled, on_done):
@@ -973,6 +990,29 @@ class App(ctk.CTk):
 
     def hide_disable_plugins_panel(self):
         self._hide_plugin_overlay("_disable_plugins_panel")
+
+    # -- Missing requirements panel (overlays plugin panel) -----------------
+
+    def show_missing_reqs_panel(self, mod_name, domain, mod_id, missing_ids,
+                                api, install_from_browse,
+                                ignored_set, save_ignored_fn, redraw_fn):
+        from gui.dialogs import MissingReqsPanel
+        def _factory():
+            def _done(panel):
+                self._hide_plugin_overlay("_missing_reqs_panel")
+                redraw_fn()
+            return MissingReqsPanel(
+                self._plugin_panel_container,
+                mod_name=mod_name, domain=domain, mod_id=mod_id,
+                missing_ids=missing_ids, api=api,
+                install_from_browse=install_from_browse,
+                ignored_set=ignored_set, save_ignored_fn=save_ignored_fn,
+                on_done=_done,
+            )
+        self._show_plugin_overlay("_missing_reqs_panel", _factory)
+
+    def hide_missing_reqs_panel(self):
+        self._hide_plugin_overlay("_missing_reqs_panel")
 
     def _startup_log(self):
         configured = sum(1 for g in _GAMES.values() if g.is_configured())
