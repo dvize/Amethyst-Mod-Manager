@@ -2508,10 +2508,14 @@ class ModListPanel(ctk.CTkFrame):
                     if hasattr(app, "_plugin_panel"):
                         plugin_ext = {e.lower() for e in app._plugin_panel._plugin_extensions}
                     if plugin_ext:
-                        plugin_files = sorted(
-                            p.name for p in mod_dir.rglob("*")
-                            if p.is_file() and p.suffix.lower() in plugin_ext
-                        )
+                        plugin_files = []
+                        for p in mod_dir.rglob("*"):
+                            try:
+                                if p.is_file() and p.suffix.lower() in plugin_ext:
+                                    plugin_files.append(p.name)
+                            except PermissionError:
+                                pass
+                        plugin_files.sort()
             elif entry.name == OVERWRITE_NAME:
                 mod_folder = staging_root.parent / "overwrite"
             elif entry.name == ROOT_FOLDER_NAME:

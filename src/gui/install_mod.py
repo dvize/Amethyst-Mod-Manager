@@ -259,7 +259,9 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
                 dst = dest_root / src.name
             if src.is_file():
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                if dst.exists():
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                elif dst.exists():
                     dst.chmod(0o644)
                     dst.unlink()
                 shutil.copy2(src, dst)
@@ -610,7 +612,10 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         dest_root = game.get_effective_mod_staging_path() / mod_name
         was_existing_mod = dest_root.exists()
         if replace_all and dest_root.exists():
-            shutil.rmtree(dest_root)
+            def _force_remove(func, path, _exc):
+                os.chmod(path, 0o700)
+                func(path)
+            shutil.rmtree(dest_root, onexc=_force_remove)
             log_fn(f"Cleared existing mod folder for clean reinstall.")
         _copy_file_list(file_list, mod_root, dest_root, log_fn)
         log_fn(f"Installed '{mod_name}' → {dest_root}")
