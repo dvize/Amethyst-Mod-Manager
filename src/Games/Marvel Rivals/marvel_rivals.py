@@ -76,7 +76,7 @@ class MarvelRivals(UE5Game):
     
     @property
     def wine_dll_overrides(self) -> dict[str, str]:
-        return {"dsound.dll": "native,builtin"}
+        return {"dsound": "native,builtin"}
     
     @property
     def conflict_ignore_filenames(self) -> set[str]:
