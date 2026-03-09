@@ -105,6 +105,7 @@ class NexusDownloader:
         dest_dir: Path | None = None,
         progress_cb: ProgressCallback | None = None,
         cancel: threading.Event | None = None,
+        known_file_name: str = "",
     ) -> DownloadResult:
         """
         Download a file using a parsed NXM link.
@@ -145,14 +146,16 @@ class NexusDownloader:
                 mod_id=link.mod_id, file_id=link.file_id,
             )
 
-        # Try to get the original filename from the file info endpoint
-        file_name = ""
-        try:
-            file_info = self._api.get_file_info(
-                link.game_domain, link.mod_id, link.file_id)
-            file_name = file_info.file_name
-        except Exception:
-            pass
+        # Use caller-supplied filename if available; otherwise fall back to
+        # a dedicated get_file_info call (costs 1 rate-limited request).
+        file_name = known_file_name or ""
+        if not file_name:
+            try:
+                file_info = self._api.get_file_info(
+                    link.game_domain, link.mod_id, link.file_id)
+                file_name = file_info.file_name
+            except Exception:
+                pass
 
         return self._download_from_links(
             links=links,
