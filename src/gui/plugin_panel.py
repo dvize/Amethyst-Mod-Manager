@@ -1057,11 +1057,21 @@ class PluginPanel(ctk.CTkFrame):
             if xlodgen_flag and xlodgen_flag not in extra_args:
                 extra_args.append(xlodgen_flag)
 
-        if exe_path.name == "Wrye Bash.exe" and "-o" not in extra_args:
-            from Utils.exe_args_builder import _to_wine_path
+        if exe_path.name == "Wrye Bash.exe":
             game_path = game.get_game_path() if hasattr(game, "get_game_path") else None
-            if game_path:
-                extra_args += ["-o", _to_wine_path(game_path)]
+            if game_path and "-o" not in extra_args:
+                # WB computes its .wbtemp dir from the drive of the game path.
+                # Z:\ paths (Linux root mapped by Wine) are not writable, so
+                # we create a symlink inside the Wine prefix's drive_c and pass
+                # a C:\ path instead — WB then uses C:\users\steamuser\AppData
+                # \Local\Temp which is always writable.
+                real_game = game_path.resolve()
+                c_games = compat_data / "pfx" / "drive_c" / "wb_games"
+                c_games.mkdir(parents=True, exist_ok=True)
+                link = c_games / real_game.name
+                if not link.exists() and not link.is_symlink():
+                    link.symlink_to(real_game)
+                extra_args += ["-o", f"C:\\wb_games\\{real_game.name}"]
 
         # For exes that must run from the game's Data folder, resolve the
         # deployed path so both the exe path and cwd point there.
