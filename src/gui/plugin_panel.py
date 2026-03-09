@@ -49,7 +49,7 @@ from gui.ctk_components import CTkTreeview
 
 from Utils.config_paths import get_exe_args_path, get_game_config_dir
 from Utils.filemap import build_filemap
-from Utils.xdg import xdg_open
+from Utils.xdg import xdg_open, open_url
 from Utils.plugins import (
     PluginEntry,
     read_plugins,
@@ -1816,7 +1816,7 @@ class PluginPanel(ctk.CTkFrame):
                     log_fn(f"Tracked Mods: Opening files page — click \"Download with Mod Manager\" there.")
                     log_fn(f"Tracked Mods: {files_url}")
                     try:
-                        webbrowser.open(files_url)
+                        open_url(files_url)
                     except Exception as exc:
                         log_fn(f"Tracked Mods: Could not open browser — {exc}")
                 app.after(0, _fallback)
@@ -1982,7 +1982,7 @@ class PluginPanel(ctk.CTkFrame):
                     log_fn(f"Endorsed Mods: Opening files page — click \"Download with Mod Manager\" there.")
                     log_fn(f"Endorsed Mods: {files_url}")
                     try:
-                        webbrowser.open(files_url)
+                        open_url(files_url)
                     except Exception as exc:
                         log_fn(f"Endorsed Mods: Could not open browser — {exc}")
                 app.after(0, _fallback)
@@ -2141,7 +2141,7 @@ class PluginPanel(ctk.CTkFrame):
                     log_fn(f'Browse: Opening files page — click "Download with Mod Manager" there.')
                     log_fn(f"Browse: {files_url}")
                     try:
-                        webbrowser.open(files_url)
+                        open_url(files_url)
                     except Exception as exc:
                         log_fn(f"Browse: Could not open browser — {exc}")
                 app.after(0, _fallback)

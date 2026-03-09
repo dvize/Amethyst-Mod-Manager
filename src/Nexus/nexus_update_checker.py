@@ -362,6 +362,16 @@ def _apply_update_result(
             meta.has_update = True
             write_meta(staging_root / meta.mod_name / "meta.ini", meta)
     else:
-        if save_results and meta.has_update:
-            meta.has_update = False
-            write_meta(staging_root / meta.mod_name / "meta.ini", meta)
+        if save_results:
+            changed = False
+            if meta.has_update:
+                meta.has_update = False
+                changed = True
+            if latest_file_id and meta.latest_file_id != latest_file_id:
+                meta.latest_file_id = latest_file_id
+                changed = True
+            if latest_version and meta.latest_version != latest_version:
+                meta.latest_version = latest_version
+                changed = True
+            if changed:
+                write_meta(staging_root / meta.mod_name / "meta.ini", meta)

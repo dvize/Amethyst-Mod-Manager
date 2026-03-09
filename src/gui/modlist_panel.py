@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import threading
 
-from Utils.xdg import xdg_open
+from Utils.xdg import xdg_open, open_url
 import tkinter as tk
 import tkinter.messagebox
 import tkinter.ttk as ttk
@@ -106,7 +106,6 @@ from Nexus.nexus_api import NexusAPI, NexusAPIError, NexusModRequirement
 from gui.collections_dialog import CollectionsDialog
 from Nexus.nexus_meta import build_meta_from_download, ensure_installed_stamp, read_meta, write_meta
 from Nexus.nexus_update_checker import check_for_updates
-import webbrowser
 
 
 # ---------------------------------------------------------------------------
@@ -3817,7 +3816,7 @@ class ModListPanel(ctk.CTkFrame):
     def _open_nexus_page(self, url: str) -> None:
         """Open a Nexus Mods page in the default browser."""
         if url:
-            webbrowser.open(url)
+            open_url(url)
             self._log(f"Nexus: Opened {url}")
 
     def _show_missing_reqs(self, mod_name: str, dep_names: list[str]) -> None:
@@ -3974,10 +3973,6 @@ class ModListPanel(ctk.CTkFrame):
         except Exception as exc:
             self._log(f"Nexus: Could not read metadata — {exc}")
             return
-        if meta.latest_file_id <= 0:
-            self._log(f"Nexus: No update info for {mod_name} — run Check Updates first.")
-            return
-
         game_name = app._topbar._game_var.get()
         game = _GAMES.get(game_name)
         if game is None or not game.is_configured():
@@ -4008,29 +4003,50 @@ class ModListPanel(ctk.CTkFrame):
                 files_url = f"https://www.nexusmods.com/{game_domain}/mods/{meta.mod_id}?tab=files"
                 def _fallback():
                     mod_panel.hide_download_progress(cancel=cancel_event)
-                    webbrowser.open(files_url)
+                    open_url(files_url)
                     log_fn(f"Nexus: Premium required for direct download.")
                     log_fn(f"Nexus: Opened files page — click \"Download with Mod Manager\" there.")
                 app.after(0, _fallback)
                 return
 
             # Premium user — direct download
+            if not meta.mod_id:
+                app.after(0, lambda: log_fn(f"Nexus: No mod ID in metadata for {mod_name}."))
+                app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
+                return
+
             mod_info = None
             file_info = None
+            latest_file_id = meta.latest_file_id
             try:
                 mod_info = api.get_mod(game_domain, meta.mod_id)
                 files_resp = api.get_mod_files(game_domain, meta.mod_id)
-                for f in files_resp.files:
-                    if f.file_id == meta.latest_file_id:
-                        file_info = f
-                        break
-            except Exception:
-                pass
+                if latest_file_id <= 0:
+                    # No cached update info — pick the newest main/update file
+                    candidates = [f for f in files_resp.files if (f.category_name or "").upper() in ("MAIN", "UPDATE")] or files_resp.files
+                    if candidates:
+                        best = max(candidates, key=lambda f: f.uploaded_timestamp)
+                        latest_file_id = best.file_id
+                        file_info = best
+                else:
+                    for f in files_resp.files:
+                        if f.file_id == latest_file_id:
+                            file_info = f
+                            break
+            except Exception as exc:
+                app.after(0, lambda: log_fn(f"Nexus: Could not fetch mod files — {exc}"))
+                app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
+                return
+
+            if latest_file_id <= 0:
+                app.after(0, lambda: log_fn(f"Nexus: No files found for {mod_name} on Nexus."))
+                app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
+                return
 
             result = downloader.download_file(
                 game_domain=game_domain,
                 mod_id=meta.mod_id,
-                file_id=meta.latest_file_id,
+                file_id=latest_file_id,
                 progress_cb=lambda cur, total: app.after(
                     0, lambda c=cur, t=total: mod_panel.update_download_progress(c, t, cancel=cancel_event)
                 ),
@@ -4057,7 +4073,7 @@ class ModListPanel(ctk.CTkFrame):
                         new_meta = build_meta_from_download(
                             game_domain=game_domain,
                             mod_id=meta.mod_id,
-                            file_id=meta.latest_file_id,
+                            file_id=latest_file_id,
                             archive_name=result.file_name,
                             mod_info=mod_info,
                             file_info=file_info,

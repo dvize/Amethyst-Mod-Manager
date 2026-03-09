@@ -11,7 +11,7 @@ import threading
 import tkinter as tk
 import tkinter.messagebox
 from pathlib import Path
-import webbrowser
+from Utils.xdg import open_url
 
 # Set MOD_MANAGER_GAMES so game discovery finds Games/ even when cwd or launcher differs.
 # Try script dir and its parent (gui.py in src/ -> src/Games; python -m gui -> gui/ so use parent/Games).
@@ -216,7 +216,7 @@ class _UpdateAvailableDialog(ctk.CTkToplevel):
         self._parent.destroy()
 
     def _on_releases(self):
-        webbrowser.open(_APP_UPDATE_RELEASES_URL)
+        open_url(_APP_UPDATE_RELEASES_URL)
         self.grab_release()
         self.destroy()
 

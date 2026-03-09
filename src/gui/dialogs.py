@@ -46,7 +46,7 @@ import gui.theme as _theme
 from gui.path_utils import _to_wine_path
 from Utils.config_paths import get_exe_args_path, get_custom_game_images_dir
 from Utils.exe_args_builder import EXE_PROFILES
-from Utils.xdg import xdg_open
+from Utils.xdg import xdg_open, open_url
 
 
 # ---------------------------------------------------------------------------
@@ -4943,7 +4943,7 @@ class MissingReqsPanel(ctk.CTkFrame):
                     bg=ACCENT, fg="#ffffff", activebackground=ACCENT_HOV,
                     relief="flat", font=("Segoe UI", _theme.FS10), bd=0,
                     highlightthickness=0, cursor="hand2",
-                    command=lambda u=url: webbrowser.open(u),
+                    command=lambda u=url: open_url(u),
                 )
                 ib = tk.Button(
                     canvas, text="Install",
@@ -4974,7 +4974,7 @@ class MissingReqsPanel(ctk.CTkFrame):
             self._install_from_browse(entry)
         else:
             url = req.url or f"https://www.nexusmods.com/{self._domain or req.game_domain or ''}/mods/{req.mod_id}"
-            webbrowser.open(url)
+            open_url(url)
 
     def _close(self):
         if self._ignore_var.get():
