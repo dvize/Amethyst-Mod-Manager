@@ -45,6 +45,7 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 - Stardew Valley
 - Kingdom Come Deliverance (1 and 2)
 - Hogwarts Legacy
+- Marvel Rivals
 - Subnautica
 - Subnautica Below Zero
 - Resident Evil Requiem
@@ -52,6 +53,7 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 - Tcg Card Shop Simulator
 - Valheim
 - Lethal Company
+- Mount & Blade II: Bannerlord
 
 - The manager now has the ability to define custom games. See the Wiki for the guide
 
