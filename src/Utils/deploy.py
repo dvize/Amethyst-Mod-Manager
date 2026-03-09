@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import threading
+import time as _time
 from enum import Enum, auto
 from pathlib import Path
 
@@ -1471,11 +1472,14 @@ def apply_wine_dll_overrides(
     section_end: int | None = None  # index of first line after this section
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.lower() == section_header.lower():
+        if stripped.lower().startswith(section_header.lower()):
             section_start = i
         elif section_start is not None and stripped.startswith("["):
             section_end = i
             break
+
+    # Windows FILETIME: 100ns ticks since 1601-01-01; epoch offset = 11644473600s
+    _filetime_hex = format(int((_time.time() + 11644473600) * 1e7), "x")
 
     if section_start is None:
         # Section doesn't exist — append it at the end
@@ -1483,7 +1487,8 @@ def apply_wine_dll_overrides(
         if lines and not lines[-1].endswith("\n"):
             lines.append("\n")
         lines.append("\n")
-        lines.append(section_header + "\n")
+        lines.append(f"{section_header} {_filetime_hex}\n")
+        lines.append(f"#time={_filetime_hex}\n")
         for dll, value in overrides.items():
             lines.append(f'"{dll}"="{value}"\n')
             _log(f"  DLL override set: {dll} = {value}")
@@ -1491,8 +1496,14 @@ def apply_wine_dll_overrides(
         # Section exists — find existing keys and add/update
         body_start = section_start + 1
         body_end = section_end if section_end is not None else len(lines)
-        # Skip the #time= line if present right after the header
         key_lines = lines[body_start:body_end]
+
+        # Update the section header line's timestamp and the #time= line
+        lines[section_start] = f"{section_header} {_filetime_hex}\n"
+        for j, kline in enumerate(key_lines):
+            if kline.lower().startswith("#time="):
+                key_lines[j] = f"#time={_filetime_hex}\n"
+                break
 
         for dll, value in overrides.items():
             key_lower = f'"{dll.lower()}"'
