@@ -1366,20 +1366,23 @@ class ModListPanel(ctk.CTkFrame):
                      if 0 <= self._sel_idx < len(self._entries) else None)
 
         # Pre-compute separator highlight sets
-        conflict_sep_indices: set[int] = set()
+        conflict_sep_higher: set[int] = set()  # green — wins over selected
+        conflict_sep_lower:  set[int] = set()  # red   — loses to selected
         if sel_entry and not sel_entry.is_separator:
             sel_name = sel_entry.name
-            conflict_mods = (self._overrides.get(sel_name, set())
-                             | self._overridden_by.get(sel_name, set()))
-            for cm in conflict_mods:
+            for cm in self._overrides.get(sel_name, set()):
                 si = self._sep_idx_for_mod(cm)
                 if si >= 0:
-                    conflict_sep_indices.add(si)
+                    conflict_sep_higher.add(si)
+            for cm in self._overridden_by.get(sel_name, set()):
+                si = self._sep_idx_for_mod(cm)
+                if si >= 0:
+                    conflict_sep_lower.add(si)
         elif sel_entry and sel_entry.name == OVERWRITE_NAME:
             for cm in self._overrides.get(OVERWRITE_NAME, set()):
                 si = self._sep_idx_for_mod(cm)
                 if si >= 0:
-                    conflict_sep_indices.add(si)
+                    conflict_sep_lower.add(si)
 
         highlighted_sep_idx: int = -1
         if self._highlighted_mod:
@@ -1420,8 +1423,10 @@ class ModListPanel(ctk.CTkFrame):
 
                     if is_sel_row:
                         row_bg = BG_SELECT
-                    elif not is_synthetic and i in conflict_sep_indices:
-                        row_bg = conflict_separator
+                    elif not is_synthetic and i in conflict_sep_higher:
+                        row_bg = conflict_higher
+                    elif not is_synthetic and i in conflict_sep_lower:
+                        row_bg = conflict_lower
                     elif not is_synthetic and i == highlighted_sep_idx:
                         row_bg = plugin_separator
                     else:
@@ -2786,6 +2791,34 @@ class ModListPanel(ctk.CTkFrame):
         self._update_expand_collapse_all_btn()
         self._redraw()
 
+    def _remove_plugins_for_mods(self, mod_names: list[str]) -> None:
+        """Remove plugins belonging to the given mods from plugins.txt and loadorder.txt."""
+        app = self.winfo_toplevel()
+        pp = getattr(app, "_plugin_panel", None)
+        if pp is None or pp._plugins_path is None:
+            return
+        plugin_exts = {e.lower() for e in getattr(pp, "_plugin_extensions", [])}
+        if not plugin_exts:
+            return
+        to_remove: set[str] = set()
+        for name in mod_names:
+            staging = self._staging_root / name
+            if staging.is_dir():
+                for f in staging.iterdir():
+                    if f.is_file() and f.suffix.lower() in plugin_exts:
+                        to_remove.add(f.name.lower())
+        if not to_remove:
+            return
+        existing = read_plugins(pp._plugins_path)
+        new_entries = [e for e in existing if e.name.lower() not in to_remove]
+        if len(new_entries) < len(existing):
+            write_plugins(pp._plugins_path, new_entries)
+        loadorder_path = pp._plugins_path.parent / "loadorder.txt"
+        loadorder = read_loadorder(loadorder_path)
+        new_lo = [n for n in loadorder if n.lower() not in to_remove]
+        if len(new_lo) < len(loadorder):
+            write_loadorder(loadorder_path, [PluginEntry(name=n, enabled=True) for n in new_lo])
+
     def _remove_separator(self, idx: int):
         if 0 <= idx < len(self._entries) and self._entries[idx].is_separator:
             sname = self._entries[idx].name
@@ -2841,6 +2874,7 @@ class ModListPanel(ctk.CTkFrame):
                     self._game.get_game_path(),
                     index_path,
                 )
+            self._remove_plugins_for_mods([entry.name])
             if staging.is_dir():
                 shutil.rmtree(staging)
             remove_from_mod_index(index_path, [entry.name])
@@ -2927,6 +2961,7 @@ class ModListPanel(ctk.CTkFrame):
                     self._game.get_game_path(),
                     index_path,
                 )
+            self._remove_plugins_for_mods(removed_names)
             # Now delete staging folders and update the index.
             for name in removed_names:
                 staging = staging_root / name
@@ -4241,12 +4276,63 @@ class ModListPanel(ctk.CTkFrame):
             var = self._check_vars[idx]
             if var is None:
                 return
-            self._entries[idx].enabled = var.get()
+            entry = self._entries[idx]
+            now_enabled = var.get()
+            entry.enabled = now_enabled
+            self._sync_plugins_for_toggle(entry.name, now_enabled)
             self._save_modlist()
             self._rebuild_filemap()
             self._scan_missing_reqs_flags()
             self._redraw()
             self._update_info()
+
+    def _sync_plugins_for_toggle(self, mod_name: str, now_enabled: bool) -> None:
+        """Add or remove a mod's plugins from plugins.txt and loadorder.txt on toggle."""
+        app = self.winfo_toplevel()
+        pp = getattr(app, "_plugin_panel", None)
+        if pp is None or pp._plugins_path is None:
+            return
+        plugin_exts = {e.lower() for e in getattr(pp, "_plugin_extensions", [])}
+        if not plugin_exts:
+            return
+        staging = self._staging_root / mod_name
+        if not staging.is_dir():
+            return
+        mod_plugins = [
+            f.name for f in staging.iterdir()
+            if f.is_file() and f.suffix.lower() in plugin_exts
+        ]
+        if not mod_plugins:
+            return
+
+        loadorder_path = pp._plugins_path.parent / "loadorder.txt"
+
+        if now_enabled:
+            # Append to plugins.txt and loadorder.txt if not already present
+            existing = read_plugins(pp._plugins_path)
+            existing_lower = {e.name.lower() for e in existing}
+            added = [n for n in mod_plugins if n.lower() not in existing_lower]
+            if added:
+                for name in added:
+                    existing.append(PluginEntry(name=name, enabled=True))
+                write_plugins(pp._plugins_path, existing)
+            loadorder = read_loadorder(loadorder_path)
+            lo_lower = {n.lower() for n in loadorder}
+            lo_added = [n for n in mod_plugins if n.lower() not in lo_lower]
+            if lo_added:
+                loadorder.extend(lo_added)
+                write_loadorder(loadorder_path, [PluginEntry(name=n, enabled=True) for n in loadorder])
+        else:
+            # Remove from plugins.txt and loadorder.txt
+            remove_lower = {n.lower() for n in mod_plugins}
+            existing = read_plugins(pp._plugins_path)
+            new_entries = [e for e in existing if e.name.lower() not in remove_lower]
+            if len(new_entries) < len(existing):
+                write_plugins(pp._plugins_path, new_entries)
+            loadorder = read_loadorder(loadorder_path)
+            new_lo = [n for n in loadorder if n.lower() not in remove_lower]
+            if len(new_lo) < len(loadorder):
+                write_loadorder(loadorder_path, [PluginEntry(name=n, enabled=True) for n in new_lo])
 
     # ------------------------------------------------------------------
     # Toolbar button handlers

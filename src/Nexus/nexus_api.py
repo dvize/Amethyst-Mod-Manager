@@ -875,6 +875,100 @@ class NexusAPI:
             app_log(f"GraphQL requirements query error: {exc}")
             return []
 
+    # -- NXM download helper (GraphQL v2) -----------------------------------
+
+    def get_mod_and_file_info_graphql(
+        self,
+        game_domain: str,
+        mod_id: int,
+        file_id: int,
+    ) -> "tuple[NexusModInfo | None, NexusModFile | None]":
+        """
+        Fetch mod info + a specific file's metadata in a single GraphQL request,
+        replacing the two REST calls (get_mod + get_mod_files) used during NXM
+        downloads.
+
+        Returns (NexusModInfo, NexusModFile) — either may be None on failure.
+        Falls back gracefully so callers can still use partial data.
+        """
+        query = """
+        query NxmModAndFile($ids: [CompositeDomainWithIdInput!]!) {
+            legacyModsByDomain(ids: $ids) {
+                nodes {
+                    modId
+                    name
+                    summary
+                    version
+                    author
+                    category { id }
+                    game { domainName }
+                    files {
+                        nodes {
+                            fileId
+                            name
+                            version
+                            category { name }
+                            uri
+                            sizeInBytes
+                        }
+                    }
+                }
+            }
+        }
+        """
+        variables = {"ids": [{"gameDomain": game_domain, "modId": mod_id}]}
+        try:
+            resp = self._session.post(
+                GRAPHQL_BASE,
+                json={"query": query, "variables": variables},
+                timeout=self._timeout,
+            )
+            self._log_response("POST", "GraphQL NxmModAndFile", resp)
+            if not resp.ok:
+                app_log(f"GraphQL NxmModAndFile failed: {resp.status_code}")
+                return (None, None)
+            data = resp.json()
+            if "errors" in data:
+                app_log(f"GraphQL NxmModAndFile errors: {data['errors']}")
+            nodes = (
+                (data.get("data") or {})
+                .get("legacyModsByDomain") or {}
+            ).get("nodes") or []
+            if not nodes:
+                return (None, None)
+            n = nodes[0]
+            mid = int(n.get("modId") or mod_id)
+            domain = (n.get("game") or {}).get("domainName") or game_domain
+            mod_info = NexusModInfo(
+                mod_id=mid,
+                name=n.get("name", "") or "",
+                summary=n.get("summary", "") or "",
+                description="",
+                version=n.get("version", "") or "",
+                author=n.get("author", "") or "",
+                category_id=int((n.get("category") or {}).get("id") or 0),
+                game_id=0,
+                domain_name=domain,
+            )
+            # Find the specific file in the files list
+            file_nodes = ((n.get("files") or {}).get("nodes") or [])
+            file_info: NexusModFile | None = None
+            for f in file_nodes:
+                if int(f.get("fileId") or 0) == file_id:
+                    file_info = NexusModFile(
+                        file_id=file_id,
+                        name=f.get("name", "") or "",
+                        version=f.get("version", "") or "",
+                        category_name=(f.get("category") or {}).get("name", "") or "",
+                        file_name=f.get("name", "") or "",
+                        size_in_bytes=f.get("sizeInBytes"),
+                    )
+                    break
+            return (mod_info, file_info)
+        except Exception as exc:
+            app_log(f"GraphQL NxmModAndFile error: {exc}")
+            return (None, None)
+
     # -- Batch update check (GraphQL v2) ------------------------------------
 
     _GRAPHQL_UPDATE_BATCH = 20  # legacyModsByDomain returns at most 20 nodes per request

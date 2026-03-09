@@ -126,6 +126,7 @@ class FomodDialog(ctk.CTkToplevel):
         self._build_title_bar()
         self._build_content_area()
         self._build_button_bar()
+        self._setup_scroll_binding()
 
     def _create_indicator_images(self):
         """Pre-render radio and checkbox indicator images at a visible size."""
@@ -228,14 +229,7 @@ class FomodDialog(ctk.CTkToplevel):
         self._options_scroll.grid(row=0, column=2, sticky="nsew")
         self._options_scroll.grid_columnconfigure(0, weight=1)
 
-        canvas = self._options_scroll._parent_canvas
-        canvas.bind("<Button-4>", lambda e: canvas.yview("scroll", -1, "units"))
-        canvas.bind("<Button-5>", lambda e: canvas.yview("scroll",  1, "units"))
-
-        # Bind scroll on the inner frame so all children inherit it
-        inner = self._options_scroll._parent_frame
-        inner.bind("<Button-4>", lambda e: canvas.yview("scroll", -1, "units"))
-        inner.bind("<Button-5>", lambda e: canvas.yview("scroll",  1, "units"))
+        self._scroll_canvas = self._options_scroll._parent_canvas
 
     def _build_button_bar(self):
         bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=50)
@@ -310,11 +304,28 @@ class FomodDialog(ctk.CTkToplevel):
             # saved selections (backward compatibility with on-disk JSON).
             saved = self._saved_selections.get(step_key) or self._saved_selections.get(step.name)
             if saved is not None:
-                existing = dict(saved)
-                # Merge: add auto-detected defaults for groups where saved was empty
+                existing = {}
+                group_map = {g.name: g for g in step.groups}
                 for group_name, default_plugins in defaults.items():
-                    if not existing.get(group_name) and default_plugins:
-                        existing[group_name] = default_plugins
+                    saved_plugins = saved.get(group_name, [])
+                    group = group_map.get(group_name)
+                    if group and saved_plugins:
+                        # Drop any saved plugin whose type is NotUsable
+                        plugin_type_map = {
+                            p.name: resolve_plugin_type(p, self._flag_state, self._installed)
+                            for p in group.plugins
+                        }
+                        filtered = [
+                            p for p in saved_plugins
+                            if plugin_type_map.get(p, "Optional") != "NotUsable"
+                        ]
+                        # If filtering left the group invalid, use computed defaults
+                        if not filtered and saved_plugins:
+                            existing[group_name] = default_plugins
+                        else:
+                            existing[group_name] = filtered
+                    else:
+                        existing[group_name] = saved_plugins or default_plugins
             else:
                 existing = defaults
 
@@ -356,18 +367,32 @@ class FomodDialog(ctk.CTkToplevel):
         # Bind scroll on all new children in one pass
         self._bind_scroll_children()
 
+    def _setup_scroll_binding(self):
+        """
+        Bind scroll globally on this dialog so the options panel scrolls
+        regardless of which widget the pointer is over (including empty space).
+        """
+        canvas = self._scroll_canvas
+
+        def _on_scroll(event):
+            try:
+                if not self._options_scroll.winfo_exists():
+                    return
+                sx = self._options_scroll.winfo_rootx()
+                sy = self._options_scroll.winfo_rooty()
+                sw = self._options_scroll.winfo_width()
+                sh = self._options_scroll.winfo_height()
+            except Exception:
+                return
+            if sx <= event.x_root < sx + sw and sy <= event.y_root < sy + sh:
+                direction = -1 if event.num == 4 else 1
+                canvas.yview("scroll", direction, "units")
+
+        self.bind_all("<Button-4>", _on_scroll, add="+")
+        self.bind_all("<Button-5>", _on_scroll, add="+")
+
     def _bind_scroll_children(self):
-        """Bind mouse-wheel scroll on all current children of the options panel."""
-        canvas = self._options_scroll._parent_canvas
-        scroll_up = lambda e: canvas.yview("scroll", -1, "units")
-        scroll_dn = lambda e: canvas.yview("scroll",  1, "units")
-        # Use a stack instead of recursion for speed
-        stack = list(self._options_scroll.winfo_children())
-        while stack:
-            w = stack.pop()
-            w.bind("<Button-4>", scroll_up)
-            w.bind("<Button-5>", scroll_dn)
-            stack.extend(w.winfo_children())
+        pass  # Handled globally by _setup_scroll_binding
 
     def _clear_options_panel(self):
         for widget in self._options_scroll.winfo_children():
