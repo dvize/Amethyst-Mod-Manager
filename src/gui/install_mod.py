@@ -530,8 +530,15 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 mod_name = suggestions[0]
 
             installed_files: set[str] = set()
+            active_files: set[str] = set()
             if mod_panel is not None and mod_panel._modlist_path is not None:
+                plugins_path = mod_panel._modlist_path.parent / "plugins.txt"
                 loadorder_path = mod_panel._modlist_path.parent / "loadorder.txt"
+                for entry in read_plugins(plugins_path):
+                    installed_files.add(entry.name.lower())
+                    if entry.enabled:
+                        active_files.add(entry.name.lower())
+                # Also add anything in loadorder.txt not already captured
                 for name in read_loadorder(loadorder_path):
                     installed_files.add(name.lower())
 
@@ -551,6 +558,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             else:
                 log_fn("FOMOD installer detected — opening wizard...")
                 saved_selections = None
+                sel_path = None
                 game_name = getattr(game, "name", "")
                 if game_name:
                     sel_path = get_fomod_selections_path(game_name, mod_name)
@@ -564,7 +572,9 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
 
                 dialog = FomodDialog(parent_window, config, mod_root,
                                      installed_files=installed_files,
-                                     saved_selections=saved_selections)
+                                     active_files=active_files,
+                                     saved_selections=saved_selections,
+                                     selections_path=sel_path)
                 parent_window.wait_window(dialog)
                 if dialog.result is None:
                     log_fn("FOMOD install cancelled.")

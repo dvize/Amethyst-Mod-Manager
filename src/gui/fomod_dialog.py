@@ -67,7 +67,9 @@ class FomodDialog(ctk.CTkToplevel):
     def __init__(self, parent: ctk.CTk, config: ModuleConfig,
                  mod_root: str,
                  installed_files: set[str] | None = None,
-                 saved_selections: dict[str, dict[str, list[str]]] | None = None):
+                 active_files: set[str] | None = None,
+                 saved_selections: dict[str, dict[str, list[str]]] | None = None,
+                 selections_path=None):
         super().__init__(parent, fg_color=BG_DEEP)
         self.title(f"FOMOD Installer — {config.name or 'Mod'}")
         self.geometry(f"{self.DIALOG_WIDTH}x{self.DIALOG_HEIGHT}")
@@ -78,6 +80,8 @@ class FomodDialog(ctk.CTkToplevel):
         self._config        = config
         self._mod_root      = mod_root
         self._installed     = installed_files or set()
+        self._active        = active_files  # None means treat installed as active
+        self._selections_path = selections_path  # Path | None — for Reset button
         self._flag_state: dict[str, str] = {}
         # Keyed by str(config_step_index) so duplicate step names never collide.
         self._all_selections: dict[str, dict[str, list[str]]] = {}
@@ -262,10 +266,17 @@ class FomodDialog(ctk.CTkToplevel):
         )
         self._back_btn.pack(side="right", padx=4, pady=10)
 
+        self._reset_btn = ctk.CTkButton(
+            bar, text="Reset Selections", width=130, height=30, font=FONT_NORMAL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER,
+            text_color=TEXT_DIM, command=self._on_reset
+        )
+        self._reset_btn.pack(side="left", padx=(12, 4), pady=10)
+
         self._validation_label = ctk.CTkLabel(
             bar, text="", font=FONT_SMALL, text_color="#e06c75"
         )
-        self._validation_label.pack(side="left", padx=12)
+        self._validation_label.pack(side="left", padx=4)
 
     # ------------------------------------------------------------------
     # Step rendering
@@ -273,7 +284,7 @@ class FomodDialog(ctk.CTkToplevel):
 
     def _refresh_visible_steps(self):
         self._visible_steps = get_visible_steps(
-            self._config, self._flag_state, self._installed
+            self._config, self._flag_state, self._installed, self._active
         )
 
     def _config_step_idx(self, step: InstallStep) -> int:
@@ -301,7 +312,7 @@ class FomodDialog(ctk.CTkToplevel):
         step_key = str(self._config_step_idx(step))
         existing = self._all_selections.get(step_key)
         if existing is None:
-            defaults = get_default_selections(step, self._flag_state, self._installed)
+            defaults = get_default_selections(step, self._flag_state, self._installed, self._active)
             # Accept both new index-keyed format and old name-keyed format for
             # saved selections (backward compatibility with on-disk JSON).
             saved = self._saved_selections.get(step_key) or self._saved_selections.get(step.name)
@@ -314,7 +325,7 @@ class FomodDialog(ctk.CTkToplevel):
                     if group and saved_plugins:
                         # Drop any saved plugin whose type is NotUsable
                         plugin_type_map = {
-                            p.name: resolve_plugin_type(p, self._flag_state, self._installed)
+                            p.name: resolve_plugin_type(p, self._flag_state, self._installed, self._active)
                             for p in group.plugins
                         }
                         filtered = [
@@ -435,7 +446,7 @@ class FomodDialog(ctk.CTkToplevel):
         if gtype in ("SelectExactlyOne", "SelectAtMostOne"):
             # Radio buttons — one shared IntVar per group
             # Value -1 = nothing selected (allowed for SelectAtMostOne)
-            plugin_types = [resolve_plugin_type(p, self._flag_state, self._installed)
+            plugin_types = [resolve_plugin_type(p, self._flag_state, self._installed, self._active)
                             for p in plugins]
 
             sel_idx = -1
@@ -501,7 +512,7 @@ class FomodDialog(ctk.CTkToplevel):
             # Checkboxes — one BooleanVar per plugin
             check_vars: list[tk.BooleanVar] = []
             for plugin in plugins:
-                ptype = resolve_plugin_type(plugin, self._flag_state, self._installed)
+                ptype = resolve_plugin_type(plugin, self._flag_state, self._installed, self._active)
                 is_required   = ptype == "Required"
                 is_not_usable = ptype == "NotUsable"
                 # Required plugins are always checked; NotUsable always unchecked
@@ -858,6 +869,24 @@ class FomodDialog(ctk.CTkToplevel):
         self.result = dict(self._all_selections)
         self.grab_release()
         self.destroy()
+
+    def _on_reset(self):
+        """Delete the saved selections file and restart the wizard from step 0 with defaults."""
+        if self._selections_path is not None:
+            try:
+                import os as _os
+                _os.remove(self._selections_path)
+            except OSError:
+                pass
+        # Clear all session state and reload from XML defaults
+        self._saved_selections = {}
+        self._all_selections = {}
+        self._flag_state = {}
+        self._current_idx = 0
+        self._refresh_visible_steps()
+        self._validation_label.configure(text="")
+        if self._visible_steps:
+            self._load_step(0)
 
     def _on_cancel(self):
         self.result = None
