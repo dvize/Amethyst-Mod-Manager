@@ -1281,6 +1281,9 @@ def _resolve_nocase(root: Path, rel_str: str,
         if not candidates:
             continue
         for candidate in candidates:
+            # Skip directory symlinks to prevent traversal outside root
+            if idx + 1 < len(parts) and candidate.is_symlink():
+                continue
             stack.append((candidate, idx + 1))
     return None
 
@@ -1324,7 +1327,7 @@ def remove_deployed_files(game_dir: Path, log_fn=None) -> int:
         return 0
 
     # --- Step 1: remove deployed files ---
-    for root, dirs, files in os.walk(game_dir, topdown=False):
+    for root, dirs, files in os.walk(game_dir, topdown=False, followlinks=False):
         root_path = Path(root)
         for fname in files:
             fpath = root_path / fname
@@ -1392,7 +1395,7 @@ def remove_deployed_files(game_dir: Path, log_fn=None) -> int:
     _rename_core_dirs(game_dir)
 
     # --- Step 3: prune empty directories left inside game_dir ---
-    for root, dirs, files in os.walk(game_dir, topdown=False):
+    for root, dirs, files in os.walk(game_dir, topdown=False, followlinks=False):
         root_path = Path(root)
         if root_path != game_dir and not files and not dirs:
             try:

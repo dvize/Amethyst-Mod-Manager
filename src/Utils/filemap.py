@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 
 import msgpack
@@ -62,6 +63,7 @@ _INDEX_VERSION = 3
 # Avoids re-parsing the ~5 MB index file on every filemap rebuild.
 _IndexCache = dict[str, tuple[dict[str, str], dict[str, str]]]
 _index_cache: tuple[str, float, _IndexCache] | None = None  # (path, mtime, data)
+_index_cache_lock = threading.Lock()
 
 
 def _scan_dir(
@@ -281,8 +283,9 @@ def read_mod_index(
         mtime = index_path.stat().st_mtime
     except OSError:
         return None
-    if _index_cache is not None and _index_cache[0] == path_str and _index_cache[1] == mtime:
-        return _index_cache[2]
+    with _index_cache_lock:
+        if _index_cache is not None and _index_cache[0] == path_str and _index_cache[1] == mtime:
+            return _index_cache[2]
     try:
         with index_path.open("rb") as f:
             data = msgpack.unpack(f, raw=False)
@@ -297,7 +300,8 @@ def read_mod_index(
             index[mod_name] = (normal, root)
     except Exception:
         return None
-    _index_cache = (path_str, mtime, index)
+    with _index_cache_lock:
+        _index_cache = (path_str, mtime, index)
     return index
 
 
@@ -330,11 +334,12 @@ def _write_mod_index(
             pass
         raise
     # Update the in-memory cache to match what was just written.
-    try:
-        mtime = index_path.stat().st_mtime
-        _index_cache = (str(index_path), mtime, index)
-    except OSError:
-        _index_cache = None
+    with _index_cache_lock:
+        try:
+            mtime = index_path.stat().st_mtime
+            _index_cache = (str(index_path), mtime, index)
+        except OSError:
+            _index_cache = None
 
 
 def update_mod_index(

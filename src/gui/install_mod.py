@@ -546,7 +546,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                     try:
                         with open(sel_path, "w", encoding="utf-8") as f:
                             json.dump(final_selections, f, indent=2)
-                    except Exception:
+                    except OSError:
                         pass
             else:
                 log_fn("FOMOD installer detected — opening wizard...")
@@ -559,7 +559,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                             with open(sel_path, "r", encoding="utf-8") as f:
                                 saved_selections = json.load(f)
                             log_fn("Restored previous FOMOD selections.")
-                        except Exception:
+                        except (OSError, ValueError):
                             saved_selections = None
 
                 dialog = FomodDialog(parent_window, config, mod_root,
@@ -575,7 +575,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                     try:
                         with open(sel_path, "w", encoding="utf-8") as f:
                             json.dump(dialog.result, f, indent=2)
-                    except Exception:
+                    except OSError:
                         pass
 
                 final_selections = dialog.result
@@ -723,7 +723,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             )
             _index_path = modlist_path.parent.parent.parent / "modindex.bin"
             update_mod_index(_index_path, mod_name, normal_files, root_files)
-        except Exception:
+        except (OSError, ValueError, KeyError):
             pass  # non-fatal — next rebuild will fall back to a full rescan
 
         plugin_exts = getattr(game, "plugin_extensions", [])
@@ -769,7 +769,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 write_meta(meta_path, prebuilt_meta)
                 log_fn(f"Nexus: Saved metadata for '{mod_name}' "
                        f"(mod {prebuilt_meta.mod_id})")
-            except Exception:
+            except OSError:
                 pass
         elif _game_domain and _archive.is_file():
             def _detect_meta():
