@@ -17,19 +17,24 @@ from Utils.fomod_parser import (
 # ---------------------------------------------------------------------------
 
 def evaluate_dependency(dep: Dependency, flag_state: dict[str, str],
-                        installed_files: set[str]) -> bool:
+                        installed_files: set[str],
+                        active_files: set[str] | None = None) -> bool:
     """
     Recursively evaluate a Dependency tree.
 
     flag_state:      current flag name → value mapping
-    installed_files: set of file paths known to be installed
+    installed_files: set of all plugin names known to be present (lower-case),
+                     regardless of whether they are enabled or disabled.
+    active_files:    set of enabled/active plugin names (lower-case).
+                     If None, falls back to treating installed_files as active.
 
     Returns True if the condition is satisfied.
     """
     if dep.dep_type == "composite":
         if not dep.sub_deps:
             return True  # Empty composite = no restriction = pass
-        results = [evaluate_dependency(d, flag_state, installed_files) for d in dep.sub_deps]
+        results = [evaluate_dependency(d, flag_state, installed_files, active_files)
+                   for d in dep.sub_deps]
         if dep.operator.lower() == "or":
             return any(results)
         return all(results)  # default: "And"
@@ -39,10 +44,19 @@ def evaluate_dependency(dep: Dependency, flag_state: dict[str, str],
 
     if dep.dep_type == "file":
         # Case-insensitive — FOMOD was designed for Windows
-        present = dep.file_name.lower() in installed_files
+        key = dep.file_name.lower()
+        present = key in installed_files
         if dep.file_state == "Active":
+            # Active: file must be present AND enabled
+            if active_files is not None:
+                return key in active_files
             return present
-        # "Inactive" and "Missing" both mean the file should NOT be present
+        if dep.file_state == "Inactive":
+            # Inactive: file is present (installed) but NOT enabled
+            if active_files is not None:
+                return present and key not in active_files
+            return False
+        # "Missing": file must not be installed at all
         return not present
 
     # Unknown type — pass through
@@ -54,7 +68,8 @@ def evaluate_dependency(dep: Dependency, flag_state: dict[str, str],
 # ---------------------------------------------------------------------------
 
 def resolve_plugin_type(plugin: Plugin, flag_state: dict[str, str],
-                        installed_files: set[str]) -> str:
+                        installed_files: set[str],
+                        active_files: set[str] | None = None) -> str:
     """
     Evaluate a plugin's typeDescriptor to get its effective type string.
     For simple typeDescriptors returns the static type directly.
@@ -68,7 +83,7 @@ def resolve_plugin_type(plugin: Plugin, flag_state: dict[str, str],
         return td.plugin_type
 
     for dep, type_name in td.patterns:
-        if evaluate_dependency(dep, flag_state, installed_files):
+        if evaluate_dependency(dep, flag_state, installed_files, active_files):
             return type_name
 
     return td.default_type
@@ -79,7 +94,8 @@ def resolve_plugin_type(plugin: Plugin, flag_state: dict[str, str],
 # ---------------------------------------------------------------------------
 
 def get_visible_steps(config: ModuleConfig, flag_state: dict[str, str],
-                      installed_files: set[str]) -> list[InstallStep]:
+                      installed_files: set[str],
+                      active_files: set[str] | None = None) -> list[InstallStep]:
     """
     Filter config.steps to only those whose visible_condition is satisfied.
     Steps with no condition (None) are always visible.
@@ -89,7 +105,7 @@ def get_visible_steps(config: ModuleConfig, flag_state: dict[str, str],
     for step in config.steps:
         if step.visible_condition is None:
             visible.append(step)
-        elif evaluate_dependency(step.visible_condition, flag_state, installed_files):
+        elif evaluate_dependency(step.visible_condition, flag_state, installed_files, active_files):
             visible.append(step)
     return visible
 
@@ -99,7 +115,8 @@ def get_visible_steps(config: ModuleConfig, flag_state: dict[str, str],
 # ---------------------------------------------------------------------------
 
 def get_default_selections(step: InstallStep, flag_state: dict[str, str],
-                           installed_files: set[str]) -> dict[str, list[str]]:
+                           installed_files: set[str],
+                           active_files: set[str] | None = None) -> dict[str, list[str]]:
     """
     Compute default plugin selections for a step based on group types and plugin types.
     Returns {group_name: [plugin_name, ...]}
@@ -113,7 +130,8 @@ def get_default_selections(step: InstallStep, flag_state: dict[str, str],
             continue
 
         gtype = group.group_type
-        plugin_types = [resolve_plugin_type(p, flag_state, installed_files) for p in plugins]
+        plugin_types = [resolve_plugin_type(p, flag_state, installed_files, active_files)
+                        for p in plugins]
 
         if gtype == "SelectAll":
             defaults[group.name] = [p.name for p in plugins]
@@ -187,7 +205,8 @@ def update_flags(step: InstallStep, selections: dict[str, list[str]],
 
 def resolve_files(config: ModuleConfig,
                   all_selections: dict[str, dict[str, list[str]]],
-                  installed_files: set[str] | None = None) -> list[tuple[str, str, bool]]:
+                  installed_files: set[str] | None = None,
+                  active_files: set[str] | None = None) -> list[tuple[str, str, bool]]:
     """
     Build the final file install list from required files + user selections
     + conditional file installs.
@@ -223,7 +242,7 @@ def resolve_files(config: ModuleConfig,
 
     # Conditional file installs — evaluate each pattern against final flag state
     for pattern in config.conditional_file_installs:
-        if evaluate_dependency(pattern.dependency, flag_state, inst_files):
+        if evaluate_dependency(pattern.dependency, flag_state, inst_files, active_files):
             for fi in pattern.files:
                 prioritized.append((fi.priority, fi.source_path,
                                     fi.destination_path, fi.is_folder))

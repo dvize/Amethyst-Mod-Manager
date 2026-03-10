@@ -45,7 +45,7 @@ from gui.theme import (
     load_icon as _load_icon,
 )
 import gui.theme as _theme
-from gui.ctk_components import CTkPopupMenu, CTkProgressPopup
+from gui.ctk_components import CTkAlert, CTkPopupMenu, CTkProgressPopup
 from gui.game_helpers import (
     _GAMES,
     _load_games,
@@ -279,10 +279,13 @@ class ModListPanel(ctk.CTkFrame):
         self._filter_conflict_full: bool = False
         self._filter_missing_reqs: bool = False
         self._filter_has_disabled_plugins: bool = False
+        self._filter_has_disabled_files: bool = False
         self._filter_has_updates: bool = False
         self._disabled_plugins_map: dict[str, list[str]] = {}  # mod_name → [plugin, ...]
+        self._excluded_mod_files_map: dict[str, list[str]] = {}  # mod_name → [rel_key, ...]
         self._visible_indices: list[int] = []  # entry indices matching current filter
         self._vis_dirty: bool = True           # True when _visible_indices needs recomputing
+        self._priorities: dict[int, int] = {}  # entry index → priority number (cached)
 
         # Column sorting (visual only — never touches modlist.txt)
         # _sort_column: None or one of "name", "installed", "flags", "conflicts", "priority"
@@ -673,6 +676,7 @@ class ModListPanel(ctk.CTkFrame):
             ("filter_full",                "Show only fully conflicted mods"),
             ("filter_missing_reqs",        "Show only missing requirements"),
             ("filter_has_disabled_plugins","Show only mods with disabled plugins"),
+            ("filter_has_disabled_files",  "Show mods with disabled files"),
             ("filter_has_updates",         "Show only mods with updates"),
         ]
 
@@ -1081,6 +1085,7 @@ class ModListPanel(ctk.CTkFrame):
     def _scan_update_flags(self):
         """Scan meta.ini files to build the set of mods with updates available."""
         self._update_mods.clear()
+        self._vis_dirty = True  # _filter_has_updates depends on this
         if self._modlist_path is None:
             return
         mods_dir = self._staging_root
@@ -1103,6 +1108,7 @@ class ModListPanel(ctk.CTkFrame):
         """Scan meta.ini files to build the set of mods with missing requirements."""
         self._missing_reqs.clear()
         self._missing_reqs_detail.clear()
+        self._vis_dirty = True  # _filter_missing_reqs depends on this
         if self._modlist_path is None:
             return
         mods_dir = self._staging_root
@@ -1199,7 +1205,7 @@ class ModListPanel(ctk.CTkFrame):
         """Rebuild per-entry BooleanVars (logical state only — visual pool is separate)."""
         self._check_buttons.clear()
         self._check_vars.clear()
-        self._vis_dirty = True
+        self._invalidate_derived_caches()
 
         for entry in self._entries:
             if entry.is_separator:
@@ -1210,6 +1216,15 @@ class ModListPanel(ctk.CTkFrame):
             var = tk.BooleanVar(value=entry.enabled)
             self._check_vars.append(var)
             self._check_buttons.append(None)  # visual widget comes from pool
+
+    def _invalidate_derived_caches(self) -> None:
+        """Mark cached data derived from _entries as stale.
+
+        Call whenever _entries is mutated (add/remove/reorder) or filter/sort
+        state changes so that _redraw() recomputes priorities and visible indices.
+        """
+        self._vis_dirty = True
+        self._priorities = {}
 
     # ------------------------------------------------------------------
     # Virtual-list pool
@@ -1328,9 +1343,21 @@ class ModListPanel(ctk.CTkFrame):
         canvas_top = int(c.canvasy(0))
         canvas_h = c.winfo_height()
 
-        # Always recompute visible indices (filter/sort may have changed).
-        self._visible_indices = self._compute_visible_indices()
-        self._vis_dirty = False
+        # Recompute visible indices only when something structural changed.
+        if self._vis_dirty:
+            self._visible_indices = self._compute_visible_indices()
+            self._vis_dirty = False
+
+        # Recompute priorities cache only when _entries has changed.
+        if not self._priorities:
+            mod_count = sum(1 for e in self._entries if not e.is_separator)
+            p = mod_count - 1
+            for idx, entry in enumerate(self._entries):
+                if not entry.is_separator:
+                    self._priorities[idx] = p
+                    p -= 1
+
+        priorities = self._priorities
 
         # Pre-compute which entry indices are part of the active drag
         drag_indices: set[int] = set()
@@ -1360,15 +1387,6 @@ class ModListPanel(ctk.CTkFrame):
         first_row = max(0, canvas_top // row_h)
         last_row  = min(n, (canvas_top + canvas_h) // row_h + 2)
         vis_count = last_row - first_row
-
-        # Pre-compute priorities from the full (unfiltered) list
-        priorities: dict[int, int] = {}
-        mod_count = sum(1 for e in self._entries if not e.is_separator)
-        p = mod_count - 1
-        for idx, entry in enumerate(self._entries):
-            if not entry.is_separator:
-                priorities[idx] = p
-                p -= 1
 
         sel_entry = (self._entries[self._sel_idx]
                      if 0 <= self._sel_idx < len(self._entries) else None)
@@ -1901,6 +1919,7 @@ class ModListPanel(ctk.CTkFrame):
             return
         self._filter_text = self._search_entry.get().lower()
         self._sel_idx = -1
+        self._invalidate_derived_caches()
         self._redraw()
 
     def _on_search_clear(self, _event=None):
@@ -2006,7 +2025,19 @@ class ModListPanel(ctk.CTkFrame):
                     result.append(i)
             base = result
 
-        # Step 4d: updates filter (show only mods with an update available)
+        # Step 4d: disabled mod files filter (show only mods with at least one file disabled)
+        if self._filter_has_disabled_files:
+            result = []
+            for i in base:
+                entry = self._entries[i]
+                if entry.is_separator:
+                    if self._sep_block_has_disabled_files(i):
+                        result.append(i)
+                elif entry.name in self._excluded_mod_files_map:
+                    result.append(i)
+            base = result
+
+        # Step 4e: updates filter (show only mods with an update available)
         if self._filter_has_updates:
             result = []
             for i in base:
@@ -2041,6 +2072,7 @@ class ModListPanel(ctk.CTkFrame):
             self._sort_column = sort_key
             self._sort_ascending = True
         self._update_header(self._canvas_w)
+        self._invalidate_derived_caches()
         self._redraw()
 
     def _apply_column_sort(self, indices: list[int]) -> list[int]:
@@ -2083,14 +2115,8 @@ class ModListPanel(ctk.CTkFrame):
         """Return a key function for sorting entry indices by the active column."""
         col = self._sort_column
 
-        # Pre-compute priorities (same logic as _redraw)
-        priorities: dict[int, int] = {}
-        mod_count = sum(1 for e in self._entries if not e.is_separator)
-        p = mod_count - 1
-        for idx, entry in enumerate(self._entries):
-            if not entry.is_separator:
-                priorities[idx] = p
-                p -= 1
+        # Use the cached priorities dict (populated in _redraw).
+        priorities = self._priorities
 
         if col == "name":
             return lambda i: self._entries[i].name.lower()
@@ -2243,7 +2269,8 @@ class ModListPanel(ctk.CTkFrame):
                 # Shift+click on separator: extend selection range
                 if shift and self._sel_idx >= 0:
                     lo, hi = sorted((self._sel_idx, idx))
-                    self._sel_set = set(range(lo, hi + 1))
+                    vis_set = set(self._compute_visible_indices())
+                    self._sel_set = {j for j in range(lo, hi + 1) if j in vis_set}
                     self._redraw()
                     return
                 self._sel_idx = idx
@@ -2285,7 +2312,8 @@ class ModListPanel(ctk.CTkFrame):
         # Shift+click: extend selection from anchor to clicked row
         if shift and self._sel_idx >= 0:
             lo, hi = sorted((self._sel_idx, idx))
-            self._sel_set = set(range(lo, hi + 1))
+            vis_set = set(self._compute_visible_indices())
+            self._sel_set = {j for j in range(lo, hi + 1) if j in vis_set}
             self._redraw()
             self._update_info()
             return
@@ -2395,6 +2423,14 @@ class ModListPanel(ctk.CTkFrame):
         for i in self._sep_block_range(sep_idx):
             if not self._entries[i].is_separator:
                 if self._entries[i].name in self._disabled_plugins_map:
+                    return True
+        return False
+
+    def _sep_block_has_disabled_files(self, sep_idx: int) -> bool:
+        """True if this separator's block contains at least one mod with disabled files."""
+        for i in self._sep_block_range(sep_idx):
+            if not self._entries[i].is_separator:
+                if self._entries[i].name in self._excluded_mod_files_map:
                     return True
         return False
 
@@ -2514,6 +2550,7 @@ class ModListPanel(ctk.CTkFrame):
                 self._drag_idx = insert_at
                 self._sel_idx  = insert_at
 
+            self._invalidate_derived_caches()
             self._save_modlist()
             self._rebuild_filemap()
         elif was_pending and self._drag_idx < 0:
@@ -2831,6 +2868,7 @@ class ModListPanel(ctk.CTkFrame):
             self._collapsed_seps.add(sep_name)
         self._save_collapsed()
         self._update_expand_collapse_all_btn()
+        self._invalidate_derived_caches()
         self._redraw()
 
     def _toggleable_separator_names(self) -> list[str]:
@@ -2861,6 +2899,7 @@ class ModListPanel(ctk.CTkFrame):
             self._collapsed_seps |= sep_set
         self._save_collapsed()
         self._update_expand_collapse_all_btn()
+        self._invalidate_derived_caches()
         self._redraw()
 
     def _remove_plugins_for_mods(self, mod_names: list[str]) -> None:
@@ -2923,6 +2962,7 @@ class ModListPanel(ctk.CTkFrame):
                     restore_custom_deploy_backup_for_path(
                         self._filemap_path, Path(_custom_path_str)
                     )
+            self._invalidate_derived_caches()
             self._save_modlist()
             self._rebuild_filemap()
             self._redraw()
@@ -2934,12 +2974,15 @@ class ModListPanel(ctk.CTkFrame):
         entry = self._entries[idx]
         if entry.is_separator:
             return
-        confirmed = ask_yes_no(
-            "Remove Mod",
-            f"Remove '{entry.name}'?\n\nThis will delete the mod folder and cannot be undone.",
+        alert = CTkAlert(
+            state="warning",
+            title="Remove Mod",
+            body_text=f"Are you sure you want to remove '{entry.name}'?\n\nThis will delete the mod folder and cannot be undone.",
+            btn1="Remove",
+            btn2="Cancel",
             parent=self.winfo_toplevel(),
         )
-        if not confirmed:
+        if alert.get() != "Remove":
             return
         # Delete the mod folder from staging and drop it from the index
         if self._modlist_path is not None:
@@ -2968,6 +3011,7 @@ class ModListPanel(ctk.CTkFrame):
             self._sel_idx = -1
         elif self._sel_idx > idx:
             self._sel_idx -= 1
+        self._invalidate_derived_caches()
         self._save_modlist()
         self._rebuild_filemap()
         self._scan_missing_reqs_flags()
@@ -2982,6 +3026,7 @@ class ModListPanel(ctk.CTkFrame):
                 self._entries[i].enabled = True
                 if i < len(self._check_vars) and self._check_vars[i] is not None:
                     self._check_vars[i].set(True)
+        self._vis_dirty = True
         self._save_modlist()
         self._rebuild_filemap()
         self._scan_missing_reqs_flags()
@@ -2995,6 +3040,7 @@ class ModListPanel(ctk.CTkFrame):
                 self._entries[i].enabled = False
                 if i < len(self._check_vars) and self._check_vars[i] is not None:
                     self._check_vars[i].set(False)
+        self._vis_dirty = True
         self._save_modlist()
         self._rebuild_filemap()
         self._scan_missing_reqs_flags()
@@ -3007,12 +3053,15 @@ class ModListPanel(ctk.CTkFrame):
                  if 0 <= i < len(self._entries)]
         if not names:
             return
-        confirmed = ask_yes_no(
-            "Remove Mods",
-            f"Remove {len(names)} selected mod(s)?\n\nThis will delete the mod folders and cannot be undone.",
+        alert = CTkAlert(
+            state="warning",
+            title="Remove Mods",
+            body_text=f"Are you sure you want to remove {len(names)} selected mod(s)?\n\nThis will delete the mod folders and cannot be undone.",
+            btn1="Remove",
+            btn2="Cancel",
             parent=self.winfo_toplevel(),
         )
-        if not confirmed:
+        if alert.get() != "Remove":
             return
         staging_root = None
         index_path = None
@@ -3052,6 +3101,7 @@ class ModListPanel(ctk.CTkFrame):
             remove_from_mod_index(index_path, removed_names)
         self._sel_idx = -1
         self._sel_set = set()
+        self._invalidate_derived_caches()
         self._save_modlist()
         self._rebuild_filemap()
         self._scan_missing_reqs_flags()
@@ -3092,6 +3142,7 @@ class ModListPanel(ctk.CTkFrame):
                 old_folder.rename(new_folder)
         # Update entry in memory
         entry.name = new_name
+        self._vis_dirty = True  # name change affects text filter
         self._save_modlist()
         self._rebuild_filemap()
         self._redraw()
@@ -3960,6 +4011,7 @@ class ModListPanel(ctk.CTkFrame):
         self._check_vars.insert(dest, var)
 
         self._sel_idx = dest
+        self._invalidate_derived_caches()
         self._save_modlist()
         self._rebuild_filemap()
         self._redraw()
@@ -3999,6 +4051,7 @@ class ModListPanel(ctk.CTkFrame):
                 self._entries.append(entry)
                 self._check_buttons.append(None)
                 self._check_vars.append(var)
+            self._invalidate_derived_caches()
             self._save_modlist()
             self._rebuild_filemap()
             self._redraw()
@@ -4015,6 +4068,7 @@ class ModListPanel(ctk.CTkFrame):
         # Update selection to the moved block
         self._sel_set = set(range(dest, dest + len(to_move)))
         self._sel_idx = dest
+        self._invalidate_derived_caches()
         self._save_modlist()
         self._rebuild_filemap()
         self._redraw()
@@ -4469,10 +4523,16 @@ class ModListPanel(ctk.CTkFrame):
             if (beaten_str := ", ".join(rel_to_losers.get(orig.lower(), [])))
         ]
 
+        files_no_conflict: list[str] = [
+            orig
+            for orig, _ in files_i_win
+            if not rel_to_losers.get(orig.lower())
+        ]
+
         app = self.winfo_toplevel()
         show_fn = getattr(app, "show_conflicts_panel", None)
         if show_fn:
-            show_fn(mod_name, files_i_win_final, files_i_lose)
+            show_fn(mod_name, files_i_win_final, files_i_lose, files_no_conflict)
         else:
             _OverwritesDialog(
                 app,
@@ -4496,6 +4556,7 @@ class ModListPanel(ctk.CTkFrame):
         self._check_buttons.insert(insert_at, None)
         if self._sel_idx >= insert_at:
             self._sel_idx += 1
+        self._invalidate_derived_caches()
         self._save_modlist()
         self._rebuild_filemap()
         self._redraw()
@@ -4538,6 +4599,7 @@ class ModListPanel(ctk.CTkFrame):
         self._check_buttons.insert(insert_at, None)
         if self._sel_idx >= insert_at:
             self._sel_idx += 1
+        self._invalidate_derived_caches()
         self._save_modlist()
         self._rebuild_filemap()
         self._redraw()
@@ -4559,6 +4621,7 @@ class ModListPanel(ctk.CTkFrame):
             now_enabled = var.get()
             entry.enabled = now_enabled
             self._sync_plugins_for_toggle(entry.name, now_enabled)
+            self._vis_dirty = True  # enabled state affects show-disabled/enabled filters
             self._save_modlist()
             self._rebuild_filemap()
             self._scan_missing_reqs_flags()
@@ -4723,6 +4786,7 @@ class ModListPanel(ctk.CTkFrame):
         self._fsp_vars["filter_full"].set(self._filter_conflict_full)
         self._fsp_vars["filter_missing_reqs"].set(self._filter_missing_reqs)
         self._fsp_vars["filter_has_disabled_plugins"].set(self._filter_has_disabled_plugins)
+        self._fsp_vars["filter_has_disabled_files"].set(self._filter_has_disabled_files)
         self._fsp_vars["filter_has_updates"].set(self._filter_has_updates)
         self._filter_btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOV)
 
@@ -4772,8 +4836,9 @@ class ModListPanel(ctk.CTkFrame):
         self._filter_conflict_full = state.get("filter_full", False)
         self._filter_missing_reqs = state.get("filter_missing_reqs", False)
         self._filter_has_disabled_plugins = state.get("filter_has_disabled_plugins", False)
+        self._filter_has_disabled_files = state.get("filter_has_disabled_files", False)
         self._filter_has_updates = state.get("filter_has_updates", False)
-        self._vis_dirty = True
+        self._invalidate_derived_caches()
         self._redraw()
 
     def _move_up(self):
@@ -4790,6 +4855,7 @@ class ModListPanel(ctk.CTkFrame):
             self._check_buttons[i], self._check_buttons[i - 1] = self._check_buttons[i - 1], self._check_buttons[i]
         self._sel_set = {i - 1 for i in indices}
         self._sel_idx = self._sel_idx - 1 if self._sel_idx >= 0 else -1
+        self._invalidate_derived_caches()
         self._redraw()
         self._update_info()
         self._save_modlist()
@@ -4811,6 +4877,7 @@ class ModListPanel(ctk.CTkFrame):
             self._check_buttons[i], self._check_buttons[i + 1] = self._check_buttons[i + 1], self._check_buttons[i]
         self._sel_set = {i + 1 for i in indices}
         self._sel_idx = self._sel_idx + 1 if self._sel_idx >= 0 else -1
+        self._invalidate_derived_caches()
         self._redraw()
         self._update_info()
         self._save_modlist()
@@ -4873,7 +4940,7 @@ class ModListPanel(ctk.CTkFrame):
 
         self._sel_idx = to_idx
         self._sel_set = {to_idx}
-        self._vis_dirty = True
+        self._invalidate_derived_caches()
         self._redraw()
         self._update_info()
         self._save_modlist()
@@ -4931,6 +4998,7 @@ class ModListPanel(ctk.CTkFrame):
         _exc_path           = modlist_path.parent / "excluded_mod_files.json"
         _exc_raw            = read_excluded_mod_files(_exc_path)
         excluded_mod_files  = {k: set(v) for k, v in _exc_raw.items()} if _exc_raw else None
+        self._excluded_mod_files_map = _exc_raw or {}
         if excluded_mod_files:
             total_exc = sum(len(v) for v in excluded_mod_files.values())
             self.after(0, lambda n=total_exc, p=_exc_path: self._log(
@@ -4987,6 +5055,7 @@ class ModListPanel(ctk.CTkFrame):
                 self._overrides     = overrides
                 self._overridden_by = overridden_by
                 self._log(f"Filemap updated: {count} file(s).")
+            self._vis_dirty = True  # conflict filters depend on conflict_map
             self._redraw()
             if self._on_filemap_rebuilt:
                 self._on_filemap_rebuilt()

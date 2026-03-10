@@ -401,7 +401,11 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 if replace_dialog.result == "cancel":
                     log_fn(f"Install cancelled — '{mod_name}' already exists.")
                     return
-                if replace_dialog.result == "all":
+                if replace_dialog.result == "rename":
+                    mod_name = replace_dialog.new_name
+                    dest_root = game.get_effective_mod_staging_path() / mod_name
+                    was_existing_mod = False
+                elif replace_dialog.result == "all":
                     def _force_remove(func, path, _exc):
                         os.chmod(path, 0o700)
                         func(path)
@@ -591,8 +595,15 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 mod_name = suggestions[0]
 
             installed_files: set[str] = set()
+            active_files: set[str] = set()
             if mod_panel is not None and mod_panel._modlist_path is not None:
+                plugins_path = mod_panel._modlist_path.parent / "plugins.txt"
                 loadorder_path = mod_panel._modlist_path.parent / "loadorder.txt"
+                for entry in read_plugins(plugins_path):
+                    installed_files.add(entry.name.lower())
+                    if entry.enabled:
+                        active_files.add(entry.name.lower())
+                # Also add anything in loadorder.txt not already captured
                 for name in read_loadorder(loadorder_path):
                     installed_files.add(name.lower())
 
@@ -612,6 +623,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             else:
                 log_fn("FOMOD installer detected — opening wizard...")
                 saved_selections = None
+                sel_path = None
                 game_name = getattr(game, "name", "")
                 if game_name:
                     sel_path = get_fomod_selections_path(game_name, mod_name)
@@ -625,7 +637,9 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
 
                 dialog = FomodDialog(parent_window, config, mod_root,
                                      installed_files=installed_files,
-                                     saved_selections=saved_selections)
+                                     active_files=active_files,
+                                     saved_selections=saved_selections,
+                                     selections_path=sel_path)
                 parent_window.wait_window(dialog)
                 if dialog.result is None:
                     log_fn("FOMOD install cancelled.")
@@ -673,19 +687,18 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         replace_selected_only = False
         replace_all = False
         if dest_root.exists():
-            if headless:
-                # Headless (collection) install: always replace silently.
+            replace_dialog = _ReplaceModDialog(parent_window, mod_name)
+            parent_window.wait_window(replace_dialog)
+            if replace_dialog.result == "cancel":
+                log_fn(f"Install cancelled — '{mod_name}' already exists.")
+                return
+            if replace_dialog.result == "rename":
+                mod_name = replace_dialog.new_name
+                dest_root = game.get_effective_mod_staging_path() / mod_name
+            elif replace_dialog.result == "selected":
+                replace_selected_only = True
+            elif replace_dialog.result == "all":
                 replace_all = True
-            else:
-                replace_dialog = _ReplaceModDialog(parent_window, mod_name)
-                parent_window.wait_window(replace_dialog)
-                if replace_dialog.result == "cancel":
-                    log_fn(f"Install cancelled — '{mod_name}' already exists.")
-                    return None
-                if replace_dialog.result == "selected":
-                    replace_selected_only = True
-                elif replace_dialog.result == "all":
-                    replace_all = True
 
         if replace_selected_only:
             expanded = _expand_folders_for_dialog(file_list, mod_root)

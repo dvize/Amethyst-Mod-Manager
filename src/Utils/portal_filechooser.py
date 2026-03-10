@@ -326,30 +326,34 @@ def _run_zenity(args: list[str]) -> subprocess.CompletedProcess[str] | None:
     return None
 
 
-def _zenity_folder(title: str) -> Path | None:
+def _zenity_folder(title: str) -> Path | object | None:
     result = _run_zenity(["--file-selection", "--directory", f"--title={title}"])
-    if result is not None and result.returncode == 0:
+    if result is None:
+        return None  # zenity not found
+    if result.returncode == 0:
         p = Path(result.stdout.strip())
         if p.is_dir():
             return p
-    return None
+    return _CANCELLED  # zenity ran but user cancelled (or bad path)
 
 
-def _zenity_file(title: str) -> Path | None:
+def _zenity_file(title: str) -> Path | object | None:
     result = _run_zenity([
         "--file-selection",
         f"--title={title}",
         "--file-filter=Mod Archives (*.zip, *.7z, *.rar, *.tar.gz, *.tar) | *.zip *.7z *.rar *.tar.gz *.tar",
         "--file-filter=All files | *",
     ])
-    if result is not None and result.returncode == 0:
+    if result is None:
+        return None  # zenity not found
+    if result.returncode == 0:
         p = Path(result.stdout.strip())
         if p.is_file():
             return p
-    return None
+    return _CANCELLED  # zenity ran but user cancelled (or bad path)
 
 
-def _kdialog_folder(title: str) -> Path | None:
+def _kdialog_folder(title: str) -> Path | object | None:
     """Folder picker via kdialog (KDE). Returns None if kdialog is unavailable."""
     try:
         result = subprocess.run(
@@ -360,6 +364,7 @@ def _kdialog_folder(title: str) -> Path | None:
             p = Path(result.stdout.strip())
             if p.is_dir():
                 return p
+        return _CANCELLED  # kdialog ran but user cancelled (or bad path)
     except FileNotFoundError:
         pass
     return None
@@ -368,7 +373,7 @@ def _kdialog_folder(title: str) -> Path | None:
 _MOD_ARCHIVE_MIMETYPES = "application/zip application/x-7z-compressed application/x-tar"
 
 
-def _kdialog_file(title: str) -> Path | None:
+def _kdialog_file(title: str) -> Path | object | None:
     """File picker via kdialog (KDE). Returns None if kdialog is unavailable."""
     try:
         result = subprocess.run(
@@ -383,6 +388,7 @@ def _kdialog_file(title: str) -> Path | None:
             p = Path(result.stdout.strip())
             if p.is_file():
                 return p
+        return _CANCELLED  # kdialog ran but user cancelled (or bad path)
     except FileNotFoundError:
         pass
     return None
@@ -450,9 +456,17 @@ def pick_folder(title: str, callback: Callable[[Path | None], None]) -> None:
             return
         chosen: Path | None = result if isinstance(result, Path) else None
         if chosen is None:
-            chosen = _zenity_folder(title)
+            zenity_result = _zenity_folder(title)
+            if zenity_result is _CANCELLED:
+                callback(None)
+                return
+            chosen = zenity_result if isinstance(zenity_result, Path) else None
         if chosen is None:
-            chosen = _kdialog_folder(title)
+            kdialog_result = _kdialog_folder(title)
+            if kdialog_result is _CANCELLED:
+                callback(None)
+                return
+            chosen = kdialog_result if isinstance(kdialog_result, Path) else None
         if chosen is None:
             chosen = _tkinter_folder(title)
         callback(chosen)
@@ -478,9 +492,17 @@ def _run_file_picker_worker(title: str, filters: list[tuple[str, list[str]]], cb
         return
     chosen: Path | None = result if isinstance(result, Path) else None
     if chosen is None:
-        chosen = _zenity_file(title)
+        zenity_result = _zenity_file(title)
+        if zenity_result is _CANCELLED:
+            cb(None)
+            return
+        chosen = zenity_result if isinstance(zenity_result, Path) else None
     if chosen is None:
-        chosen = _kdialog_file(title)
+        kdialog_result = _kdialog_file(title)
+        if kdialog_result is _CANCELLED:
+            cb(None)
+            return
+        chosen = kdialog_result if isinstance(kdialog_result, Path) else None
     if chosen is None:
         chosen = _tkinter_file(title)
     cb(chosen)

@@ -1958,14 +1958,17 @@ class _OverwritesDialog(tk.Toplevel):
 # ---------------------------------------------------------------------------
 
 class OverwritesPanel(ctk.CTkFrame):
-    """Inline panel (overlays _mod_panel_container) showing conflict details."""
+    """Full-width overlay (spans mod list + plugin panel) showing conflict
+    details for a single mod across three side-by-side panes."""
 
     def __init__(self, parent, mod_name: str,
                  files_win: list[tuple[str, str]],
                  files_lose: list[tuple[str, str]],
+                 files_no_conflict: list[str] | None = None,
                  on_done=None):
         super().__init__(parent, fg_color=BG_DEEP, corner_radius=0)
         self._on_done = on_done or (lambda p: None)
+        files_no_conflict = files_no_conflict or []
 
         # Title bar
         title_bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=36)
@@ -1982,50 +1985,61 @@ class OverwritesPanel(ctk.CTkFrame):
         ).pack(side="right", padx=4)
         ctk.CTkFrame(self, fg_color=BORDER, height=1, corner_radius=0).pack(fill="x")
 
-        # Body
+        # Body — left column has win+lose stacked, right column has no-conflicts
         body = tk.Frame(self, bg=BG_DEEP)
         body.pack(fill="both", expand=True)
         body.grid_rowconfigure(0, weight=1)
-        body.grid_rowconfigure(1, weight=1)
         body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
 
-        self._build_pane(
-            body, row=0, col=0,
+        left = tk.Frame(body, bg=BG_DEEP)
+        left.grid(row=0, column=0, sticky="nsew")
+        left.grid_rowconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+
+        self._build_two_col_pane(
+            left, row=0, col=0,
             header=f"Files overriding others  ({len(files_win)})",
             header_color="#98c379",
             col0_title="File path",
             col1_title="Mod(s) beaten",
             rows=files_win,
+            pady=(8, 4),
         )
-        self._build_pane(
-            body, row=1, col=0,
+        self._build_two_col_pane(
+            left, row=1, col=0,
             header=f"Files overridden by others  ({len(files_lose)})",
             header_color="#e06c75",
             col0_title="File path",
             col1_title="Winning mod",
             rows=files_lose,
+            pady=(4, 8),
+        )
+        self._build_one_col_pane(
+            body, row=0, col=1,
+            header=f"Files with no conflicts  ({len(files_no_conflict)})",
+            header_color="#61afef",
+            col0_title="File path",
+            rows=files_no_conflict,
         )
 
         footer = tk.Frame(self, bg=BG_PANEL, height=44)
         footer.pack(fill="x")
         footer.pack_propagate(False)
         tk.Frame(footer, bg=BORDER, height=1).pack(side="top", fill="x")
-        tk.Button(
+        ctk.CTkButton(
             footer, text="Close",
-            bg=BG_HEADER, fg=TEXT_MAIN, activebackground=BG_HOVER,
-            relief="flat", font=("Segoe UI", 11),
-            padx=16, pady=3, cursor="hand2",
+            fg_color="#c0392b", hover_color="#a93226",
+            text_color=TEXT_MAIN, font=FONT_BOLD,
+            width=80, height=28,
             command=self._on_close,
         ).pack(side="right", padx=12, pady=6)
 
-    def _build_pane(self, body, row, col, header, header_color,
-                    col0_title, col1_title, rows):
+    def _build_two_col_pane(self, body, row, col, header, header_color,
+                             col0_title, col1_title, rows, pady=8):
         outer = tk.Frame(body, bg=BG_PANEL)
-        outer.grid(
-            row=row, column=col, sticky="nsew",
-            padx=8,
-            pady=(8 if row == 0 else 4, 4 if row == 0 else 8),
-        )
+        outer.grid(row=row, column=col, sticky="nsew", padx=8, pady=pady)
         outer.grid_rowconfigure(1, weight=1)
         outer.grid_columnconfigure(0, weight=1)
 
@@ -2040,7 +2054,7 @@ class OverwritesPanel(ctk.CTkFrame):
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
-        uid = f"OvPanel{row}{id(self)}"
+        uid = f"OvPanel{row}{col}{id(self)}"
         style = ttk.Style()
         style.configure(f"{uid}.Treeview",
                         background=BG_DEEP, foreground=TEXT_MAIN,
@@ -2080,8 +2094,65 @@ class OverwritesPanel(ctk.CTkFrame):
         if not rows:
             tv.insert("", "end", text="(none)", values=("",))
 
+    def _build_one_col_pane(self, body, row, col, header, header_color,
+                             col0_title, rows):
+        outer = tk.Frame(body, bg=BG_PANEL)
+        outer.grid(row=row, column=col, sticky="nsew", padx=(4, 8), pady=8)
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            outer, text=header,
+            bg=BG_PANEL, fg=header_color,
+            font=("Segoe UI", 10, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+
+        tree_frame = tk.Frame(outer, bg=BG_DEEP)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        uid = f"NcPanel{col}{id(self)}"
+        style = ttk.Style()
+        style.configure(f"{uid}.Treeview",
+                        background=BG_DEEP, foreground=TEXT_MAIN,
+                        fieldbackground=BG_DEEP, rowheight=20,
+                        font=("Segoe UI", 9))
+        style.configure(f"{uid}.Treeview.Heading",
+                        background=BG_HEADER, foreground=TEXT_SEP,
+                        font=("Segoe UI", 9, "bold"), relief="flat")
+        style.map(f"{uid}.Treeview",
+                  background=[("selected", BG_SELECT)],
+                  foreground=[("selected", TEXT_MAIN)])
+
+        tv = ttk.Treeview(
+            tree_frame,
+            columns=(),
+            show="tree",
+            style=f"{uid}.Treeview",
+            selectmode="browse",
+        )
+        tv.heading("#0", text=col0_title, anchor="w")
+        tv.column("#0", minwidth=180, stretch=True)
+
+        vsb = tk.Scrollbar(tree_frame, orient="vertical", command=tv.yview,
+                           bg=BG_SEP, troughcolor=BG_DEEP, activebackground=ACCENT,
+                           highlightthickness=0, bd=0)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        tv.bind("<Button-4>", lambda e: tv.yview_scroll(-3, "units"))
+        tv.bind("<Button-5>", lambda e: tv.yview_scroll( 3, "units"))
+
+        for path in rows:
+            tv.insert("", "end", text=path)
+        if not rows:
+            tv.insert("", "end", text="(none)")
+
     def _on_close(self):
         self._on_done(self)
+
+
 # VRAMr preset picker
 # ---------------------------------------------------------------------------
 class _VRAMrPresetDialog(ctk.CTkToplevel):
@@ -3276,8 +3347,9 @@ class ExeConfigPanel(ctk.CTkFrame):
 
 class _ReplaceModDialog(ctk.CTkToplevel):
     """Modal dialog shown when installing a mod whose name already exists.
-    result: "all" | "selected" | "cancel"
+    result: "all" | "selected" | "rename" | "cancel"
     selected_files: set[str] — always None here; populated by caller if "selected"
+    new_name: str | None — set when result == "rename"
     """
 
     def __init__(self, parent, mod_name: str):
@@ -3290,6 +3362,11 @@ class _ReplaceModDialog(ctk.CTkToplevel):
 
         self.result: str = "cancel"
         self.selected_files: set[str] | None = None
+        self.new_name: str | None = None
+
+        self._mod_name = mod_name
+        self._rename_frame: ctk.CTkFrame | None = None
+        self._rename_var: tk.StringVar | None = None
 
         self._build(mod_name)
 
@@ -3319,8 +3396,30 @@ class _ReplaceModDialog(ctk.CTkToplevel):
             anchor="w",
         ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
 
+        # Rename row (hidden until "Rename" is clicked)
+        self._rename_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._rename_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._rename_frame.grid_columnconfigure(0, weight=1)
+        self._rename_frame.grid_remove()
+
+        self._rename_var = tk.StringVar(value=mod_name)
+        rename_entry = ctk.CTkEntry(
+            self._rename_frame, textvariable=self._rename_var,
+            font=FONT_NORMAL, fg_color=BG_PANEL, text_color=TEXT_MAIN,
+            border_color=BORDER,
+        )
+        rename_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        rename_entry.bind("<Return>", lambda _e: self._on_rename_confirm())
+        self._rename_entry = rename_entry
+
+        ctk.CTkButton(
+            self._rename_frame, text="Confirm", width=80, height=28, font=FONT_BOLD,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            command=self._on_rename_confirm,
+        ).grid(row=0, column=1)
+
         bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=52)
-        bar.grid(row=2, column=0, sticky="ew")
+        bar.grid(row=3, column=0, sticky="ew")
         bar.grid_propagate(False)
         ctk.CTkFrame(bar, fg_color=BORDER, height=1, corner_radius=0).pack(
             side="top", fill="x"
@@ -3330,6 +3429,11 @@ class _ReplaceModDialog(ctk.CTkToplevel):
             fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
             command=self._on_cancel,
         ).pack(side="right", padx=(4, 12), pady=12)
+        ctk.CTkButton(
+            bar, text="Rename", width=90, height=28, font=FONT_NORMAL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._on_rename,
+        ).pack(side="right", padx=4, pady=12)
         ctk.CTkButton(
             bar, text="Replace Selected", width=130, height=28, font=FONT_NORMAL,
             fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
@@ -3347,6 +3451,28 @@ class _ReplaceModDialog(ctk.CTkToplevel):
         x = owner.winfo_rootx() + (owner.winfo_width() - w) // 2
         y = owner.winfo_rooty() + (owner.winfo_height() - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _on_rename(self):
+        if self._rename_frame is None:
+            return
+        self._rename_frame.grid()
+        self.update_idletasks()
+        w, h = 460, self.winfo_reqheight()
+        owner = self.master
+        x = owner.winfo_rootx() + (owner.winfo_width() - w) // 2
+        y = owner.winfo_rooty() + (owner.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self._rename_entry.focus_set()
+        self._rename_entry.select_range(0, "end")
+
+    def _on_rename_confirm(self):
+        name = self._rename_var.get().strip() if self._rename_var else ""
+        if not name or name == self._mod_name:
+            return
+        self.result = "rename"
+        self.new_name = name
+        self.grab_release()
+        self.destroy()
 
     def _on_all(self):
         self.result = "all"
