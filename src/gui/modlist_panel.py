@@ -86,7 +86,7 @@ from Utils.filemap import (
     OVERWRITE_NAME,
     ROOT_FOLDER_NAME,
 )
-from Utils.deploy import deploy_root_folder, restore_root_folder, LinkMode, load_per_mod_strip_prefixes, undeploy_mod_files
+from Utils.deploy import deploy_root_folder, restore_root_folder, LinkMode, load_per_mod_strip_prefixes, undeploy_mod_files, restore_custom_deploy_backup_for_path
 from Utils.modlist import (
     ModEntry,
     read_modlist,
@@ -2841,6 +2841,16 @@ class ModListPanel(ctk.CTkFrame):
                 self._sel_idx = -1
             elif self._sel_idx > idx:
                 self._sel_idx -= 1
+            # If this separator had a custom deploy location, restore any
+            # backed-up originals for that path immediately.
+            _deploy_info = self._sep_deploy_paths.pop(sname, None)
+            if _deploy_info:
+                self._save_sep_deploy_paths()
+                _custom_path_str = _deploy_info.get("path", "")
+                if _custom_path_str and self._filemap_path is not None:
+                    restore_custom_deploy_backup_for_path(
+                        self._filemap_path, Path(_custom_path_str)
+                    )
             self._save_modlist()
             self._rebuild_filemap()
             self._redraw()

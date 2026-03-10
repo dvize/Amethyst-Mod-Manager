@@ -210,6 +210,81 @@ def cleanup_custom_deploy_dirs(
     return removed
 
 
+def restore_custom_deploy_backup_for_path(
+    filemap_path: "Path | None",
+    custom_path: Path,
+    log_fn=None,
+) -> int:
+    """Restore backed-up originals whose location is under custom_path.
+
+    Called when a separator with a custom deploy location is removed while the
+    game is still deployed — the backup files for that location must be put back
+    immediately rather than waiting for the next full restore.
+
+    Also removes the corresponding entries from custom_deploy_log.txt so that
+    the full cleanup later does not try to delete the restored originals.
+
+    Returns the number of files restored.
+    """
+    _log = log_fn or (lambda _: None)
+
+    if filemap_path is None:
+        return 0
+
+    profile_dir = filemap_path.parent
+    backup_dir  = profile_dir / "custom_deploy_backup"
+    log_path    = profile_dir / "custom_deploy_log.txt"
+
+    if not backup_dir.is_dir():
+        return 0
+
+    # The backup mirrors absolute paths: backup_dir / <abs-path-minus-anchor>
+    # Files whose original location is under custom_path will be under:
+    #   backup_dir / custom_path.relative_to(custom_path.anchor)
+    try:
+        backup_subtree = backup_dir / custom_path.relative_to(custom_path.anchor)
+    except ValueError:
+        return 0
+
+    if not backup_subtree.is_dir():
+        return 0
+
+    restored = 0
+    for bak_src in backup_subtree.rglob("*"):
+        if not bak_src.is_file():
+            continue
+        rel = bak_src.relative_to(backup_dir)
+        orig = Path("/") / rel
+        try:
+            orig.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(bak_src), str(orig))
+            restored += 1
+            _log(f"  Restored {orig.name} from custom_deploy_backup/")
+        except OSError as exc:
+            _log(f"  WARN: could not restore {orig}: {exc}")
+
+    # Clean up the now-empty backup subtree.
+    shutil.rmtree(backup_subtree, ignore_errors=True)
+
+    # Remove entries for this path from the deploy log so full cleanup won't
+    # try to delete the now-restored originals.
+    if log_path.is_file() and restored:
+        try:
+            lines = [l for l in log_path.read_text(encoding="utf-8").splitlines() if l]
+            kept = [l for l in lines if not Path(l).is_relative_to(custom_path)]
+            if len(kept) < len(lines):
+                if kept:
+                    log_path.write_text("\n".join(kept), encoding="utf-8")
+                else:
+                    log_path.unlink()
+        except OSError:
+            pass
+
+    if restored:
+        _log(f"  Restored {restored} original file(s) for removed separator.")
+    return restored
+
+
 def _prune_empty_dirs(dirs: "set[Path]", stop_dirs: "set[Path] | None" = None) -> None:
     """Remove empty directories bottom-up, stopping at (and never removing) stop_dirs."""
     _stop = stop_dirs or set()
