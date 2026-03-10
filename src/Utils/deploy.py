@@ -136,14 +136,10 @@ def cleanup_custom_deploy_dirs(
     log_fn=None,
     filemap_path: "Path | None" = None,
 ) -> int:
-    """Remove files that were deployed to custom separator locations.
+    """Remove files deployed to custom separator locations and restore originals.
 
-    Reads custom_deploy_manifest.json written by deploy_filemap() and deletes
-    every file listed there.  This is snapshot-based so it works correctly even
-    when the user moves mods out of a separator between deploy and restore.
-
-    Falls back to the old filemap + sep-paths derivation when no manifest exists
-    (e.g. deployments made before the manifest feature was added).
+    Reads custom_deploy_log.txt written by deploy_filemap() and deletes every
+    file listed there, then restores any originals from custom_deploy_backup/.
 
     Returns the number of files removed.
     """
@@ -152,97 +148,65 @@ def cleanup_custom_deploy_dirs(
     if profile_dir is None:
         return 0
 
-    # Locate manifest: search profile_dir and two levels up (profile root)
-    manifest_path: Path | None = None
+    # Locate log: search profile_dir and two levels up (profile root)
+    log_path: Path | None = None
     for candidate_dir in (profile_dir, profile_dir.parent.parent):
-        c = candidate_dir / "custom_deploy_manifest.json"
+        c = candidate_dir / "custom_deploy_log.txt"
         if c.is_file():
-            manifest_path = c
+            log_path = c
             break
 
-    if manifest_path is not None:
-        # Fast path: manifest records exactly what was placed in custom dirs
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError
-            file_list = data.get("files", [])
-            stop_dirs = {Path(r) for r in data.get("roots", [])}
-        except (OSError, json.JSONDecodeError, ValueError):
-            file_list = []
-            stop_dirs = set()
-
-        removed = 0
-        dirs_to_prune: set[Path] = set()
-
-        for abs_str in file_list:
-            target = Path(abs_str)
-            if target.is_file() or target.is_symlink():
-                try:
-                    target.unlink()
-                    removed += 1
-                    dirs_to_prune.add(target.parent)
-                except OSError as exc:
-                    _log(f"  WARN: could not remove custom-deployed {target}: {exc}")
-
-        _prune_empty_dirs(dirs_to_prune, stop_dirs)
-
-        # Remove the manifest itself
-        try:
-            manifest_path.unlink()
-        except OSError:
-            pass
-
-        if removed:
-            _log(f"  Removed {removed} file(s) from custom deployment location(s).")
-        return removed
-
-    # Fallback: no manifest — derive from current sep paths + filemap
-    sep_paths = load_separator_deploy_paths(profile_dir)
-    if not sep_paths:
+    if log_path is None:
         return 0
 
-    per_mod_deploy = expand_separator_deploy_paths(sep_paths, entries)
-    if not per_mod_deploy:
-        return 0
-
-    if filemap_path is None:
-        candidates = [
-            profile_dir / "filemap.txt",
-            profile_dir.parent.parent / "filemap.txt",
-        ]
-        for c in candidates:
-            if c.is_file():
-                filemap_path = c
-                break
-    if filemap_path is None or not filemap_path.is_file():
-        return 0
+    file_list = [p for p in log_path.read_text(encoding="utf-8").splitlines() if p]
+    backup_dir = log_path.parent / "custom_deploy_backup"
 
     removed = 0
-    dirs_to_prune = set()
+    dirs_to_prune: set[Path] = set()
+    stop_dirs: set[Path] = set()
 
-    with filemap_path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if "\t" not in line:
-                continue
-            rel_str, mod_name = line.split("\t", 1)
-            custom_dir = per_mod_deploy.get(mod_name)
-            if custom_dir is None:
-                continue
-            target = custom_dir / rel_str
-            if target.is_file() or target.is_symlink():
-                try:
-                    target.unlink()
-                    removed += 1
-                    dirs_to_prune.add(target.parent)
-                except OSError as exc:
-                    _log(f"  WARN: could not remove custom-deployed {target}: {exc}")
+    for abs_str in file_list:
+        target = Path(abs_str)
+        if target.is_file() or target.is_symlink():
+            try:
+                target.unlink()
+                removed += 1
+                dirs_to_prune.add(target.parent)
+                stop_dirs.add(target.parent)
+            except OSError as exc:
+                _log(f"  WARN: could not remove custom-deployed {target}: {exc}")
 
-    _prune_empty_dirs(dirs_to_prune, set(per_mod_deploy.values()))
+    # Restore any originals that were backed up before deployment.
+    restored = 0
+    if backup_dir.is_dir():
+        for bak_src in backup_dir.rglob("*"):
+            if not bak_src.is_file():
+                continue
+            # Reconstruct original absolute path: backup mirrors the full
+            # absolute path of the original (minus leading slash/anchor).
+            rel = bak_src.relative_to(backup_dir)
+            orig = Path("/") / rel
+            try:
+                orig.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(bak_src), str(orig))
+                restored += 1
+                _log(f"  Restored {orig.name} from custom_deploy_backup/")
+            except OSError as exc:
+                _log(f"  WARN: could not restore {orig}: {exc}")
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+    _prune_empty_dirs(dirs_to_prune, stop_dirs)
+
+    try:
+        log_path.unlink()
+    except OSError:
+        pass
 
     if removed:
         _log(f"  Removed {removed} file(s) from custom deployment location(s).")
+    if restored:
+        _log(f"  Restored {restored} original file(s) to custom deployment location(s).")
     return removed
 
 
@@ -474,11 +438,35 @@ def deploy_filemap(
     if total == 0:
         return 0, placed_lower
 
+    _custom_backup_dir = filemap_path.parent / "custom_deploy_backup"
+    _custom_log_path   = filemap_path.parent / "custom_deploy_log.txt"
+
+    # Clear any stale backup from a previous deploy before we start, so we
+    # never mix old backed-up originals with new ones (same pattern as
+    # deploy_filemap_to_root).
+    if _custom_backup_dir.exists():
+        shutil.rmtree(_custom_backup_dir)
+
     # Pre-create all destination directories up front (single-threaded) to
     # avoid mkdir races inside the thread pool.
     needed_dirs: set[Path] = {dst.parent for _, dst, _, _is_custom in tasks}
     for d in needed_dirs:
         d.mkdir(parents=True, exist_ok=True)
+
+    # Back up any pre-existing files at custom deploy locations so restore can
+    # put the originals back.  Mirror each dst's absolute path as a relative
+    # path inside _custom_backup_dir (strip leading slash) so structure is
+    # preserved and files with the same name in different dirs never collide.
+    for src, dst, rel_lower, is_custom in tasks:
+        if not is_custom:
+            continue
+        if dst.is_symlink():
+            dst.unlink()
+        elif dst.is_file():
+            bak = _custom_backup_dir / dst.relative_to(dst.anchor)
+            bak.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dst), str(bak))
+            _log(f"  Backed up existing {dst.name} → custom_deploy_backup/")
 
     linked = 0
     errors: list[tuple[Path, OSError]] = []
@@ -512,28 +500,20 @@ def deploy_filemap(
             if progress_fn is not None and (_done % 200 == 0 or _done == total):
                 progress_fn(_done, total)
 
-    # Write a manifest of files placed in custom locations so restore can clean
-    # them up even if separator settings have changed since deploy.
-    _manifest_path = filemap_path.parent / "custom_deploy_manifest.json"
+    # Write a log of files placed in custom locations so cleanup knows what to
+    # remove.  Each line is the absolute path of a deployed file.
     custom_deployed = [
         str(dst)
         for src, dst, rel_lower, is_custom in tasks
         if is_custom and rel_lower in placed_lower
     ]
-    if custom_deployed:
-        custom_roots = [str(p) for p in _per_deploy.values()]
-        try:
-            _manifest_path.write_text(
-                json.dumps({"files": custom_deployed, "roots": custom_roots}, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-    elif _manifest_path.exists():
-        try:
-            _manifest_path.unlink()
-        except OSError:
-            pass
+    try:
+        if custom_deployed:
+            _custom_log_path.write_text("\n".join(custom_deployed), encoding="utf-8")
+        elif _custom_log_path.exists():
+            _custom_log_path.unlink()
+    except OSError:
+        pass
 
     return linked, placed_lower
 
