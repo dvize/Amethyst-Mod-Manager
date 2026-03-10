@@ -45,7 +45,7 @@ from gui.theme import (
     load_icon as _load_icon,
 )
 import gui.theme as _theme
-from gui.ctk_components import CTkPopupMenu, CTkProgressPopup
+from gui.ctk_components import CTkAlert, CTkPopupMenu, CTkProgressPopup
 from gui.game_helpers import (
     _GAMES,
     _load_games,
@@ -2243,7 +2243,8 @@ class ModListPanel(ctk.CTkFrame):
                 # Shift+click on separator: extend selection range
                 if shift and self._sel_idx >= 0:
                     lo, hi = sorted((self._sel_idx, idx))
-                    self._sel_set = set(range(lo, hi + 1))
+                    vis_set = set(self._compute_visible_indices())
+                    self._sel_set = {j for j in range(lo, hi + 1) if j in vis_set}
                     self._redraw()
                     return
                 self._sel_idx = idx
@@ -2285,7 +2286,8 @@ class ModListPanel(ctk.CTkFrame):
         # Shift+click: extend selection from anchor to clicked row
         if shift and self._sel_idx >= 0:
             lo, hi = sorted((self._sel_idx, idx))
-            self._sel_set = set(range(lo, hi + 1))
+            vis_set = set(self._compute_visible_indices())
+            self._sel_set = {j for j in range(lo, hi + 1) if j in vis_set}
             self._redraw()
             self._update_info()
             return
@@ -2934,12 +2936,15 @@ class ModListPanel(ctk.CTkFrame):
         entry = self._entries[idx]
         if entry.is_separator:
             return
-        confirmed = ask_yes_no(
-            "Remove Mod",
-            f"Remove '{entry.name}'?\n\nThis will delete the mod folder and cannot be undone.",
+        alert = CTkAlert(
+            state="warning",
+            title="Remove Mod",
+            body_text=f"Are you sure you want to remove '{entry.name}'?\n\nThis will delete the mod folder and cannot be undone.",
+            btn1="Remove",
+            btn2="Cancel",
             parent=self.winfo_toplevel(),
         )
-        if not confirmed:
+        if alert.get() != "Remove":
             return
         # Delete the mod folder from staging and drop it from the index
         if self._modlist_path is not None:
@@ -3007,12 +3012,15 @@ class ModListPanel(ctk.CTkFrame):
                  if 0 <= i < len(self._entries)]
         if not names:
             return
-        confirmed = ask_yes_no(
-            "Remove Mods",
-            f"Remove {len(names)} selected mod(s)?\n\nThis will delete the mod folders and cannot be undone.",
+        alert = CTkAlert(
+            state="warning",
+            title="Remove Mods",
+            body_text=f"Are you sure you want to remove {len(names)} selected mod(s)?\n\nThis will delete the mod folders and cannot be undone.",
+            btn1="Remove",
+            btn2="Cancel",
             parent=self.winfo_toplevel(),
         )
-        if not confirmed:
+        if alert.get() != "Remove":
             return
         staging_root = None
         index_path = None
@@ -4469,10 +4477,16 @@ class ModListPanel(ctk.CTkFrame):
             if (beaten_str := ", ".join(rel_to_losers.get(orig.lower(), [])))
         ]
 
+        files_no_conflict: list[str] = [
+            orig
+            for orig, _ in files_i_win
+            if not rel_to_losers.get(orig.lower())
+        ]
+
         app = self.winfo_toplevel()
         show_fn = getattr(app, "show_conflicts_panel", None)
         if show_fn:
-            show_fn(mod_name, files_i_win_final, files_i_lose)
+            show_fn(mod_name, files_i_win_final, files_i_lose, files_no_conflict)
         else:
             _OverwritesDialog(
                 app,
