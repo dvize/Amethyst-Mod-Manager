@@ -491,9 +491,12 @@ class GamePickerPanel(tk.Frame):
 
         self._inner.bind("<Configure>", self._on_inner_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
-        for w in (self._canvas, self._inner):
-            w.bind("<Button-4>", lambda e: self._canvas.yview_scroll(-8, "units"))
-            w.bind("<Button-5>", lambda e: self._canvas.yview_scroll(8, "units"))
+
+        # Forward scroll from anywhere in this overlay to the canvas.
+        # bind_all covers every child widget (including CTkButton internals).
+        self.bind_all("<Button-4>", lambda e: self._canvas.yview_scroll(-8, "units"))
+        self.bind_all("<Button-5>", lambda e: self._canvas.yview_scroll(8, "units"))
+        self.bind("<Destroy>", self._on_destroy)
 
         # Build cards
         for name in self._game_names:
@@ -593,14 +596,23 @@ class GamePickerPanel(tk.Frame):
         # Hover highlight
         def _enter(e, c=card): c.configure(border_color=ACCENT)
         def _leave(e, c=card): c.configure(border_color=BORDER)
-        # Bind scroll forwarding on all card children
         for w in (card, img_frame, img_lbl):
             w.bind("<Enter>", _enter)
             w.bind("<Leave>", _leave)
-            w.bind("<Button-4>", lambda e: self._canvas.yview_scroll(-8, "units"))
-            w.bind("<Button-5>", lambda e: self._canvas.yview_scroll(8, "units"))
 
         self._card_widgets.append(card)
+
+    # ------------------------------------------------------------------
+    # Scroll helpers
+    # ------------------------------------------------------------------
+
+    def _on_destroy(self, event):
+        if event.widget is self:
+            try:
+                self.unbind_all("<Button-4>")
+                self.unbind_all("<Button-5>")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Column-reflow (mirrors CollectionsDialog._regrid_cards)
