@@ -445,6 +445,24 @@ class BaseGame(ABC):
         return {}
 
     @property
+    def custom_routing_rules(self) -> list:
+        """
+        A list of CustomRule objects (from Utils.deploy) that route specific
+        file types to a game-root-relative destination directory during deploy.
+
+        Files matching a rule are placed into game_root / rule.dest using only
+        their bare filename, and are excluded from the normal deploy destination.
+
+        Example (RE Engine .pak files)::
+
+            from Utils.deploy import CustomRule
+            return [CustomRule(dest="pak_mods", extensions=[".pak"])]
+
+        Return an empty list (the default) to use normal routing for all files.
+        """
+        return []
+
+    @property
     def restore_before_deploy(self) -> bool:
         """
         When True (the default), the GUI runs restore() before deploy() when

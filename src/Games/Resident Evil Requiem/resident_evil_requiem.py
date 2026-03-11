@@ -20,15 +20,18 @@ from pathlib import Path
 
 from Games.base_game import BaseGame
 from Utils.deploy import (
+    CustomRule,
     LinkMode,
     apply_wine_dll_overrides,
     deploy_core,
+    deploy_custom_rules,
     deploy_filemap,
     load_per_mod_strip_prefixes,
     load_separator_deploy_paths,
     expand_separator_deploy_paths,
     cleanup_custom_deploy_dirs,
     move_to_core,
+    restore_custom_rules,
     restore_data_core,
 )
 from Utils.modlist import read_modlist
@@ -77,7 +80,7 @@ class ResidentEvilRequiem(BaseGame):
 
     @property
     def mod_required_top_level_folders(self) -> set[str]:
-        return {"reframework"}
+        return {"reframework","natives"}
 
     @property
     def mod_auto_strip_until_required(self) -> bool:
@@ -89,7 +92,7 @@ class ResidentEvilRequiem(BaseGame):
 
     @property
     def conflict_ignore_filenames(self) -> set[str]:
-        return {"modinfo.ini","readme.txt"}
+        return {"modinfo.ini","readme.txt","*.png","*.jpg"}
 
     @property
     def wine_dll_overrides(self) -> dict[str, str]:
@@ -98,7 +101,13 @@ class ResidentEvilRequiem(BaseGame):
     @property
     def frameworks(self) -> dict[str, str]:
         return {"ReFramework": "dinput8.dll"}
-    
+
+    @property
+    def custom_routing_rules(self) -> list[CustomRule]:
+        return [
+            CustomRule(dest="pak_mods", extensions=[".pak"]),
+            CustomRule(dest="", folders=["natives"]),
+        ]
 
     # -----------------------------------------------------------------------
     # Paths
@@ -237,6 +246,19 @@ class ResidentEvilRequiem(BaseGame):
         _sep_deploy = load_separator_deploy_paths(profile_dir)
         _sep_entries = read_modlist(profile_dir / "modlist.txt") if _sep_deploy else []
         per_mod_deploy = expand_separator_deploy_paths(_sep_deploy, _sep_entries) or None
+
+        custom_rules = self.custom_routing_rules
+        custom_exclude: set[str] = set()
+        if custom_rules:
+            _log(f"  Routing custom-rule files to game root subdirectories ...")
+            custom_exclude = deploy_custom_rules(
+                filemap, self._game_path, staging,
+                rules=custom_rules,
+                mode=mode,
+                strip_prefixes=self.mod_folder_strip_prefixes,
+                log_fn=_log,
+            )
+
         linked_mod, placed = deploy_filemap(
             filemap, reframework_dir, staging,
             mode=mode,
@@ -245,6 +267,7 @@ class ResidentEvilRequiem(BaseGame):
             per_mod_deploy_dirs=per_mod_deploy,
             log_fn=_log,
             progress_fn=progress_fn,
+            exclude=custom_exclude,
         )
         _log(f"  Transferred {linked_mod} mod file(s).")
 
@@ -276,6 +299,15 @@ class ResidentEvilRequiem(BaseGame):
         _profile_dir = self._active_profile_dir
         _entries = read_modlist(_profile_dir / "modlist.txt") if _profile_dir else []
         cleanup_custom_deploy_dirs(_profile_dir, _entries, log_fn=_log)
+
+        custom_rules = self.custom_routing_rules
+        if custom_rules:
+            restore_custom_rules(
+                self.get_effective_filemap_path(),
+                self._game_path,
+                rules=custom_rules,
+                log_fn=_log,
+            )
 
         _log(f"Restore: clearing {reframework_dir.name}/ and moving {core}/ back if present ...")
         restored = restore_data_core(
