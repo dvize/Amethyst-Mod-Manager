@@ -44,9 +44,28 @@ from gui.theme import (
 )
 import gui.theme as _theme
 from gui.path_utils import _to_wine_path
-from Utils.config_paths import get_exe_args_path, get_custom_game_images_dir
+from Utils.config_paths import get_exe_args_path, get_profile_exe_args_path, get_custom_game_images_dir
 from Utils.exe_args_builder import EXE_PROFILES
 from Utils.xdg import xdg_open, open_url
+
+
+def _resolve_exe_args_file(game) -> "Path":
+    """Return the exe_args.json path to use for *game*'s active profile.
+
+    For profiles with the ``profile_specific_mods`` flag the args are stored
+    inside the profile directory so each profile can have independent tool
+    output paths.  All other profiles share the global exe_args.json.
+    """
+    from pathlib import Path as _Path
+    try:
+        active_dir = getattr(game, "_active_profile_dir", None)
+        if active_dir is not None:
+            from gui.game_helpers import profile_uses_specific_mods  # type: ignore
+            if profile_uses_specific_mods(active_dir):
+                return get_profile_exe_args_path(_Path(active_dir))
+    except Exception:
+        pass
+    return get_exe_args_path()
 
 
 # ---------------------------------------------------------------------------
@@ -2564,6 +2583,9 @@ class _ExeConfigDialog(ctk.CTkToplevel):
         _initial = _best_match(_saved)
         self._proton_var = tk.StringVar(value=_initial)
 
+        # Per-profile exe_args.json when the profile uses profile-specific mods
+        self._EXE_ARGS_FILE = _resolve_exe_args_file(game)
+
         self._game_path: "Path | None" = (
             game.get_game_path() if hasattr(game, "get_game_path") else None
         )
@@ -2690,7 +2712,7 @@ class _ExeConfigDialog(ctk.CTkToplevel):
             ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
 
             self._final_box = ctk.CTkTextbox(
-                sec3, height=56, font=FONT_NORMAL,
+                sec3, height=90, font=FONT_NORMAL,
                 fg_color=BG_HEADER, text_color=TEXT_MAIN, border_color=BORDER,
                 border_width=1, wrap="word",
             )
@@ -2978,7 +3000,15 @@ class _ExeConfigDialog(ctk.CTkToplevel):
     def _load_saved(self):
         if self._saved_args:
             self._parse_saved_args(self._saved_args)
-            self._set_final_text(self._saved_args)
+            # Re-assemble with current (profile-correct) paths if the output
+            # mod was resolved to an actual entry; otherwise keep the saved text
+            # so auto-configured args are never blanked out.
+            selected = self._mod_var.get()
+            path_found = any(n == selected for n, _ in self._mod_entries)
+            if path_found:
+                self._assemble()
+            else:
+                self._set_final_text(self._saved_args)
 
     def _on_save(self):
         if self._initial_launch_mode is not None:
@@ -3143,6 +3173,9 @@ class ExeConfigPanel(ctk.CTkFrame):
             return "Game default"
         self._proton_var = tk.StringVar(value=_best_match(_saved))
 
+        # Per-profile exe_args.json when the profile uses profile-specific mods
+        self._EXE_ARGS_FILE = _resolve_exe_args_file(game)
+
         self._game_path: "Path | None" = (
             game.get_game_path() if hasattr(game, "get_game_path") else None
         )
@@ -3280,7 +3313,7 @@ class ExeConfigPanel(ctk.CTkFrame):
             ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
 
             self._final_box = ctk.CTkTextbox(
-                sec3, height=56, font=FONT_NORMAL,
+                sec3, height=90, font=FONT_NORMAL,
                 fg_color=BG_HEADER, text_color=TEXT_MAIN, border_color=BORDER,
                 border_width=1, wrap="word",
             )
@@ -3552,7 +3585,15 @@ class ExeConfigPanel(ctk.CTkFrame):
     def _load_saved(self):
         if self._saved_args:
             self._parse_saved_args(self._saved_args)
-            self._set_final_text(self._saved_args)
+            # Re-assemble with current (profile-correct) paths if the output
+            # mod was resolved to an actual entry; otherwise keep the saved text
+            # so auto-configured args are never blanked out.
+            selected = self._mod_var.get()
+            path_found = any(n == selected for n, _ in self._mod_entries)
+            if path_found:
+                self._assemble()
+            else:
+                self._set_final_text(self._saved_args)
 
     def _get_selected_tool_env(self):
         selected = self._proton_var.get()

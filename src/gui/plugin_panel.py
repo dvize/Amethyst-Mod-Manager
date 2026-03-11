@@ -408,7 +408,11 @@ class PluginPanel(ctk.CTkFrame):
             # 2. Scan Profiles/<game>/Applications/ for .exe/.bat files (recursive),
             #    excluding custom_exes.json entries (added separately below)
             if staging is not None:
-                apps_dir = staging.parent / "Applications"
+                _shared_staging = (
+                    self._game.get_mod_staging_path()
+                    if hasattr(self._game, "get_mod_staging_path") else staging
+                )
+                apps_dir = _shared_staging.parent / "Applications"
                 if apps_dir.is_dir():
                     for ext in self._EXE_SCAN_EXTENSIONS:
                         for entry in apps_dir.rglob(f"*{ext}"):
@@ -424,8 +428,7 @@ class PluginPanel(ctk.CTkFrame):
         # Sort: game exe first, then Applications/, then custom/filemap entries, alpha within each
         apps_dir_root = None
         if self._game and hasattr(self._game, "get_mod_staging_path"):
-            staging = self._game.get_effective_mod_staging_path()
-            apps_dir_root = staging.parent / "Applications"
+            apps_dir_root = self._game.get_mod_staging_path().parent / "Applications"
 
         custom_set = set(self._load_custom_exes())
 
@@ -605,14 +608,10 @@ class PluginPanel(ctk.CTkFrame):
         if self._game is None:
             self._log("Open Applications folder: no game selected.")
             return
-        staging = (
-            self._game.get_effective_mod_staging_path()
-            if hasattr(self._game, "get_mod_staging_path") else None
-        )
-        if staging is None:
+        if not hasattr(self._game, "get_mod_staging_path"):
             self._log("Open Applications folder: could not determine staging path.")
             return
-        apps_dir = staging.parent / "Applications"
+        apps_dir = self._game.get_mod_staging_path().parent / "Applications"
         apps_dir.mkdir(parents=True, exist_ok=True)
         try:
             xdg_open(apps_dir)
@@ -644,15 +643,9 @@ class PluginPanel(ctk.CTkFrame):
 
     def _get_custom_exes_path(self) -> "Path | None":
         """Return path to <game>/Applications/custom_exes.json, or None if no game."""
-        if self._game is None:
+        if self._game is None or not hasattr(self._game, "get_mod_staging_path"):
             return None
-        staging = (
-            self._game.get_effective_mod_staging_path()
-            if hasattr(self._game, "get_mod_staging_path") else None
-        )
-        if staging is None:
-            return None
-        return staging.parent / "Applications" / self._CUSTOM_EXES_FILE
+        return self._game.get_mod_staging_path().parent / "Applications" / self._CUSTOM_EXES_FILE
 
     def _load_custom_exes(self) -> "list[Path]":
         """Return list of custom exe Paths saved in custom_exes.json."""
@@ -729,9 +722,24 @@ class PluginPanel(ctk.CTkFrame):
         ).start()
 
     def _load_exe_args(self, exe_name: str) -> str:
-        """Load saved args for an exe from Utils/exe_args.json."""
+        """Load saved args for an exe, checking the profile-local file first."""
+        import json as _json
+        from Utils.config_paths import get_profile_exe_args_path
+        # Check profile-local exe_args.json for profiles with specific mods
         try:
-            import json as _json
+            active_dir = getattr(self._game, "_active_profile_dir", None) if self._game else None
+            if active_dir is not None:
+                from gui.game_helpers import profile_uses_specific_mods
+                if profile_uses_specific_mods(active_dir):
+                    profile_file = get_profile_exe_args_path(active_dir)
+                    if profile_file.is_file():
+                        data = _json.loads(profile_file.read_text(encoding="utf-8"))
+                        if exe_name in data:
+                            return data[exe_name]
+        except Exception:
+            pass
+        # Fall back to global exe_args.json
+        try:
             data = _json.loads(self._EXE_ARGS_FILE.read_text(encoding="utf-8"))
             return data.get(exe_name, "")
         except (OSError, ValueError):
