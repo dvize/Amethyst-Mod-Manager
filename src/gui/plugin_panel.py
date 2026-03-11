@@ -3048,7 +3048,7 @@ class PluginPanel(ctk.CTkFrame):
         self._pcanvas_w = event.width
         if hasattr(self, '_pcanvas_resize_after_id') and self._pcanvas_resize_after_id:
             self.after_cancel(self._pcanvas_resize_after_id)
-        self._pcanvas_resize_after_id = self.after(150, lambda w=event.width: self._apply_pcanvas_resize(w))
+        self._pcanvas_resize_after_id = self.after(250, lambda w=event.width: self._apply_pcanvas_resize(w))
 
     def _apply_pcanvas_resize(self, width: int):
         self._layout_plugin_cols(width)
