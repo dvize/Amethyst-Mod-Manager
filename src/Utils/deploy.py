@@ -28,7 +28,6 @@ import concurrent.futures
 import json
 import os
 import shutil
-import threading
 import time as _time
 from enum import Enum, auto
 from pathlib import Path
@@ -367,19 +366,24 @@ def move_to_core(
         _log(f"  {core_dir.name} already exists — removing old backup first.")
         shutil.rmtree(core_dir)
 
-    files = [p for p in deploy_dir.rglob("*") if p.is_file()] if deploy_dir.is_dir() else []
-    if not files:
+    if not deploy_dir.is_dir():
         core_dir.mkdir(parents=True, exist_ok=True)
         return 0
 
-    for src in files:
-        rel = src.relative_to(deploy_dir)
-        dst = core_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
+    # Count files before the move so we can report the number moved.
+    count = sum(1 for _ in deploy_dir.rglob("*") if _.is_file())
+    if not count:
+        core_dir.mkdir(parents=True, exist_ok=True)
+        return 0
 
-    _clear_dir(deploy_dir)
-    return len(files)
+    # Same filesystem → os.rename is a single instant syscall.
+    # shutil.move falls back to copy+delete if cross-device.
+    core_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(deploy_dir), str(core_dir))
+
+    # Recreate the (now-empty) deploy dir so downstream code finds it.
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -430,84 +434,87 @@ def deploy_filemap(
     already_seen: set[str] = set()
     tasks: list[tuple[Path, Path, str]] = []
     placed_lower: set[str] = set()
+
+    # Pre-compute string roots so the hot loop avoids Path construction.
+    _overwrite_str = str(overwrite_dir)
+    _staging_str   = str(staging_root)
+    _isfile        = os.path.isfile
+    sorted_strip   = sorted(_strip) if _strip else []
     nocase_cache: dict[Path, dict[str, list[Path]]] = {}
 
-    # Read all lines first so we know the total for progress reporting.
-    raw_lines: list[str] = []
+    # Single-pass: read, deduplicate, and resolve in one loop.
+    # Using os.path.isfile (one C-level stat) instead of Path.is_file()
+    # avoids the overhead of constructing Path objects for the fast path.
+    line_idx = 0
+    total_lines = 0
     with filemap_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
-            if "\t" in line:
-                raw_lines.append(line)
+            if "\t" not in line:
+                continue
+            total_lines += 1
 
-    total_lines = len(raw_lines)
+    with filemap_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if "\t" not in line:
+                continue
+            rel_str, mod_name = line.split("\t", 1)
+            rel_lower = rel_str.lower()
+            if rel_lower in already_seen:
+                continue
+            already_seen.add(rel_lower)
+            line_idx += 1
 
-    for line_idx, line in enumerate(raw_lines, 1):
-        rel_str, mod_name = line.split("\t", 1)
-
-        rel_lower = rel_str.lower()
-        if rel_lower in already_seen:
-            continue
-        already_seen.add(rel_lower)
-
-        mod_root = overwrite_dir if mod_name == _OVERWRITE_NAME else staging_root / mod_name
-        src = mod_root / rel_str
-
-        if not src.is_file():
-            src = _resolve_nocase(mod_root, rel_str, cache=nocase_cache)
-
-        # If still not found, try re-adding stripped prefixes — the filemap
-        # stripped them during build but the file on disk still has them.
-        # First try global strip_prefixes (1 or 2 segments).
-        if src is None and _strip:
-            prefixes = sorted(_strip)  # deterministic order
-            for p1 in prefixes:
-                candidate = _resolve_nocase(
-                    mod_root, p1 + "/" + rel_str, cache=nocase_cache)
-                if candidate is not None:
-                    src = candidate
-                    break
-                for p2 in prefixes:
-                    candidate = _resolve_nocase(
-                        mod_root, p1 + "/" + p2 + "/" + rel_str, cache=nocase_cache)
-                    if candidate is not None:
-                        src = candidate
-                        break
-                if src is not None:
-                    break
-
-        # Then try per-mod: full path prefixes first, then segment-name chain
-        if src is None and mod_name != _OVERWRITE_NAME:
-            mod_strip = _per_mod.get(mod_name)
-            if mod_strip:
-                path_prefixes = [p for p in mod_strip if "/" in p]
-                for p in path_prefixes:
-                    candidate = _resolve_nocase(
-                        mod_root, p + "/" + rel_str, cache=nocase_cache)
-                    if candidate is not None:
-                        src = candidate
-                        break
-                if src is None:
-                    segment_list = [p for p in mod_strip if "/" not in p]
-                    prefix_path = ""
-                    for seg in segment_list:
-                        prefix_path = prefix_path + seg + "/" if prefix_path else seg + "/"
-                        candidate = _resolve_nocase(
-                            mod_root, prefix_path + rel_str, cache=nocase_cache)
-                        if candidate is not None:
-                            src = candidate
+            # Fast path: direct string join + stat via os.path.isfile
+            if mod_name == _OVERWRITE_NAME:
+                candidate_str = _overwrite_str + "/" + rel_str
+            else:
+                candidate_str = _staging_str + "/" + mod_name + "/" + rel_str
+            if _isfile(candidate_str):
+                src = Path(candidate_str)
+            else:
+                # Slow path: case-insensitive resolution
+                mod_root = overwrite_dir if mod_name == _OVERWRITE_NAME else staging_root / mod_name
+                src = _resolve_nocase(mod_root, rel_str, cache=nocase_cache)
+                if src is None and sorted_strip:
+                    for p1 in sorted_strip:
+                        src = _resolve_nocase(mod_root, p1 + "/" + rel_str, cache=nocase_cache)
+                        if src is not None:
                             break
+                        for p2 in sorted_strip:
+                            src = _resolve_nocase(mod_root, p1 + "/" + p2 + "/" + rel_str, cache=nocase_cache)
+                            if src is not None:
+                                break
+                        if src is not None:
+                            break
+                if src is None and mod_name != _OVERWRITE_NAME:
+                    mod_strip = _per_mod.get(mod_name)
+                    if mod_strip:
+                        path_prefixes = [p for p in mod_strip if "/" in p]
+                        for p in path_prefixes:
+                            src = _resolve_nocase(mod_root, p + "/" + rel_str, cache=nocase_cache)
+                            if src is not None:
+                                break
+                        if src is None:
+                            segment_list = [p for p in mod_strip if "/" not in p]
+                            prefix_path = ""
+                            for seg in segment_list:
+                                prefix_path = prefix_path + seg + "/" if prefix_path else seg + "/"
+                                src = _resolve_nocase(mod_root, prefix_path + rel_str, cache=nocase_cache)
+                                if src is not None:
+                                    break
 
-        if src is None:
-            _log(f"  WARN: source not found — {rel_str} ({mod_name})")
-            continue
+            if src is None:
+                _log(f"  WARN: source not found — {rel_str} ({mod_name})")
+                continue
 
-        effective_dir = _per_deploy.get(mod_name, deploy_dir)
-        dst = effective_dir / rel_str
-        tasks.append((src, dst, rel_lower, effective_dir is not deploy_dir))
+            effective_dir = _per_deploy.get(mod_name, deploy_dir)
+            dst = effective_dir / rel_str
+            tasks.append((src, dst, rel_lower, effective_dir is not deploy_dir))
 
-        if progress_fn is not None and line_idx % 500 == 0:
-            progress_fn(line_idx, total_lines)
+            if progress_fn is not None and line_idx % 500 == 0:
+                progress_fn(line_idx, total_lines)
 
     total = len(tasks)
     if total == 0:
@@ -544,9 +551,7 @@ def deploy_filemap(
             _log(f"  Backed up existing {dst.name} → custom_deploy_backup/")
 
     linked = 0
-    errors: list[tuple[Path, OSError]] = []
     done_count = 0
-    lock = threading.Lock()
 
     def _do_transfer(item: tuple[Path, Path, str, bool]) -> tuple[str | None, tuple[Path, OSError] | None]:
         src, dst, rel_lower, _is_custom = item
@@ -563,17 +568,15 @@ def deploy_filemap(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         for result, err in pool.map(_do_transfer, tasks):
-            with lock:
-                done_count += 1
-                _done = done_count  # local copy for progress outside lock
+            done_count += 1
             if result is not None:
                 placed_lower.add(result)
                 linked += 1
             elif err is not None:
                 dst_err, exc = err
                 _log(f"  WARN: could not transfer {dst_err}: {exc}")
-            if progress_fn is not None and (_done % 200 == 0 or _done == total):
-                progress_fn(_done, total)
+            if progress_fn is not None and (done_count % 200 == 0 or done_count == total):
+                progress_fn(done_count, total)
 
     # Write a log of files placed in custom locations so cleanup knows what to
     # remove.  Each line is the absolute path of a deployed file.
@@ -620,52 +623,58 @@ def deploy_core(
     if not core_dir.is_dir():
         return 0
 
+    # Use os.path strings for the filter — avoids Path.relative_to() per file.
+    _core_str = str(core_dir)
+    _core_prefix_len = len(_core_str) + 1  # +1 for the trailing separator
+
     all_files = [s for s in core_dir.rglob("*") if s.is_file()]
     total = len(all_files)
 
-    # Filter before spinning up threads
-    tasks_core = [
-        s for s in all_files
-        if str(s.relative_to(core_dir)).replace("\\", "/").lower()
-        not in already_placed
-    ]
+    # Filter using string slicing instead of Path.relative_to()
+    tasks_core: list[tuple[Path, str]] = []  # (src, rel_str)
+    for s in all_files:
+        rel_str = str(s)[_core_prefix_len:]
+        if rel_str.replace("\\", "/").lower() not in already_placed:
+            tasks_core.append((s, rel_str))
 
     if not tasks_core:
         return 0
 
-    # Pre-create destination directories (single-threaded to avoid races)
-    for src in tasks_core:
-        (deploy_dir / src.relative_to(core_dir)).parent.mkdir(parents=True, exist_ok=True)
+    # Deduplicate destination directories with a set before creating them.
+    _deploy_str = str(deploy_dir)
+    needed_dirs: set[str] = set()
+    for _, rel_str in tasks_core:
+        parent = os.path.dirname(_deploy_str + "/" + rel_str)
+        needed_dirs.add(parent)
+    for d in needed_dirs:
+        os.makedirs(d, exist_ok=True)
 
     linked = 0
     done_count = 0
-    lock = threading.Lock()
 
-    def _do_core(src: Path) -> tuple[bool, Path, OSError | None]:
-        rel = src.relative_to(core_dir)
-        dst = deploy_dir / rel
+    def _do_core(item: tuple[Path, str]) -> tuple[bool, str, OSError | None]:
+        src, rel_str = item
+        dst_str = _deploy_str + "/" + rel_str
         try:
             if mode is LinkMode.HARDLINK:
-                os.link(src, dst)
+                os.link(src, dst_str)
             elif mode is LinkMode.SYMLINK:
-                os.symlink(src, dst)
+                os.symlink(src, dst_str)
             else:
-                shutil.copy2(src, dst)
-            return True, rel, None
+                shutil.copy2(src, dst_str)
+            return True, rel_str, None
         except OSError as e:
-            return False, rel, e
+            return False, rel_str, e
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        for ok, rel, exc in pool.map(_do_core, tasks_core):
-            with lock:
-                done_count += 1
-                _done = done_count
+        for ok, rel_str, exc in pool.map(_do_core, tasks_core):
+            done_count += 1
             if ok:
                 linked += 1
             else:
-                _log(f"  WARN: could not transfer {rel}: {exc}")
+                _log(f"  WARN: could not transfer {rel_str}: {exc}")
             if progress_fn is not None:
-                progress_fn(_done, total)
+                progress_fn(done_count, total)
 
     return linked
 
@@ -1133,72 +1142,82 @@ def deploy_filemap_to_root(
     already_seen: set[str] = set()
     placed_lower: set[str] = set()
     placed_log:   list[str] = []
+    tasks: list[tuple[Path, Path, str]] = []
+
+    # Pre-compute string roots so the hot loop avoids Path construction.
+    _overwrite_str = str(overwrite_dir)
+    _staging_str   = str(staging_root)
+    _isfile        = os.path.isfile
+    sorted_strip   = sorted(_strip) if _strip else []
     nocase_cache: dict[Path, dict[str, list[Path]]] = {}
 
-    raw_lines: list[str] = []
+    # Count lines first for progress reporting.
+    total_lines = 0
+    with filemap_path.open(encoding="utf-8") as f:
+        for line in f:
+            if "\t" in line:
+                total_lines += 1
+
+    line_idx = 0
     with filemap_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
-            if "\t" in line:
-                raw_lines.append(line)
+            if "\t" not in line:
+                continue
+            rel_str, mod_name = line.split("\t", 1)
+            rel_lower = rel_str.lower()
+            if rel_lower in already_seen:
+                continue
+            already_seen.add(rel_lower)
+            line_idx += 1
 
-    total_lines = len(raw_lines)
-    tasks: list[tuple[Path, Path, str]] = []
-
-    for line_idx, line in enumerate(raw_lines, 1):
-        rel_str, mod_name = line.split("\t", 1)
-        rel_lower = rel_str.lower()
-        if rel_lower in already_seen:
-            continue
-        already_seen.add(rel_lower)
-
-        mod_root = overwrite_dir if mod_name == _OVERWRITE_NAME else staging_root / mod_name
-        src = mod_root / rel_str
-        if not src.is_file():
-            src = _resolve_nocase(mod_root, rel_str, cache=nocase_cache)
-        if src is None and _strip:
-            prefixes = sorted(_strip)
-            for p1 in prefixes:
-                candidate = _resolve_nocase(mod_root, p1 + "/" + rel_str, cache=nocase_cache)
-                if candidate is not None:
-                    src = candidate
-                    break
-                for p2 in prefixes:
-                    candidate = _resolve_nocase(mod_root, p1 + "/" + p2 + "/" + rel_str, cache=nocase_cache)
-                    if candidate is not None:
-                        src = candidate
-                        break
-                if src is not None:
-                    break
-        if src is None and mod_name != _OVERWRITE_NAME:
-            mod_strip = _per_mod.get(mod_name)
-            if mod_strip:
-                path_prefixes = [p for p in mod_strip if "/" in p]
-                for p in path_prefixes:
-                    candidate = _resolve_nocase(
-                        mod_root, p + "/" + rel_str, cache=nocase_cache)
-                    if candidate is not None:
-                        src = candidate
-                        break
-                if src is None:
-                    segment_list = [p for p in mod_strip if "/" not in p]
-                    prefix_path = ""
-                    for seg in segment_list:
-                        prefix_path = prefix_path + seg + "/" if prefix_path else seg + "/"
-                        candidate = _resolve_nocase(
-                            mod_root, prefix_path + rel_str, cache=nocase_cache)
-                        if candidate is not None:
-                            src = candidate
+            # Fast path: direct string join + stat via os.path.isfile
+            if mod_name == _OVERWRITE_NAME:
+                candidate_str = _overwrite_str + "/" + rel_str
+            else:
+                candidate_str = _staging_str + "/" + mod_name + "/" + rel_str
+            if _isfile(candidate_str):
+                src = Path(candidate_str)
+            else:
+                mod_root = overwrite_dir if mod_name == _OVERWRITE_NAME else staging_root / mod_name
+                src = _resolve_nocase(mod_root, rel_str, cache=nocase_cache)
+                if src is None and sorted_strip:
+                    for p1 in sorted_strip:
+                        src = _resolve_nocase(mod_root, p1 + "/" + rel_str, cache=nocase_cache)
+                        if src is not None:
                             break
-        if src is None:
-            _log(f"  WARN: source not found — {rel_str} ({mod_name})")
-            continue
+                        for p2 in sorted_strip:
+                            src = _resolve_nocase(mod_root, p1 + "/" + p2 + "/" + rel_str, cache=nocase_cache)
+                            if src is not None:
+                                break
+                        if src is not None:
+                            break
+                if src is None and mod_name != _OVERWRITE_NAME:
+                    mod_strip = _per_mod.get(mod_name)
+                    if mod_strip:
+                        path_prefixes = [p for p in mod_strip if "/" in p]
+                        for p in path_prefixes:
+                            src = _resolve_nocase(mod_root, p + "/" + rel_str, cache=nocase_cache)
+                            if src is not None:
+                                break
+                        if src is None:
+                            segment_list = [p for p in mod_strip if "/" not in p]
+                            prefix_path = ""
+                            for seg in segment_list:
+                                prefix_path = prefix_path + seg + "/" if prefix_path else seg + "/"
+                                src = _resolve_nocase(mod_root, prefix_path + rel_str, cache=nocase_cache)
+                                if src is not None:
+                                    break
 
-        dst = game_root / rel_str
-        tasks.append((src, dst, rel_lower, rel_str))
+            if src is None:
+                _log(f"  WARN: source not found — {rel_str} ({mod_name})")
+                continue
 
-        if progress_fn is not None and line_idx % 500 == 0:
-            progress_fn(line_idx, total_lines)
+            dst = game_root / rel_str
+            tasks.append((src, dst, rel_lower, rel_str))
+
+            if progress_fn is not None and line_idx % 500 == 0:
+                progress_fn(line_idx, total_lines)
 
     total = len(tasks)
     linked = 0
