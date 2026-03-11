@@ -779,6 +779,13 @@ class CTkPopupMenu(ctk.CTkToplevel):
             except Exception:
                 pass
             self._active_sub[0] = None
+            # Re-grab focus so that the FocusOut fired by destroying the
+            # submenu toplevel doesn't cause _on_focus_out to dismiss us.
+            try:
+                if self.winfo_exists():
+                    self.focus()
+            except Exception:
+                pass
         self._active_sub_trigger[0] = None
 
     def clear(self):
@@ -805,8 +812,29 @@ class CTkPopupMenu(ctk.CTkToplevel):
             if not self._alive[0] or not self.winfo_exists():
                 return
             try:
+                if self._active_sub[0] is not None:
+                    try:
+                        if self._active_sub[0].winfo_exists():
+                            return
+                    except Exception:
+                        pass
+
                 f = self.focus_get()
                 if f is None:
+                    # On Wayland/Hyprland, hovering child widgets can cause
+                    # focus_get() to return None temporarily. Guard against
+                    # false dismissal by checking if the pointer is still
+                    # inside this popup.
+                    try:
+                        px, py = self.winfo_pointerxy()
+                        wx = self.winfo_rootx()
+                        wy = self.winfo_rooty()
+                        ww = self.winfo_width()
+                        wh = self.winfo_height()
+                        if wx <= px <= wx + ww and wy <= py <= wy + wh:
+                            return
+                    except Exception:
+                        pass
                     self._withdraw()
                     return
                 w = f
