@@ -1139,6 +1139,7 @@ def deploy_filemap_to_root(
     per_mod_strip_prefixes: dict[str, list[str]] | None = None,
     log_fn=None,
     progress_fn=None,
+    exclude: set[str] | None = None,
 ) -> tuple[int, set[str]]:
     """Deploy mod files directly into game_root, backing up any files they
     overwrite so restore_filemap_from_root() can undo the operation cleanly.
@@ -1203,6 +1204,8 @@ def deploy_filemap_to_root(
             if rel_lower in already_seen:
                 continue
             already_seen.add(rel_lower)
+            if exclude and rel_lower in exclude:
+                continue
             line_idx += 1
 
             # Fast path: direct string join + stat via os.path.isfile
@@ -1480,6 +1483,8 @@ def deploy_custom_rules(
     def _do_transfer_cr(item: tuple[Path, Path]) -> tuple[str | None, tuple[Path, OSError] | None]:
         src, dst = item
         try:
+            if dst.is_symlink() or dst.is_file():
+                dst.unlink()
             if mode is LinkMode.HARDLINK:
                 os.link(src, dst)
             elif mode is LinkMode.SYMLINK:
@@ -1535,17 +1540,29 @@ def restore_custom_rules(
     placed = [p for p in log_path.read_text(encoding="utf-8").splitlines() if p]
     removed = 0
     dirs_to_prune: set[Path] = set()
+    _game_root_resolved = game_root.resolve()
     for abs_str in placed:
         p = Path(abs_str)
-        if not _path_under_root(p, game_root):
-            _log(f"  SKIP: path traversal blocked — {abs_str}")
-            continue
+        # Use the unresolved path for the under-root check so symlinks
+        # (whose targets live outside game_root) are not incorrectly blocked.
+        try:
+            p.relative_to(game_root)
+        except ValueError:
+            try:
+                p.resolve().relative_to(_game_root_resolved)
+            except ValueError:
+                _log(f"  SKIP: path traversal blocked — {abs_str}")
+                continue
         if p.is_file() or p.is_symlink():
             p.unlink()
             removed += 1
-        # Collect parent dirs for pruning (stop at game_root)
+        # Collect parent dirs for pruning (stop at game_root, unresolved check)
         parent = p.parent
-        while parent != game_root and _path_under_root(parent, game_root):
+        while parent != game_root:
+            try:
+                parent.relative_to(game_root)
+            except ValueError:
+                break
             dirs_to_prune.add(parent)
             parent = parent.parent
 
@@ -1566,7 +1583,16 @@ def restore_custom_rules(
 # ---------------------------------------------------------------------------
 
 def _path_under_root(path: Path, root: Path) -> bool:
-    """Return True if path resolves to a location under root (no path traversal)."""
+    """Return True if path is under root (no path traversal).
+
+    Checks the unresolved path first so that symlinks whose targets live
+    outside root (e.g. symlinks into staging) are not incorrectly blocked.
+    """
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        pass
     try:
         path.resolve().relative_to(root.resolve())
         return True
