@@ -63,11 +63,11 @@ _CALLBACK_PORT = 7890
 _CALLBACK_PATH = "/callback"
 _REDIRECT_URI  = f"http://localhost:{_CALLBACK_PORT}{_CALLBACK_PATH}"
 
-# Filled in once Nexus Mods issues credentials.  Leave empty until then;
-# the login button is disabled when CLIENT_ID is empty.
-CLIENT_ID: str = ""
+# OAuth credentials issued by Nexus Mods.
+CLIENT_ID:     str = "amethyst"
+CLIENT_SECRET: str = "d6bc16f2c28a5c5bc19261d458b70117"
 
-_SCOPES = "openid public"
+_SCOPES = "openid profile public"
 
 _KEYRING_SERVICE      = "AmethystModManager"
 _KEYRING_ACCESS_KEY   = "nexus_oauth_access_token"
@@ -139,7 +139,7 @@ def clear_oauth_tokens() -> None:
 # Token refresh
 # ---------------------------------------------------------------------------
 
-def refresh_if_needed(tokens: OAuthTokens, client_id: str = CLIENT_ID) -> OAuthTokens:
+def refresh_if_needed(tokens: OAuthTokens, client_id: str = CLIENT_ID, client_secret: str = CLIENT_SECRET) -> OAuthTokens:
     """
     Return tokens unchanged if still valid, or perform a refresh token exchange.
 
@@ -156,6 +156,7 @@ def refresh_if_needed(tokens: OAuthTokens, client_id: str = CLIENT_ID) -> OAuthT
                 "grant_type":    "refresh_token",
                 "refresh_token": tokens.refresh_token,
                 "client_id":     client_id,
+                "client_secret": client_secret,
                 "redirect_uri":  _REDIRECT_URI,
             },
             timeout=20,
@@ -266,6 +267,12 @@ class _CallbackServer:
         self._event.wait(timeout)
         return self._code, self._state
 
+    def inject_code(self, code: str, state: str) -> None:
+        """Inject a manually-pasted auth code (e.g. from Nexus 'Having issues?' page)."""
+        self._code = code
+        self._state = state
+        self._event.set()
+
     def stop(self) -> None:
         if self._server:
             self._server.shutdown()
@@ -307,8 +314,46 @@ class NexusOAuthClient:
         self._cancelled = False
         self._thread:   Optional[threading.Thread] = None
         self._srv:      Optional[_CallbackServer]  = None
+        self._verifier: Optional[str] = None
+        self._state:    Optional[str] = None
 
     # -- public API ---------------------------------------------------------
+
+    def submit_manual_code(self, blob: str) -> tuple[bool, str]:
+        """
+        Submit a manually-pasted auth code from the Nexus 'Having issues?' page.
+
+        The blob is Base64-encoded JSON with authorization_code and state.
+        Call this only while the OAuth flow is waiting for the callback.
+
+        Returns (success, message).
+        """
+        if not self._srv or not self.is_running:
+            return False, "Start browser login first, then paste the code if the redirect didn't work."
+        if not self._verifier or self._state is None:
+            return False, "OAuth session not ready."
+
+        blob = blob.strip()
+        if not blob:
+            return False, "No code entered."
+
+        try:
+            # Nexus uses standard Base64; add padding if needed
+            padded = blob + "=" * (4 - len(blob) % 4) if len(blob) % 4 else blob
+            decoded = base64.b64decode(padded).decode("utf-8")
+            data = json.loads(decoded)
+        except Exception:
+            return False, "Invalid code format. Paste the full Base64 code from the Nexus page."
+
+        auth_code = data.get("authorization_code")
+        pasted_state = data.get("state")
+        if not auth_code:
+            return False, "Invalid code: missing authorization_code."
+        if pasted_state != self._state:
+            return False, "Code doesn't match this login session. Start a new login and paste the code from that session."
+
+        self._srv.inject_code(auth_code, pasted_state)
+        return True, "Submitting code..."
 
     def start(self) -> None:
         """Begin the OAuth flow in a background thread."""
@@ -333,6 +378,8 @@ class NexusOAuthClient:
     def _run(self) -> None:
         verifier, challenge = _pkce_pair()
         state = secrets.token_urlsafe(16)
+        self._verifier = verifier
+        self._state = state
 
         # 1. Start callback server
         self._srv = _CallbackServer()
@@ -382,6 +429,7 @@ class NexusOAuthClient:
                 data={
                     "grant_type":    "authorization_code",
                     "client_id":     self._client_id,
+                    "client_secret": CLIENT_SECRET,
                     "redirect_uri":  _REDIRECT_URI,
                     "code":          code,
                     "code_verifier": verifier,

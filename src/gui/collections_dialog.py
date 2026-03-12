@@ -25,6 +25,8 @@ from gui.install_mod import install_mod_from_archive
 from gui.mod_card import CARD_PAD, make_placeholder_image
 from gui.mod_name_utils import _suggest_mod_names
 from Utils.modlist import write_modlist, read_modlist, ModEntry
+from Utils.filemap import rebuild_mod_index
+from Utils.config_paths import get_download_cache_dir
 from Nexus.nexus_meta import build_meta_from_download
 
 # Collections-specific card dimensions (5-column grid)
@@ -38,6 +40,7 @@ from gui.theme import (
     BG_HEADER,
     BG_ROW,
     BG_SEP,
+    BG_HOVER,
     ACCENT,
     ACCENT_HOV,
     TEXT_MAIN,
@@ -49,7 +52,89 @@ from gui.theme import (
 )
 
 PAGE_SIZE    = 20
-_SUMMARY_MAX = 80
+_SUMMARY_MAX = 200
+
+
+def _topo_sort_collection(schema_mods: list[dict], mod_rules: list[dict]) -> dict[int, int]:
+    """Return file_id → priority-position dict respecting modRules before/after constraints.
+
+    Position 0 = highest priority (wins conflicts), higher number = lower priority.
+    Falls back to the mods-array order for any mod not constrained by rules.
+    Cycles are broken by ignoring the offending edge (Kahn's algorithm skips them naturally).
+    """
+    # Build logical_name → file_id map from the mods array
+    logical_to_fid: dict[str, int] = {}
+    fid_order: list[int] = []  # original mods-array order, used as topo fallback
+    for m in schema_mods:
+        src = m.get("source") or {}
+        fid = src.get("fileId")
+        if fid is None:
+            continue
+        fid = int(fid)
+        logical = (src.get("logicalFilename") or m.get("name") or "").strip()
+        if logical:
+            logical_to_fid[logical] = fid
+        if fid not in fid_order:
+            fid_order.append(fid)
+
+    all_fids: set[int] = set(fid_order)
+
+    # edges: higher_priority_fid → {lower_priority_fids}
+    # "source after reference"  → reference has higher priority than source
+    # "source before reference" → source has higher priority than reference
+    higher_than: dict[int, set[int]] = {f: set() for f in all_fids}  # fid → fids it beats
+    in_degree: dict[int, int] = {f: 0 for f in all_fids}
+
+    def _resolve(name: str) -> int | None:
+        return logical_to_fid.get(name)
+
+    for rule in mod_rules:
+        rtype = rule.get("type")
+        if rtype not in ("before", "after"):
+            continue
+        ref_name = (rule.get("reference") or {}).get("logicalFileName", "")
+        src_name = (rule.get("source") or {}).get("logicalFileName", "")
+        ref_fid = _resolve(ref_name)
+        src_fid = _resolve(src_name)
+        if ref_fid is None or src_fid is None or ref_fid == src_fid:
+            continue
+
+        if rtype == "after":
+            # source loads after reference → source wins (loads on top of reference)
+            winner, loser = src_fid, ref_fid
+        else:  # "before"
+            # source loads before reference → reference wins
+            winner, loser = ref_fid, src_fid
+
+        if loser not in higher_than[winner]:
+            higher_than[winner].add(loser)
+            in_degree[loser] += 1
+
+    # Kahn's topological sort — highest priority first
+    from collections import deque
+    queue = deque(f for f in fid_order if in_degree[f] == 0)
+    sorted_fids: list[int] = []
+    remaining = set(fid_order)
+
+    while queue:
+        fid = queue.popleft()
+        if fid not in remaining:
+            continue
+        remaining.discard(fid)
+        sorted_fids.append(fid)
+        # Process dependents in original-array order for determinism
+        for dep in sorted(higher_than[fid], key=lambda f: fid_order.index(f) if f in fid_order else 999999):
+            in_degree[dep] -= 1
+            if in_degree[dep] == 0:
+                queue.append(dep)
+
+    # Append any fids not reached (cycle members) in original order
+    for fid in fid_order:
+        if fid in remaining:
+            sorted_fids.append(fid)
+
+    # sorted_fids[0] = highest priority → position 0
+    return {fid: pos for pos, fid in enumerate(sorted_fids)}
 
 
 def _fmt_size(n_bytes: int) -> str:
@@ -119,13 +204,13 @@ class CollectionCard:
         self._collection = collection
         self._img_label: Optional[ctk.CTkLabel] = None
 
-        # Outer card frame
-        self.card = ctk.CTkFrame(
+        # Outer card frame — fixed size, content clips if too long.
+        self.card = tk.Frame(
             parent,
-            width=_COLL_W, height=420,
-            fg_color=BG_PANEL,
-            border_color=BORDER, border_width=1,
-            corner_radius=8,
+            width=_COLL_W, height=480,
+            bg=BG_PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
         )
         self.card.pack_propagate(False)
         self.card.grid_propagate(False)
@@ -157,11 +242,9 @@ class CollectionCard:
             command=on_view,
         ).place(relx=0.5, rely=0.5, anchor="center")
 
-        # Fixed-height text area — prevents overflow from pushing the button around
-        # Card=420, image=240+9px padding, button=44 → text area ≈ 127px
-        text_frame = tk.Frame(self.card, bg=BG_PANEL, height=127)
+        # Text area — fills width, grows to fit its content
+        text_frame = tk.Frame(self.card, bg=BG_PANEL)
         text_frame.pack(fill="x")
-        text_frame.pack_propagate(False)
 
         # Name
         name_text = col.name or f"Collection {col.id}"
@@ -198,16 +281,7 @@ class CollectionCard:
                 wraplength=_COLL_W - 16, justify="left", anchor="w",
             ).pack(padx=8, pady=(2, 0), fill="x")
 
-        # (btn_frame already packed above)
-        btn_frame.pack(side="bottom", fill="x")
-        btn_frame.pack_propagate(False)
-        ctk.CTkButton(
-            btn_frame, text="View",
-            width=_COLL_W - 20, height=28,
-            fg_color=ACCENT, hover_color=ACCENT_HOV,
-            text_color="#ffffff", font=FONT_SMALL,
-            command=on_view,
-        ).place(relx=0.5, rely=0.5, anchor="center")
+
 
     def load_image_async(self, url: str, cache: dict, loading: set, root: tk.Widget):
         """Start async tile image load (same pattern as mod_card.py)."""
@@ -253,6 +327,114 @@ class CollectionCard:
                 self._img_label.configure(image=photo)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# OptionalModsPanel — inline overlay for plugin panel
+# ---------------------------------------------------------------------------
+
+class OptionalModsPanel(ctk.CTkFrame):
+    """
+    Inline panel that overlays the plugin panel. Lists optional mods with checkboxes
+    (all checked by default). Show before installing a collection so the user can
+    deselect mods they do not want.
+
+    result: None = cancelled; set of file_ids = optional mods to **skip**.
+    on_done(panel) is called when user clicks Install or Cancel.
+    """
+
+    def __init__(self, parent, optional_mods: list, on_done=None):
+        super().__init__(parent, fg_color=BG_DEEP, corner_radius=0)
+        self.result = None
+        self._optional_mods = optional_mods
+        self._vars: dict[int, tk.BooleanVar] = {}
+        self._on_done = on_done or (lambda p: None)
+
+        # Title bar
+        title_bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=36)
+        title_bar.pack(fill="x")
+        title_bar.pack_propagate(False)
+        ctk.CTkLabel(
+            title_bar, text="Optional Mods",
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w",
+        ).pack(side="left", padx=12)
+        ctk.CTkFrame(self, fg_color=BORDER, height=1, corner_radius=0).pack(fill="x")
+
+        # Subtitle
+        ctk.CTkLabel(
+            self,
+            text=(f"{len(optional_mods)} optional mod(s) found. "
+                  "Uncheck any you do not want installed:"),
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+        ).pack(anchor="w", padx=16, pady=(12, 6))
+
+        scroll = ctk.CTkScrollableFrame(self, fg_color=BG_PANEL, corner_radius=6)
+        scroll.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        scroll.grid_columnconfigure(0, weight=1)
+
+        for mod in optional_mods:
+            var = tk.BooleanVar(value=True)
+            self._vars[mod.file_id] = var
+            name_text = mod.mod_name or mod.file_name or "(Unknown)"
+            author_text = f" by {mod.mod_author}" if mod.mod_author else ""
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.grid_columnconfigure(0, weight=1)
+            row.grid(sticky="ew")
+            ctk.CTkCheckBox(
+                row,
+                text=f"{name_text}{author_text}",
+                variable=var,
+                font=FONT_NORMAL,
+                text_color=TEXT_MAIN,
+                fg_color=ACCENT,
+                hover_color=ACCENT_HOV,
+                checkmark_color="white",
+                border_color=BORDER,
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=3)
+
+        helper = ctk.CTkFrame(self, fg_color="transparent")
+        helper.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkButton(
+            helper, text="Select All", width=90, height=24, font=FONT_SMALL,
+            fg_color=BG_HEADER, hover_color=BG_PANEL, text_color=TEXT_MAIN,
+            command=self._select_all,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            helper, text="Deselect All", width=90, height=24, font=FONT_SMALL,
+            fg_color=BG_HEADER, hover_color=BG_PANEL, text_color=TEXT_MAIN,
+            command=self._deselect_all,
+        ).pack(side="left")
+
+        bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=52)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        ctk.CTkFrame(bar, fg_color=BORDER, height=1, corner_radius=0).pack(side="top", fill="x")
+        ctk.CTkButton(
+            bar, text="Cancel", width=80, height=28, font=FONT_NORMAL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._on_cancel,
+        ).pack(side="right", padx=(4, 12), pady=12)
+        ctk.CTkButton(
+            bar, text="Install", width=80, height=28, font=FONT_BOLD,
+            fg_color="#2d7a2d", hover_color="#3a9e3a", text_color="white",
+            command=self._on_ok,
+        ).pack(side="right", padx=4, pady=12)
+
+    def _on_ok(self):
+        self.result = {fid for fid, var in self._vars.items() if not var.get()}
+        self._on_done(self)
+
+    def _on_cancel(self):
+        self.result = None
+        self._on_done(self)
+
+    def _select_all(self):
+        for var in self._vars.values():
+            var.set(True)
+
+    def _deselect_all(self):
+        for var in self._vars.values():
+            var.set(False)
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +766,33 @@ class CollectionDetailDialog(tk.Frame):
             self._status_var.set("Mod list not loaded yet — please wait.")
             return
 
+        # --- Optional mods selection (overlay on plugin panel) ---
+        optional_mods = [m for m in mods if m.optional]
+        if optional_mods:
+            show_fn = getattr(app, "show_optional_mods_panel", None)
+            if show_fn:
+                def _on_optional_done(panel):
+                    if panel.result is None:
+                        return
+                    mods_to_use = list(mods)
+                    if panel.result:
+                        mods_to_use = [
+                            m for m in mods_to_use
+                            if not m.optional or m.file_id not in panel.result
+                        ]
+                    self._continue_install_collection(app, mods_to_use, downloader)
+                show_fn(optional_mods, _on_optional_done)
+                return
+            # Fallback: no app overlay support — skip optional selection and install all
+            mods = [m for m in mods if not m.optional]
+
+        self._continue_install_collection(app, list(mods), downloader)
+
+    def _continue_install_collection(self, app, mods, downloader):
+        """Proceed with collection install after optional mods have been resolved."""
+        if not self._game:
+            return
+
         # Sanitise collection name → profile name
         raw = self._collection.name or self._collection.slug or "Collection"
         profile_name = re.sub(r"[^\w\s\-]", "", raw).strip().replace(" ", "_")[:64] or "Collection"
@@ -660,10 +869,11 @@ class CollectionDetailDialog(tk.Frame):
                     self._log(f"Collection install: could not download collection.json: {exc} — "
                               "continuing with GraphQL order")
 
-        # Build a mapping from file_id → position in collection.json mods array
-        # and file_id → pre-converted FOMOD auto-selections (if any)
+        # Build a mapping from file_id → priority position (0 = highest priority)
+        # respecting modRules before/after constraints via topological sort.
         schema_mods: list[dict] = collection_schema.get("mods", [])
-        schema_file_id_to_pos: dict[int, int] = {}
+        mod_rules: list[dict] = collection_schema.get("modRules", [])
+        schema_file_id_to_pos: dict[int, int] = _topo_sort_collection(schema_mods, mod_rules)
         schema_pos_to_name: dict[int, str] = {}  # collection.json logical name
         schema_file_id_to_logical: dict[int, str] = {}  # file_id → logicalFilename
         fomod_by_file_id: dict[int, dict] = {}   # file_id → saved_selections dict
@@ -672,15 +882,15 @@ class CollectionDetailDialog(tk.Frame):
             fid = src.get("fileId")
             if fid is not None:
                 fid = int(fid)
-                schema_file_id_to_pos[fid] = pos
-                schema_pos_to_name[pos] = schema_mod.get("name") or ""
+                topo_pos = schema_file_id_to_pos.get(fid, pos)
+                schema_pos_to_name[topo_pos] = schema_mod.get("name") or ""
                 logical = src.get("logicalFilename") or schema_mod.get("name") or ""
                 schema_file_id_to_logical[fid] = logical
                 choices = schema_mod.get("choices") or {}
                 if choices.get("type") == "fomod":
                     fomod_by_file_id[fid] = _fomod_choices_from_collection(choices)
 
-        # Sort the mods list by collection.json position when available;
+        # Sort the mods list by topo position (0 = highest priority);
         # mods without a position come last (preserving their original order).
         def _sort_key(m):
             return schema_file_id_to_pos.get(m.file_id, len(schema_mods))
@@ -694,14 +904,36 @@ class CollectionDetailDialog(tk.Frame):
         #   already_installed_by_fid : file_id → folder name (from meta.ini fileid)
         #   staging_lower_map        : lower(folder_name) → actual folder name
         # Used together to skip mods already installed in a previous (partial) run.
+        #
+        # IMPORTANT: staging_path is the *shared* staging directory used by all
+        # profiles for a game.  We must restrict the name-based staging_lower_map
+        # to only the mods that are explicitly listed in *this* profile's
+        # modlist.txt — otherwise mods installed for unrelated profiles will
+        # produce false-positive "already installed" matches and be silently
+        # skipped.  The file_id exact-match (already_installed_by_fid) is safe
+        # to populate from all folders, because a file_id collision across
+        # different mod pages is essentially impossible.
         already_installed_by_fid: dict[int, str] = {}  # file_id → staging folder name
         staging_lower_map: dict[str, str] = {}          # lower(name) → actual name
+
+        # Build the set of mod folder names that are actually in this profile.
+        _profile_mod_names: set[str] = set()
+        if modlist_path.is_file():
+            try:
+                from Utils.modlist import read_modlist
+                for entry in read_modlist(modlist_path):
+                    _profile_mod_names.add(entry.name.lower())
+            except Exception:
+                pass
+
+        import configparser as _cp
         if staging_path.exists():
-            import configparser as _cp
             for mod_dir in staging_path.iterdir():
                 if not mod_dir.is_dir():
                     continue
-                staging_lower_map[mod_dir.name.lower()] = mod_dir.name
+                # Name-based map: only include folders belonging to this profile.
+                if mod_dir.name.lower() in _profile_mod_names:
+                    staging_lower_map[mod_dir.name.lower()] = mod_dir.name
                 meta_ini = mod_dir / "meta.ini"
                 if not meta_ini.is_file():
                     continue
@@ -816,6 +1048,8 @@ class CollectionDetailDialog(tk.Frame):
                     progress_cb=_progress_cb,
                     cancel=dl_cancel,
                     known_file_name=mod.file_name or "",
+                    expected_size_bytes=getattr(mod, "size_bytes", 0) or 0,
+                    dest_dir=get_download_cache_dir(),
                 )
             except Exception as exc:
                 self._log(f"Collection install: download failed for '{mod.mod_name}': {exc}")
@@ -846,116 +1080,175 @@ class CollectionDetailDialog(tk.Frame):
                 ))
             except Exception:
                 pass
+            # Sort largest archives first so big downloads start immediately
+            # and bandwidth is never idle waiting for a large mod at the end.
+            _to_download_sorted = sorted(
+                to_download,
+                key=lambda m: getattr(m, "size_bytes", 0) or 0,
+                reverse=True,
+            )
             with _cf.ThreadPoolExecutor(max_workers=_DL_WORKERS) as _pool:
-                list(_pool.map(_download_one, to_download))
+                list(_pool.map(_download_one, _to_download_sorted))
 
         # ------------------------------------------------------------------
-        # Step 2b: Install downloaded archives sequentially (main thread)
+        # Step 2b: Install downloaded archives in parallel worker threads.
         # ------------------------------------------------------------------
-        for seq_idx, mod in enumerate(to_download, 1):
-            if not self.winfo_exists():
-                break
+        # headless=True suppresses all GUI dialogs and per-mod modlist writes;
+        # the collection manages modlist/plugins itself after all installs finish.
+        # _INSTALL_WORKERS parallel extractions run at once — this keeps all CPU
+        # cores and the NVMe busy without too much RAM pressure from py7zr.
+        _INSTALL_WORKERS = 4
 
+        # Count uses per physical archive path so we only delete it after the
+        # last consumer finishes.  Two separate collection entries can reference
+        # the same physical archive (same file_id, or different file_ids whose
+        # cached-archive lookup resolved to the same file on disk).
+        _archive_use_count: dict[str, int] = {}
+        for _m in to_download:
+            _r = _dl_results.get(_m.file_id) if _m.file_id else None
+            if _r and _r.success and _r.file_path:
+                _key = str(_r.file_path)
+                _archive_use_count[_key] = _archive_use_count.get(_key, 0) + 1
+
+        _install_lock = threading.Lock()
+        _install_counters = {"installed": 0, "skipped": 0, "done": 0}
+        _install_results: dict[int, str] = {}  # file_id → installed folder name
+
+        def _install_one(mod):
             result = _dl_results.get(mod.file_id)
             if result is None or not result.success or not result.file_path:
                 self._log(f"Collection install: download failed for '{mod.mod_name}'")
-                skipped += 1
-                continue
+                with _install_lock:
+                    _install_counters["skipped"] += 1
+                    _install_counters["done"] += 1
+                return
 
-            sort_key = _sort_key(mod)
-            try:
-                self.after(0, lambda m=mod, i=seq_idx, t=_dl_total: self._status_var.set(
-                    f"Installing {i}/{t}: {m.mod_name}\u2026"
-                ))
-            except Exception:
-                break
-
-            # Snapshot staging dir to detect the newly-installed folder
-            before_folders: set[str] = set()
-            if staging_path.exists():
-                try:
-                    before_folders = {p.name for p in staging_path.iterdir() if p.is_dir()}
-                except Exception:
-                    pass
-
-            # Install on the main thread, wait for it to finish
-            done_event = threading.Event()
             archive_path = str(result.file_path)
             auto_fomod = fomod_by_file_id.get(mod.file_id)
 
-            def _do_install(ap=archive_path, cm=mod, af=auto_fomod, gd=self._game_domain):
-                try:
-                    # Build metadata from the collection's own fields so
-                    # install_mod_from_archive doesn't need extra API calls.
-                    try:
-                        _pmeta = build_meta_from_download(
-                            game_domain=gd,
-                            mod_id=cm.mod_id,
-                            file_id=cm.file_id,
-                            archive_name=cm.file_name or "",
-                        )
-                        _pmeta.nexus_name = cm.mod_name or ""
-                        _pmeta.author = cm.mod_author or ""
-                        _pmeta.version = cm.version or ""
-                    except Exception:
-                        _pmeta = None
-                    install_mod_from_archive(
-                        ap, self, self._log, self._game,
-                        fomod_auto_selections=af,
-                        prebuilt_meta=_pmeta,
-                    )
-                except Exception as exc:
-                    self._log(f"Collection install: install failed for '{cm.mod_name}': {exc}")
-                finally:
-                    done_event.set()
-
+            # Build prebuilt metadata so no extra API calls are needed.
             try:
-                self.after(0, _do_install)
+                _pmeta = build_meta_from_download(
+                    game_domain=self._game_domain,
+                    mod_id=mod.mod_id,
+                    file_id=mod.file_id,
+                    archive_name=mod.file_name or "",
+                )
+                _pmeta.nexus_name = mod.mod_name or ""
+                _pmeta.author = mod.mod_author or ""
+                _pmeta.version = mod.version or ""
             except Exception:
-                done_event.set()
+                _pmeta = None
 
-            done_event.wait(timeout=600)  # 10 min max per mod (FOMOD + extract)
+            # Preferred folder name: logicalFilename from collection.json is
+            # the most specific (e.g. "Inventory Interface Information Injector
+            # - Alchemy Fix"), then schema name, then Nexus mod page name.
+            # This avoids two mods from the same page being stripped to the
+            # same folder name by _suggest_mod_names.
+            _logical = schema_file_id_to_logical.get(mod.file_id, "") or ""
+            _schema_name = schema_pos_to_name.get(
+                schema_file_id_to_pos.get(mod.file_id, -1), "") or ""
+            _preferred = _logical or _schema_name or mod.mod_name or ""
 
-            # Remove the downloaded archive now that it has been installed
+            folder_name = install_mod_from_archive(
+                archive_path, self, self._log, self._game,
+                fomod_auto_selections=auto_fomod,
+                prebuilt_meta=_pmeta,
+                profile_dir=profile_dir,
+                headless=True,
+                preferred_name=_preferred,
+                skip_index_update=True,
+            )
+
+            with _install_lock:
+                if folder_name:
+                    _install_results[mod.file_id] = folder_name
+                    _install_counters["installed"] += 1
+                else:
+                    _install_counters["skipped"] += 1
+                _install_counters["done"] += 1
+                done_so_far = _install_counters["done"]
+
+                # Delete archive once all consumers of this path are done.
+                if archive_path in _archive_use_count:
+                    _archive_use_count[archive_path] -= 1
+                    if _archive_use_count[archive_path] == 0:
+                        try:
+                            Path(archive_path).unlink(missing_ok=True)
+                        except Exception as _del_exc:
+                            self._log(
+                                f"Collection install: could not remove archive "
+                                f"'{archive_path}': {_del_exc}"
+                            )
+
+            # Update progress bar and mark row green on the main thread.
             try:
-                Path(archive_path).unlink(missing_ok=True)
-            except Exception as _del_exc:
-                self._log(f"Collection install: could not remove archive '{archive_path}': {_del_exc}")
-
-            # Detect what folder was created
-            new_folder: str = ""
-            if staging_path.exists():
-                try:
-                    after_folders = {p.name for p in staging_path.iterdir() if p.is_dir()}
-                    new_dirs = after_folders - before_folders
-                    if new_dirs:
-                        new_folder = next(iter(new_dirs))
-                except Exception:
-                    pass
-            if not new_folder:
-                # Fallback: use the mod name from collection.json or GraphQL
-                new_folder = schema_pos_to_name.get(sort_key) or mod.mod_name
-
-            install_order.append((sort_key, new_folder))
-            installed += 1
-
-            # Update the row colour to green on the main thread
-            if mod.file_id:
+                self.after(0, lambda d=done_so_far, t=_dl_total: self._status_var.set(
+                    f"Installing: {d}/{t} complete\u2026"
+                ))
+            except Exception:
+                pass
+            if mod.file_id and folder_name:
                 try:
                     self.after(0, lambda fid=mod.file_id: self._mark_row_installed(fid))
                 except Exception:
                     pass
 
+        if to_download:
+            try:
+                self.after(0, lambda n=_dl_total, w=_INSTALL_WORKERS: self._status_var.set(
+                    f"Installing {n} mod(s) — up to {w} at a time\u2026"
+                ))
+            except Exception:
+                pass
+            # Sort smallest archives first so workers stay busy and large mods
+            # don't block the queue.  Any mod that needs a manual FOMOD dialog
+            # will still serialize correctly via the _interactive_dialog_lock — running
+            # small non-interactive mods first means the FOMOD prompts typically
+            # appear after the bulk of parallel work is already done.
+            _to_install = sorted(to_download, key=lambda m: getattr(m, "size_bytes", 0) or 0)
+            with _cf.ThreadPoolExecutor(max_workers=_INSTALL_WORKERS) as _install_pool:
+                list(_install_pool.map(_install_one, _to_install))
+
+        installed += _install_counters["installed"]
+        skipped  += _install_counters["skipped"]
+
+        # Rebuild the mod index once for all newly installed mods rather than
+        # updating it per-mod inside the workers (which caused lock contention).
+        if _install_counters["installed"] > 0:
+            try:
+                self._log("Updating mod index…")
+                _idx_path = profile_dir / "modindex.bin"
+                rebuild_mod_index(
+                    _idx_path,
+                    self._game.get_effective_mod_staging_path(),
+                    strip_prefixes=set(getattr(self._game, "strip_prefixes", None) or []),
+                    allowed_extensions=set(getattr(self._game, "install_extensions", None) or []),
+                    root_deploy_folders=set(getattr(self._game, "root_deploy_folders", None) or []),
+                    normalize_folder_case=getattr(self._game, "normalize_folder_case", True),
+                )
+            except Exception as _idx_exc:
+                self._log(f"Mod index rebuild skipped: {_idx_exc}")
+
+        # Build install_order from parallel results.
+        for mod in to_download:
+            sort_key = _sort_key(mod)
+            folder = (
+                _install_results.get(mod.file_id)
+                or schema_pos_to_name.get(sort_key)
+                or mod.mod_name
+            )
+            if mod.file_id in _install_results:
+                install_order.append((sort_key, folder))
+
         # ------------------------------------------------------------------
         # Step 3: Write modlist.txt in collection-defined order
-        # (collection index 0 = lowest priority → last in modlist.txt;
-        #  collection last entry = highest priority → first in modlist.txt)
+        # Position 0 = highest priority (topo sort) → first in modlist.txt
         # ------------------------------------------------------------------
-        install_order.sort(key=lambda x: x[0])  # sort by collection position
-        # Highest priority first (reversed collection order)
+        install_order.sort(key=lambda x: x[0])
         modlist_entries = [
             ModEntry(name=folder, enabled=True, locked=False)
-            for _, folder in reversed(install_order)
+            for _, folder in install_order
         ]
         if modlist_entries:
             try:
@@ -1104,12 +1397,19 @@ class CollectionDetailDialog(tk.Frame):
             self.after(0, lambda: self._status_var.set("Downloading collection manifest…"))
             cj = self._api.get_collection_archive_json(self._download_link_path)
 
-            # Build file_id → collection position map
-            fid_to_pos: dict = {}
-            for pos, m in enumerate(cj.get("mods", [])):
-                fid = (m.get("source") or {}).get("fileId")
-                if fid is not None:
-                    fid_to_pos[int(fid)] = pos
+            # Save manifest to profile dir for inspection
+            try:
+                import json as _json
+                manifest_path = profile_dir / "collection.json"
+                manifest_path.write_text(_json.dumps(cj, indent=2), encoding="utf-8")
+                self._log(f"Saved collection manifest to {manifest_path}")
+            except Exception as _exc:
+                self._log(f"Could not save manifest: {_exc}")
+
+            # Build file_id → priority position map respecting modRules
+            fid_to_pos: dict = _topo_sort_collection(
+                cj.get("mods", []), cj.get("modRules", [])
+            )
 
             # Staging dir for a profile-specific-mods profile is profile_dir/mods
             staging_path = profile_dir / "mods"
@@ -1145,10 +1445,10 @@ class CollectionDetailDialog(tk.Frame):
                     unordered.append(folder.name)
 
             ordered.sort(key=lambda x: x[0])
-            # Highest priority first (reversed collection order → first in modlist.txt)
+            # Position 0 = highest priority → first in modlist.txt
             modlist_entries = [
                 ModEntry(name=name, enabled=True, locked=False)
-                for _, name in reversed(ordered)
+                for _, name in ordered
             ] + [
                 ModEntry(name=name, enabled=True, locked=False)
                 for name in unordered

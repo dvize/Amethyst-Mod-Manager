@@ -75,7 +75,8 @@ from Utils.plugins import (
     read_plugins,
     write_plugins,
 )
-from Nexus.nexus_api import NexusAPI, load_api_key
+from Nexus.nexus_api import NexusAPI, load_api_key, clear_api_key
+from Nexus.nexus_oauth import load_oauth_tokens
 from Nexus.nexus_download import NexusDownloader
 from Nexus.nxm_handler import NxmLink, NxmHandler, NxmIPC
 from Nexus.nexus_meta import build_meta_from_download, write_meta
@@ -323,6 +324,9 @@ class App(ctk.CTk):
         self._nexus_api: NexusAPI | None = None
         self._nexus_downloader: NexusDownloader | None = None
         self._nexus_username: str | None = None
+        # Installs that arrived while a modal dialog had the grab are deferred
+        # here and replayed once the modal closes.
+        self._nxm_install_queue: list = []
         self._init_nexus_api()
         self._update_window_title()
         self._build_layout()
@@ -370,7 +374,9 @@ class App(ctk.CTk):
             self.title(base)
 
     def _init_nexus_api(self):
-        """Load saved API key and initialise the Nexus client (if key exists)."""
+        """Load saved API key (or OAuth tokens) and initialise the Nexus client."""
+        # Legacy personal API keys are no longer used — clear any stored key on startup
+        clear_api_key()
         key = load_api_key()
         if key:
             self._nexus_api = NexusAPI(api_key=key)
@@ -385,11 +391,33 @@ class App(ctk.CTk):
                 self.call_threadsafe(self._update_window_title)
             threading.Thread(target=_fetch_user, daemon=True).start()
         else:
-            self._nexus_api = None
-            self._nexus_downloader = None
-            self._nexus_username = None
-            # Update title synchronously when key is absent / cleared
-            self.after(0, self._update_window_title)
+            tokens = load_oauth_tokens()
+            if tokens:
+                self._nexus_api = NexusAPI.from_oauth(tokens)
+                self._nexus_downloader = NexusDownloader(self._nexus_api)
+                def _fetch_user_oauth():
+                    try:
+                        import requests as _req
+                        resp = _req.get(
+                            "https://users.nexusmods.com/oauth/userinfo",
+                            headers={"Authorization": f"Bearer {tokens.access_token}"},
+                            timeout=15,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        self._nexus_username = (
+                            data.get("name") or data.get("preferred_username") or data.get("sub")
+                        )
+                    except Exception:
+                        self._nexus_username = None
+                    self.call_threadsafe(self._update_window_title)
+                threading.Thread(target=_fetch_user_oauth, daemon=True).start()
+            else:
+                self._nexus_api = None
+                self._nexus_downloader = None
+                self._nexus_username = None
+                # Update title synchronously when key is absent / cleared
+                self.after(0, self._update_window_title)
 
     # -- App update check ---------------------------------------------------
 
@@ -539,6 +567,37 @@ class App(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _nxm_install(self, result, matched_game, mod_info=None, file_info=None):
+        """Install a downloaded NXM file into the current game.
+
+        If a modal dialog currently holds the Tk grab (e.g. a FOMOD wizard is
+        open), the install is deferred until the modal is dismissed to avoid a
+        deadlock from nested wait_window / grab_set calls.
+        """
+        if self.grab_current() is not None:
+            # A modal is open — queue and poll until it's gone.
+            self._nxm_install_queue.append((result, matched_game, mod_info, file_info))
+            self._poll_nxm_install_queue()
+            return
+        self._nxm_install_impl(result, matched_game, mod_info=mod_info, file_info=file_info)
+
+    def _poll_nxm_install_queue(self):
+        """Retry queued NXM installs once no modal dialog holds the grab."""
+        if not self._nxm_install_queue:
+            return
+        if self.grab_current() is not None:
+            # Still blocked — check again shortly.
+            self.after(300, self._poll_nxm_install_queue)
+            return
+        # Modal is gone — run installs in order, stopping if a new modal opens.
+        while self._nxm_install_queue:
+            result, matched_game, mod_info, file_info = self._nxm_install_queue.pop(0)
+            self._nxm_install_impl(result, matched_game, mod_info=mod_info, file_info=file_info)
+            if self.grab_current() is not None:
+                # This install opened a modal; resume after it closes.
+                self.after(300, self._poll_nxm_install_queue)
+                break
+
+    def _nxm_install_impl(self, result, matched_game, mod_info=None, file_info=None):
         """Install a downloaded NXM file into the current game."""
         log = self._status.log
         game_name = self._topbar._game_var.get()
@@ -672,6 +731,7 @@ class App(ctk.CTk):
         self._conflicts_panel      = None
         self._deploy_paths_panel   = None
         self._disable_plugins_panel = None
+        self._optional_mods_panel = None
 
         def _on_filemap_rebuilt():
             # 1. Sync plugins.txt from the updated filemap
@@ -1109,6 +1169,26 @@ class App(ctk.CTk):
 
     def hide_disable_plugins_panel(self):
         self._hide_plugin_overlay("_disable_plugins_panel")
+
+    # -- Optional mods panel (overlays plugin panel) --------------------------
+
+    def show_optional_mods_panel(self, optional_mods: list, on_done):
+        """Show OptionalModsPanel as overlay on plugin panel. on_done(panel) receives the
+        panel; panel.result is None (cancelled) or set of file_ids to skip."""
+        from gui.collections_dialog import OptionalModsPanel
+        def _factory():
+            def _done(panel):
+                self._hide_plugin_overlay("_optional_mods_panel")
+                on_done(panel)
+            return OptionalModsPanel(
+                self._plugin_panel_container,
+                optional_mods=optional_mods,
+                on_done=_done,
+            )
+        self._show_plugin_overlay("_optional_mods_panel", _factory)
+
+    def hide_optional_mods_panel(self):
+        self._hide_plugin_overlay("_optional_mods_panel")
 
     # -- Missing requirements panel (overlays plugin panel) -----------------
 

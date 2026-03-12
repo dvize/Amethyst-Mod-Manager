@@ -41,8 +41,10 @@ from typing import TYPE_CHECKING
 from Games.base_game import BaseGame
 from Games.ue5_game import UE5Game, UE5Rule
 from Utils.deploy import (
+    CustomRule,
     LinkMode,
     deploy_core,
+    deploy_custom_rules,
     deploy_filemap,
     deploy_filemap_to_root,
     load_per_mod_strip_prefixes,
@@ -50,6 +52,7 @@ from Utils.deploy import (
     expand_separator_deploy_paths,
     cleanup_custom_deploy_dirs,
     move_to_core,
+    restore_custom_rules,
     restore_data_core,
     restore_filemap_from_root,
 )
@@ -100,6 +103,27 @@ def _defn_to_dll_overrides(defn: dict) -> dict[str, str]:
                 result[k.strip()] = v.strip()
         return result
     return {}
+
+
+def _defn_to_custom_rules(defn: dict) -> list[CustomRule]:
+    """Return a list[CustomRule] from the JSON ``custom_routing_rules`` field.
+
+    Each entry is a dict with keys ``dest``, and optionally ``extensions``
+    and/or ``folders``.
+    """
+    raw = defn.get("custom_routing_rules", [])
+    if not isinstance(raw, list):
+        return []
+    rules: list[CustomRule] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        dest = entry.get("dest", "")
+        extensions = [s.strip().lower() for s in entry.get("extensions", []) if s.strip()]
+        folders = [s.strip().lower() for s in entry.get("folders", []) if s.strip()]
+        if dest or extensions or folders:
+            rules.append(CustomRule(dest=dest, extensions=extensions, folders=folders))
+    return rules
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +317,10 @@ class StandardCustomGame(BaseGame):
     def restore_before_deploy(self) -> bool:
         return bool(self._defn.get("restore_before_deploy", True))
 
+    @property
+    def custom_routing_rules(self) -> list[CustomRule]:
+        return _defn_to_custom_rules(self._defn)
+
     # ------------------------------------------------------------------
     # Paths
     # ------------------------------------------------------------------
@@ -397,13 +425,28 @@ class StandardCustomGame(BaseGame):
             raise RuntimeError(f"filemap.txt not found: {filemap}\nRun 'Build Filemap' before deploying.")
 
         data_dir.mkdir(parents=True, exist_ok=True)
-        _log(f"Step 1: Moving {data_dir.name}/ → {data_dir.name}_Core/ ...")
+
+        profile_dir = self.get_profile_root() / "profiles" / profile
+        per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
+
+        custom_rules = self.custom_routing_rules
+        custom_exclude: set[str] = set()
+        if custom_rules:
+            _log("Step 1: Routing files via custom rules ...")
+            custom_exclude = deploy_custom_rules(
+                filemap, self._game_path, staging,
+                rules=custom_rules,
+                mode=mode,
+                strip_prefixes=self.mod_folder_strip_prefixes,
+                log_fn=_log,
+            )
+            _log(f"Step 2: Moving {data_dir.name}/ → {data_dir.name}_Core/ ...")
+        else:
+            _log(f"Step 1: Moving {data_dir.name}/ → {data_dir.name}_Core/ ...")
         moved = move_to_core(data_dir, log_fn=_log)
         _log(f"  Moved {moved} file(s) to {data_dir.name}_Core/.")
 
-        _log(f"Step 2: Transferring mod files into {data_dir.name}/ ({mode.name}) ...")
-        profile_dir = self.get_profile_root() / "profiles" / profile
-        per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
+        _log(f"{'Step 3' if custom_rules else 'Step 2'}: Transferring mod files into {data_dir.name}/ ({mode.name}) ...")
         _sep_deploy = load_separator_deploy_paths(profile_dir)
         _sep_entries = read_modlist(profile_dir / "modlist.txt") if _sep_deploy else []
         per_mod_deploy = expand_separator_deploy_paths(_sep_deploy, _sep_entries) or None
@@ -415,6 +458,7 @@ class StandardCustomGame(BaseGame):
             per_mod_deploy_dirs=per_mod_deploy,
             log_fn=_log,
             progress_fn=progress_fn,
+            exclude=custom_exclude or None,
         )
         _log(f"  Transferred {linked_mod} mod file(s).")
 
@@ -433,6 +477,14 @@ class StandardCustomGame(BaseGame):
         _profile_dir = self._active_profile_dir
         _entries = read_modlist(_profile_dir / "modlist.txt") if _profile_dir else []
         cleanup_custom_deploy_dirs(_profile_dir, _entries, log_fn=_log)
+
+        custom_rules = self.custom_routing_rules
+        if custom_rules:
+            _log("Restore: removing custom-routed files ...")
+            restore_custom_rules(
+                self.get_effective_filemap_path(), self._game_path,
+                rules=custom_rules, log_fn=_log,
+            )
 
         _log(f"Restore: clearing {data_dir.name}/ and moving {data_dir.name}_Core/ back ...")
         restored = restore_data_core(
@@ -468,9 +520,22 @@ class RootCustomGame(StandardCustomGame):
         if not filemap.is_file():
             raise RuntimeError(f"filemap.txt not found: {filemap}\nRun 'Build Filemap' before deploying.")
 
-        _log(f"Transferring mod files into game root ({mode.name}) ...")
         profile_dir = self.get_profile_root() / "profiles" / profile
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
+
+        custom_rules = self.custom_routing_rules
+        custom_exclude: set[str] = set()
+        if custom_rules:
+            _log("Routing files via custom rules ...")
+            custom_exclude = deploy_custom_rules(
+                filemap, game_root, staging,
+                rules=custom_rules,
+                mode=mode,
+                strip_prefixes=self.mod_folder_strip_prefixes,
+                log_fn=_log,
+            )
+
+        _log(f"Transferring mod files into game root ({mode.name}) ...")
         linked_mod, _ = deploy_filemap_to_root(
             filemap, game_root, staging,
             mode=mode,
@@ -478,6 +543,7 @@ class RootCustomGame(StandardCustomGame):
             per_mod_strip_prefixes=per_mod_strip,
             log_fn=_log,
             progress_fn=progress_fn,
+            exclude=custom_exclude or None,
         )
         _log(f"Deploy complete. {linked_mod} mod file(s) placed in game root.")
 
@@ -487,6 +553,16 @@ class RootCustomGame(StandardCustomGame):
             raise RuntimeError("Game path is not configured.")
         filemap   = self.get_effective_filemap_path()
         game_root = self._game_path
+
+        _profile_dir = self._active_profile_dir
+        _entries = read_modlist(_profile_dir / "modlist.txt") if _profile_dir else []
+        cleanup_custom_deploy_dirs(_profile_dir, _entries, log_fn=_log)
+
+        custom_rules = self.custom_routing_rules
+        if custom_rules:
+            _log("Restore: removing custom-routed files ...")
+            restore_custom_rules(filemap, game_root, rules=custom_rules, log_fn=_log)
+
         _log("Restore: removing mod files and restoring vanilla files ...")
         removed = restore_filemap_from_root(filemap, game_root, log_fn=_log)
         _log(f"Restore complete. {removed} mod file(s) removed from game root.")
@@ -627,6 +703,10 @@ class Ue5CustomGame(UE5Game):
     @property
     def restore_before_deploy(self) -> bool:
         return bool(self._defn.get("restore_before_deploy", True))
+
+    @property
+    def custom_routing_rules(self) -> list[CustomRule]:
+        return _defn_to_custom_rules(self._defn)
 
     # ------------------------------------------------------------------
     # UE5 routing — Hogwarts Legacy rules (pak → Content/Paks/~mods,

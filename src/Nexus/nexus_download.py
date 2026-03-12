@@ -27,6 +27,7 @@ Usage
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,159 @@ from Utils.app_log import app_log
 
 # Default chunk size for streaming downloads (256 KB)
 _CHUNK_SIZE = 256 * 1024
+
+# Archive extensions recognised for cache lookups
+_ARCHIVE_EXTS = ('.zip', '.7z', '.rar', '.tar.gz', '.tar.bz2', '.tar.xz', '.tar')
+
+
+def _clean_nexus_stem(stem: str, mod_id_str: str) -> str:
+    """Strip the Nexus trailing metadata (``-{modId}-version-timestamp``) from
+    an archive stem, returning just the display-name portion.
+
+    E.g. ``"FDE Ysolda-124787-2-0-1725289331"`` → ``"FDE Ysolda"``.
+    Falls back to the full stem if the mod_id isn't found.
+    """
+    if mod_id_str:
+        idx = stem.find(f"-{mod_id_str}")
+        if idx > 0:
+            return stem[:idx]
+    return stem
+
+
+def _fileid_sidecar(archive: Path) -> Path:
+    """Return the path of the .fileid sidecar for *archive*."""
+    return archive.with_suffix(archive.suffix + ".fileid")
+
+
+def _read_sidecar_file_id(archive: Path) -> int:
+    """Return the file_id stored in the sidecar, or 0 if absent/unreadable."""
+    try:
+        return int(_fileid_sidecar(archive).read_text().strip())
+    except Exception:
+        return 0
+
+
+def _write_sidecar_file_id(archive: Path, file_id: int) -> None:
+    """Write *file_id* to the sidecar next to *archive*."""
+    try:
+        _fileid_sidecar(archive).write_text(str(file_id))
+    except Exception:
+        pass
+
+
+def _find_cached_archive(
+    dl_dir: Path,
+    display_name: str,
+    expected_size_bytes: int,
+    mod_id: int = 0,
+    file_id: int = 0,
+) -> "tuple[Path | None, bool]":
+    """Scan *dl_dir* for an existing archive that matches this mod.
+
+    Matching strategy
+    -----------------
+    0. If *file_id* > 0: check each archive's ``.fileid`` sidecar for an exact
+       match.  This is the most reliable check and short-circuits everything
+       else.
+    1. If *expected_size_bytes* > 0: find a file whose size is within 1 % of
+       the expected value AND whose filename contains the mod ID.  The display
+       name is used as an additional hint (substring match) when available.
+    2. Fallback (no expected size): find a file whose stem partially matches
+       the normalised *display_name*.
+
+    Partial-download detection
+    --------------------------
+    If a file whose stem matches the display name exists but its size is
+    < 95 % of *expected_size_bytes*, it is treated as an incomplete download
+    and returned with ``is_complete=False`` so the caller can delete it.
+
+    Returns
+    -------
+    (path, is_complete) — both ``None``/``False`` when nothing suitable found.
+    """
+    _SIZE_TOLERANCE = 0.01   # ±1 % — file is considered complete
+    _PARTIAL_CUTOFF  = 0.95  # < 95 % of expected → treat as partial
+
+    norm_name = re.sub(r'[^\w]', '', (display_name or '').lower())
+    mod_id_str = str(mod_id) if mod_id > 0 else ""
+
+    try:
+        candidates = [
+            f for f in dl_dir.iterdir()
+            if f.is_file() and any(f.name.lower().endswith(e) for e in _ARCHIVE_EXTS)
+        ]
+    except Exception:
+        return None, False
+
+    # Pass 0: exact file_id match via sidecar (written on every download)
+    if file_id > 0:
+        for f in candidates:
+            if _read_sidecar_file_id(f) == file_id:
+                try:
+                    actual = f.stat().st_size
+                except Exception:
+                    continue
+                if expected_size_bytes > 0:
+                    ratio = actual / expected_size_bytes
+                    if ratio >= _PARTIAL_CUTOFF:
+                        return f, ratio >= (1.0 - _SIZE_TOLERANCE)
+                    # Sidecar matched but file is clearly truncated — treat as partial
+                    return f, False
+                return f, True
+
+    best_partial: "Path | None" = None
+
+    for f in candidates:
+        try:
+            actual = f.stat().st_size
+        except Exception:
+            continue
+
+        if expected_size_bytes > 0:
+            ratio = actual / expected_size_bytes
+            if 1.0 - _SIZE_TOLERANCE <= ratio <= 1.0 + _SIZE_TOLERANCE:
+                # Size match — also verify the mod ID appears in the filename
+                # to prevent false positives with similarly-sized archives from
+                # different mods.
+                if mod_id_str and mod_id_str not in f.name:
+                    continue
+                # Use the display name as a loose hint (substring in either
+                # direction) to distinguish two files from the same mod with
+                # similar sizes.  We intentionally don't require exact equality
+                # here because the GraphQL display name and the CDN filename
+                # stem often differ (e.g. spaces vs hyphens, or extra suffixes).
+                if mod_id_str and norm_name:
+                    clean = re.sub(
+                        r'[^\w]', '',
+                        _clean_nexus_stem(f.stem, mod_id_str).lower()
+                    )
+                    if clean and norm_name not in clean and clean not in norm_name:
+                        continue
+                # Size (and optional name hint) match — this is the right file.
+                return f, True
+            if ratio < _PARTIAL_CUTOFF:
+                # Might be a partial download of this file.
+                if not mod_id_str or mod_id_str in f.name:
+                    if mod_id_str and norm_name:
+                        clean = re.sub(
+                            r'[^\w]', '',
+                            _clean_nexus_stem(f.stem, mod_id_str).lower()
+                        )
+                        if norm_name in clean or clean in norm_name:
+                            best_partial = f
+                    elif norm_name:
+                        norm_stem = re.sub(r'[^\w]', '', f.stem.lower())
+                        if norm_name in norm_stem or norm_stem in norm_name:
+                            best_partial = f
+        else:
+            # No expected size: match by name stem only, assume complete
+            norm_stem = re.sub(r'[^\w]', '', f.stem.lower())
+            if norm_name and (norm_name in norm_stem or norm_stem in norm_name):
+                return f, True
+
+    if best_partial is not None:
+        return best_partial, False
+    return None, False
 
 # Callback signature: (bytes_downloaded, total_bytes_or_zero)
 ProgressCallback = Callable[[int, int], None]
@@ -177,26 +331,67 @@ class NexusDownloader:
         progress_cb: ProgressCallback | None = None,
         cancel: threading.Event | None = None,
         known_file_name: str = "",
+        expected_size_bytes: int = 0,
     ) -> DownloadResult:
         """
         Download a file directly (premium users only — no key needed).
 
         Parameters
         ----------
-        game_domain     : Nexus game domain.
-        mod_id          : Nexus mod ID.
-        file_id         : Nexus file ID.
-        dest_dir        : Override download directory.
-        progress_cb     : Progress callback.
-        cancel          : Cancellation event.
-        known_file_name : If the caller already has the archive filename
-                          (e.g. from a prior get_mod_files call), pass it here
-                          to skip an extra get_file_info API call.
+        game_domain          : Nexus game domain.
+        mod_id               : Nexus mod ID.
+        file_id              : Nexus file ID.
+        dest_dir             : Override download directory.
+        progress_cb          : Progress callback.
+        cancel               : Cancellation event.
+        known_file_name      : If the caller already has the archive display
+                               name (e.g. from a prior get_mod_files call),
+                               pass it here to enable the cache check and to
+                               skip an extra get_file_info API call.
+        expected_size_bytes  : Expected size of the finished archive in bytes
+                               (from the API).  Used to validate cached files
+                               and detect partial downloads.  Pass 0 if
+                               unknown.
 
         Returns
         -------
         DownloadResult with file_path on success.
         """
+        # ------------------------------------------------------------------
+        # Cache / partial-download check
+        # ------------------------------------------------------------------
+        # Check for an already-downloaded archive.  The sidecar (.fileid file)
+        # gives an exact match on file_id; name+size heuristics are used as
+        # fallback.  Partial downloads (size < 95 % of expected) are deleted
+        # so the download starts cleanly.
+        _dest = dest_dir or self._download_dir
+        cached, is_complete = _find_cached_archive(
+            _dest, known_file_name, expected_size_bytes, mod_id, file_id
+        )
+        if cached is not None:
+            if is_complete:
+                app_log(
+                    f"Skipping download — cached archive found: {cached.name}"
+                )
+                return DownloadResult(
+                    success=True,
+                    file_path=cached,
+                    file_name=cached.name,
+                    bytes_downloaded=cached.stat().st_size,
+                    game_domain=game_domain,
+                    mod_id=mod_id,
+                    file_id=file_id,
+                )
+            else:
+                app_log(
+                    f"Removing partial download before retry: {cached.name}"
+                )
+                try:
+                    cached.unlink(missing_ok=True)
+                    _fileid_sidecar(cached).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         try:
             links = self._api.get_download_links(
                 game_domain=game_domain,
@@ -304,9 +499,24 @@ class NexusDownloader:
         with requests.get(url, stream=True, timeout=60) as resp:
             resp.raise_for_status()
 
-            # Determine filename: prefer the one we already resolved,
-            # else try Content-Disposition, else build from IDs.
-            if not file_name:
+            # Determine filename with the correct extension.
+            # The provided file_name may be a GraphQL display name with no
+            # extension (e.g. "UI Info Suite 2 v2.3.7").  In that case, derive
+            # the real filename from the CDN URL path, then Content-Disposition,
+            # with the provided name as a last resort.
+            _has_archive_ext = any(file_name.lower().endswith(e) for e in _ARCHIVE_EXTS)
+            if not _has_archive_ext:
+                # Try the URL path first — CDN URLs always embed the real filename
+                try:
+                    from urllib.parse import urlparse, unquote
+                    _url_path = unquote(urlparse(url).path)
+                    _url_basename = os.path.basename(_url_path)
+                    if _url_basename and any(_url_basename.lower().endswith(e) for e in _ARCHIVE_EXTS):
+                        file_name = _url_basename
+                        _has_archive_ext = True
+                except Exception:
+                    pass
+            if not _has_archive_ext:
                 cd = resp.headers.get("Content-Disposition", "")
                 if "filename=" in cd:
                     file_name = cd.split("filename=")[-1].strip(' "\'')
@@ -339,6 +549,8 @@ class NexusDownloader:
                         progress_cb(downloaded, total)
 
         app_log(f"Downloaded {file_name} ({downloaded} bytes) → {dest}")
+        if file_id > 0:
+            _write_sidecar_file_id(dest, file_id)
 
         return DownloadResult(
             success=True,
