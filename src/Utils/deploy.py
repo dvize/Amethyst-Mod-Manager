@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import time as _time
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 
@@ -306,6 +307,33 @@ class LinkMode(Enum):
     COPY     = auto()
 
 
+@dataclass
+class CustomRule:
+    """A file-routing rule that sends matched files to a game-root-relative
+    destination directory.
+
+    Matching is by extension, leading folder name, or both (both must match).
+
+    dest       — path relative to the game install root (e.g. "pak_mods", "")
+    extensions — lowercase file extensions to match (e.g. [".pak"]).
+                 Empty list means no extension filter.
+    folders    — lowercase first-path-segment names to match (e.g. ["natives"]).
+                 Empty list means no folder filter.
+
+    Placement behaviour:
+    - extension-only match: file placed as game_root/dest/<filename> (flat)
+    - folder match (with or without extension): file placed as
+      game_root/dest/<original rel_path> (full path preserved)
+    """
+    dest: str
+    extensions: list[str] = field(default_factory=list)
+    folders: list[str] = field(default_factory=list)
+
+
+_CUSTOM_RULES_LOG_NAME = "custom_rules_deployed.txt"
+_CUSTOM_RULES_BACKUP_DIR = "custom_rules_backup"
+
+
 def _default_core(deploy_dir: Path) -> Path:
     """Return the default backup directory for deploy_dir."""
     return deploy_dir.parent / f"{deploy_dir.name}_Core"
@@ -404,6 +432,7 @@ def deploy_filemap(
     log_fn=None,
     progress_fn=None,
     symlink_exts: set[str] | None = None,
+    exclude: set[str] | None = None,
 ) -> tuple[int, set[str]]:
     """Read filemap.txt and transfer every listed file into deploy_dir.
 
@@ -435,6 +464,7 @@ def deploy_filemap(
     already_seen: set[str] = set()
     tasks: list[tuple[Path, Path, str]] = []
     placed_lower: set[str] = set()
+    _exclude: set[str] = exclude or set()
 
     # Pre-compute string roots so the hot loop avoids Path construction.
     _overwrite_str = str(overwrite_dir)
@@ -465,6 +495,8 @@ def deploy_filemap(
             if rel_lower in already_seen:
                 continue
             already_seen.add(rel_lower)
+            if rel_lower in _exclude:
+                continue
             line_idx += 1
 
             # Fast path: direct string join + stat via os.path.isfile
@@ -1108,6 +1140,7 @@ def deploy_filemap_to_root(
     per_mod_strip_prefixes: dict[str, list[str]] | None = None,
     log_fn=None,
     progress_fn=None,
+    exclude: set[str] | None = None,
 ) -> tuple[int, set[str]]:
     """Deploy mod files directly into game_root, backing up any files they
     overwrite so restore_filemap_from_root() can undo the operation cleanly.
@@ -1172,6 +1205,8 @@ def deploy_filemap_to_root(
             if rel_lower in already_seen:
                 continue
             already_seen.add(rel_lower)
+            if exclude and rel_lower in exclude:
+                continue
             line_idx += 1
 
             # Fast path: direct string join + stat via os.path.isfile
@@ -1321,11 +1356,268 @@ def restore_filemap_from_root(
 
 
 # ---------------------------------------------------------------------------
+# Custom routing rules — route files by extension to arbitrary game-root dirs
+# ---------------------------------------------------------------------------
+
+def deploy_custom_rules(
+    filemap_path: Path,
+    game_root: Path,
+    staging_root: Path,
+    rules: list[CustomRule],
+    mode: LinkMode = LinkMode.HARDLINK,
+    strip_prefixes: set[str] | None = None,
+    log_fn=None,
+    progress_fn=None,
+) -> set[str]:
+    """Deploy filemap entries that match a CustomRule to their designated dirs.
+
+    Matching logic (first matching rule wins):
+    - folder match: file's first path segment is in rule.folders (and extension
+      matches rule.extensions if non-empty) → placed at game_root/dest/rel_path
+      (full relative path preserved under dest)
+    - extension-only match: extension in rule.extensions (and rule.folders empty)
+      → placed flat as game_root/dest/<filename>
+
+    Returns the set of lowercased rel_paths that were handled so the caller
+    can exclude them from the normal deploy step.
+
+    A log of placed absolute paths is written to
+    filemap_path.parent / "custom_rules_deployed.txt" for use by
+    restore_custom_rules().
+    """
+    if not rules:
+        return set()
+
+    _log = log_fn or (lambda _: None)
+    _strip = {p.lower() for p in strip_prefixes} if strip_prefixes else set()
+    overwrite_dir = staging_root.parent / "overwrite"
+    _overwrite_str = str(overwrite_dir)
+    _staging_str   = str(staging_root)
+    _isfile        = os.path.isfile
+    nocase_cache: dict[Path, dict[str, list[Path]]] = {}
+    sorted_strip   = sorted(_strip) if _strip else []
+
+    # Pre-process rules into normalised form for fast matching
+    _rules: list[tuple[CustomRule, set[str], set[str]]] = []
+    for rule in rules:
+        _rules.append((
+            rule,
+            {f.lower() for f in rule.folders},
+            {e.lower() for e in rule.extensions},
+        ))
+
+    def _match_rule(rel_lower: str) -> tuple[CustomRule, bool] | None:
+        """Return (rule, folder_match) for the first matching rule, or None."""
+        first_seg = rel_lower.split("/")[0]
+        ext = os.path.splitext(rel_lower)[1]
+        for rule, folders, exts in _rules:
+            folder_match = bool(folders and first_seg in folders)
+            ext_match    = bool(exts and ext in exts)
+            if folder_match and (not exts or ext_match):
+                return rule, True
+            if ext_match and not folders:
+                return rule, False
+        return None
+
+    already_seen: set[str] = set()
+    tasks: list[tuple[Path, Path]] = []   # (src, dst)
+    handled_lower: set[str] = set()
+
+    with filemap_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if "\t" not in line:
+                continue
+            rel_str, mod_name = line.split("\t", 1)
+            rel_lower = rel_str.lower()
+            if rel_lower in already_seen:
+                continue
+            already_seen.add(rel_lower)
+
+            match = _match_rule(rel_lower)
+            if match is None:
+                continue
+            rule, is_folder_match = match
+
+            # Resolve source file
+            if mod_name == _OVERWRITE_NAME:
+                candidate_str = _overwrite_str + "/" + rel_str
+            else:
+                candidate_str = _staging_str + "/" + mod_name + "/" + rel_str
+            if _isfile(candidate_str):
+                src = Path(candidate_str)
+            else:
+                mod_root = overwrite_dir if mod_name == _OVERWRITE_NAME else staging_root / mod_name
+                src = _resolve_nocase(mod_root, rel_str, cache=nocase_cache)
+                if src is None and sorted_strip:
+                    for p1 in sorted_strip:
+                        src = _resolve_nocase(mod_root, p1 + "/" + rel_str, cache=nocase_cache)
+                        if src is not None:
+                            break
+
+            if src is None:
+                _log(f"  WARN: source not found — {rel_str} ({mod_name})")
+                continue
+
+            dest_base = game_root / rule.dest if rule.dest else game_root
+            if is_folder_match:
+                # Preserve full relative path under dest
+                dst = dest_base / rel_str
+            else:
+                # Extension-only: place flat (filename only)
+                dst = dest_base / src.name
+            tasks.append((src, dst))
+            handled_lower.add(rel_lower)
+
+    if not tasks:
+        return handled_lower
+
+    # Backup directory for vanilla files that will be overwritten
+    backup_dir = filemap_path.parent / _CUSTOM_RULES_BACKUP_DIR
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+
+    # Create destination directories
+    needed_dirs: set[Path] = {dst.parent for _, dst in tasks}
+    for d in needed_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+    placed_abs: list[str] = []
+    total = len(tasks)
+    done_count = 0
+    _game_root = game_root
+
+    for src, dst in tasks:
+        done_count += 1
+        # Back up any vanilla file we are about to overwrite
+        if dst.exists() and not dst.is_symlink():
+            try:
+                rel = dst.relative_to(_game_root)
+                bak = backup_dir / rel
+                bak.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dst), str(bak))
+            except (ValueError, OSError) as e:
+                _log(f"  WARN: could not back up {dst}: {e}")
+        elif dst.is_symlink():
+            dst.unlink()
+
+        try:
+            if mode is LinkMode.HARDLINK:
+                os.link(src, dst)
+            elif mode is LinkMode.SYMLINK:
+                os.symlink(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            placed_abs.append(str(dst))
+        except OSError as e:
+            _log(f"  WARN: could not transfer {dst}: {e}")
+
+        if progress_fn is not None and (done_count % 200 == 0 or done_count == total):
+            progress_fn(done_count, total)
+
+    log_path = filemap_path.parent / _CUSTOM_RULES_LOG_NAME
+    try:
+        if placed_abs:
+            log_path.write_text("\n".join(placed_abs), encoding="utf-8")
+        elif log_path.exists():
+            log_path.unlink()
+    except OSError:
+        pass
+
+    _log(f"  Custom rules: placed {len(placed_abs)} file(s).")
+    return handled_lower
+
+
+def restore_custom_rules(
+    filemap_path: Path,
+    game_root: Path,
+    rules: list[CustomRule],
+    log_fn=None,
+) -> int:
+    """Remove files placed by deploy_custom_rules() and prune empty dest dirs.
+
+    Reads filemap_path.parent / "custom_rules_deployed.txt", deletes every
+    listed absolute path, then tries to rmdir each rule's destination directory
+    (silently ignored if non-empty).  Returns the number of files removed.
+    """
+    _log = log_fn or (lambda _: None)
+    log_path = filemap_path.parent / _CUSTOM_RULES_LOG_NAME
+    backup_dir = filemap_path.parent / _CUSTOM_RULES_BACKUP_DIR
+
+    if not log_path.is_file():
+        return 0
+
+    placed = [p for p in log_path.read_text(encoding="utf-8").splitlines() if p]
+    removed = 0
+    dirs_to_prune: set[Path] = set()
+    _game_root_resolved = game_root.resolve()
+    for abs_str in placed:
+        p = Path(abs_str)
+        # Use the unresolved path for the under-root check so symlinks
+        # (whose targets live outside game_root) are not incorrectly blocked.
+        try:
+            p.relative_to(game_root)
+        except ValueError:
+            try:
+                p.resolve().relative_to(_game_root_resolved)
+            except ValueError:
+                _log(f"  SKIP: path traversal blocked — {abs_str}")
+                continue
+        if p.is_file() or p.is_symlink():
+            p.unlink()
+            removed += 1
+        # Collect parent dirs for pruning (stop at game_root, unresolved check)
+        parent = p.parent
+        while parent != game_root:
+            try:
+                parent.relative_to(game_root)
+            except ValueError:
+                break
+            dirs_to_prune.add(parent)
+            parent = parent.parent
+
+    # Restore backed-up vanilla files
+    if backup_dir.is_dir():
+        for bak_src in backup_dir.rglob("*"):
+            if not bak_src.is_file():
+                continue
+            rel = bak_src.relative_to(backup_dir)
+            orig = game_root / rel
+            if not _path_under_root(orig, game_root):
+                _log(f"  SKIP: path traversal blocked — {rel}")
+                continue
+            orig.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(bak_src), str(orig))
+            _log(f"  Restored {rel} from custom_rules_backup/")
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+    # Prune empty subdirectories deepest-first; never touch game_root itself
+    for d in sorted(dirs_to_prune, key=lambda x: len(x.parts), reverse=True):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+
+    log_path.unlink()
+    _log(f"  Custom rules restore: removed {removed} file(s).")
+    return removed
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _path_under_root(path: Path, root: Path) -> bool:
-    """Return True if path resolves to a location under root (no path traversal)."""
+    """Return True if path is under root (no path traversal).
+
+    Checks the unresolved path first so that symlinks whose targets live
+    outside root (e.g. symlinks into staging) are not incorrectly blocked.
+    """
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        pass
     try:
         path.resolve().relative_to(root.resolve())
         return True

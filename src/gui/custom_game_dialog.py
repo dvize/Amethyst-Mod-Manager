@@ -176,6 +176,9 @@ class CustomGameDialog(ctk.CTkToplevel):
         self._restore_var       = tk.BooleanVar(value=True)   # restore_before_deploy
         self._norm_case_var     = tk.BooleanVar(value=True)   # normalize_folder_case
         # wine_dll_overrides stored as a plain string (dll=mode lines), set in _build_ui via textbox
+        # custom_routing_rules — list of row dicts, populated below
+        self._routing_rules_rows: list[dict] = []
+        self._routing_rules_container = None  # set in _build_ui
 
         if existing:
             self._name_var.set(existing.get("name", ""))
@@ -198,8 +201,10 @@ class CustomGameDialog(ctk.CTkToplevel):
             self._restore_var.set(bool(existing.get("restore_before_deploy", True)))
             self._norm_case_var.set(bool(existing.get("normalize_folder_case", True)))
             self._dll_initial = _dll_to_str(existing.get("wine_dll_overrides", {}))
+            self._routing_rules_initial = existing.get("custom_routing_rules", [])
         else:
             self._dll_initial = ""
+            self._routing_rules_initial = []
 
         self._build_ui()
         self._update_data_path_visibility()
@@ -572,6 +577,42 @@ class CustomGameDialog(ctk.CTkToplevel):
             self._dll_textbox.insert("0.0", self._dll_initial)
         row += 1
 
+        # ---- Custom Routing Rules ----
+        ctk.CTkLabel(
+            body, text="Custom Routing Rules",
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w",
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(6, 0))
+        row += 1
+        ctk.CTkLabel(
+            body,
+            text="Route specific files to alternate destinations during deploy. "
+                 "Each rule maps files (by extension or folder) to a game-root-relative directory.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+            wraplength=self.WIDTH - 60,
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
+        row += 1
+
+        self._routing_rules_container = ctk.CTkFrame(body, fg_color="transparent")
+        self._routing_rules_container.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self._routing_rules_container.grid_columnconfigure(0, weight=1)
+        row += 1
+
+        ctk.CTkButton(
+            body, text="+ Add Rule", width=100, height=26, font=FONT_SMALL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._add_routing_rule_row,
+        ).grid(row=row, column=0, sticky="w", padx=16, pady=(0, 10))
+        row += 1
+
+        # Populate existing rules
+        for rule_data in self._routing_rules_initial:
+            if isinstance(rule_data, dict):
+                self._add_routing_rule_row(
+                    dest=rule_data.get("dest", ""),
+                    match_type="extensions" if rule_data.get("extensions") else "folders",
+                    match_value=", ".join(rule_data.get("extensions") or rule_data.get("folders") or []),
+                )
+
         # ---- Validation label ----
         self._validation_label = ctk.CTkLabel(
             body, text="", font=FONT_SMALL, text_color=TEXT_ERR, anchor="w",
@@ -652,6 +693,77 @@ class CustomGameDialog(ctk.CTkToplevel):
                 )
             )
             self._data_path_entry.configure(placeholder_text="e.g. Data   (leave empty for game root)")
+
+    def _add_routing_rule_row(self, dest: str = "", match_type: str = "extensions",
+                              match_value: str = "") -> None:
+        """Add a routing rule row to the container."""
+        container = self._routing_rules_container
+        row_idx = len(self._routing_rules_rows)
+
+        row_frame = ctk.CTkFrame(container, fg_color=BG_ROW, corner_radius=4, height=36)
+        row_frame.grid(row=row_idx, column=0, sticky="ew", pady=2)
+        row_frame.grid_columnconfigure(0, weight=1)
+        row_frame.grid_columnconfigure(1, weight=0)
+        row_frame.grid_columnconfigure(2, weight=1)
+        row_frame.grid_columnconfigure(3, weight=0)
+
+        dest_var = tk.StringVar(value=dest)
+        type_var = tk.StringVar(value=match_type)
+        value_var = tk.StringVar(value=match_value)
+
+        ctk.CTkEntry(
+            row_frame, textvariable=dest_var, font=FONT_MONO,
+            fg_color=BG_DEEP, text_color=TEXT_MAIN, border_color=BORDER,
+            placeholder_text="dest (e.g. pak_mods)", width=140,
+        ).grid(row=0, column=0, sticky="ew", padx=(6, 4), pady=4)
+
+        ctk.CTkOptionMenu(
+            row_frame, variable=type_var, values=["extensions", "folders"],
+            font=FONT_SMALL, fg_color=BG_DEEP, text_color=TEXT_MAIN,
+            button_color=BG_HEADER, button_hover_color=BG_HOVER, width=100,
+        ).grid(row=0, column=1, padx=2, pady=4)
+
+        ctk.CTkEntry(
+            row_frame, textvariable=value_var, font=FONT_MONO,
+            fg_color=BG_DEEP, text_color=TEXT_MAIN, border_color=BORDER,
+            placeholder_text="e.g. .pak, .utoc", width=140,
+        ).grid(row=0, column=2, sticky="ew", padx=(4, 4), pady=4)
+
+        row_data = {"frame": row_frame, "dest": dest_var, "type": type_var, "value": value_var}
+        self._routing_rules_rows.append(row_data)
+
+        ctk.CTkButton(
+            row_frame, text="X", width=28, height=28, font=FONT_SMALL,
+            fg_color=RED_BTN, hover_color=RED_HOV, text_color="white",
+            command=lambda rd=row_data: self._remove_routing_rule_row(rd),
+        ).grid(row=0, column=3, padx=(2, 6), pady=4)
+
+    def _remove_routing_rule_row(self, row_data: dict) -> None:
+        """Remove a routing rule row."""
+        if row_data in self._routing_rules_rows:
+            self._routing_rules_rows.remove(row_data)
+            row_data["frame"].destroy()
+            # Re-grid remaining rows
+            for i, rd in enumerate(self._routing_rules_rows):
+                rd["frame"].grid(row=i, column=0, sticky="ew", pady=2)
+
+    def _collect_routing_rules(self) -> list[dict]:
+        """Collect routing rules from the UI rows into JSON-serializable dicts."""
+        rules = []
+        for rd in self._routing_rules_rows:
+            dest = rd["dest"].get().strip()
+            match_type = rd["type"].get()
+            raw_value = rd["value"].get().strip()
+            values = [v.strip() for v in raw_value.split(",") if v.strip()]
+            if not values and not dest:
+                continue
+            rule: dict = {"dest": dest}
+            if match_type == "extensions":
+                rule["extensions"] = values
+            else:
+                rule["folders"] = values
+            rules.append(rule)
+        return rules
 
     def _scroll_body(self, direction: int):
         """Scroll the body canvas by *direction* units."""
@@ -771,6 +883,7 @@ class CustomGameDialog(ctk.CTkToplevel):
             "wine_dll_overrides":             _parse_dll_text(
                 self._dll_textbox.get("0.0", "end")
             ),
+            "custom_routing_rules":           self._collect_routing_rules(),
         }
 
         save_custom_game_definition(defn)
@@ -849,6 +962,8 @@ class CustomGamePanel(ctk.CTkFrame):
         self._heroic_var        = tk.StringVar()
         self._restore_var       = tk.BooleanVar(value=True)
         self._norm_case_var     = tk.BooleanVar(value=True)   # normalize_folder_case
+        self._routing_rules_rows: list[dict] = []
+        self._routing_rules_container = None
 
         if existing:
             self._name_var.set(existing.get("name", ""))
@@ -870,8 +985,10 @@ class CustomGamePanel(ctk.CTkFrame):
             self._restore_var.set(bool(existing.get("restore_before_deploy", True)))
             self._norm_case_var.set(bool(existing.get("normalize_folder_case", True)))
             self._dll_initial = _dll_to_str(existing.get("wine_dll_overrides", {}))
+            self._routing_rules_initial = existing.get("custom_routing_rules", [])
         else:
             self._dll_initial = ""
+            self._routing_rules_initial = []
 
         self._build_ui()
         self._update_data_path_visibility()
@@ -1249,6 +1366,42 @@ class CustomGamePanel(ctk.CTkFrame):
             self._dll_textbox.insert("0.0", self._dll_initial)
         row += 1
 
+        # ---- Custom Routing Rules ----
+        ctk.CTkLabel(
+            body, text="Custom Routing Rules",
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="center",
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(6, 0))
+        row += 1
+        ctk.CTkLabel(
+            body,
+            text="Route specific files to alternate destinations during deploy. "
+                 "Each rule maps files (by extension or folder) to a game-root-relative directory.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="center",
+            wraplength=WRAP,
+        ).grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
+        row += 1
+
+        self._routing_rules_container = ctk.CTkFrame(body, fg_color="transparent")
+        self._routing_rules_container.grid(row=row, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self._routing_rules_container.grid_columnconfigure(0, weight=1)
+        row += 1
+
+        ctk.CTkButton(
+            body, text="+ Add Rule", width=100, height=26, font=FONT_SMALL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._add_routing_rule_row,
+        ).grid(row=row, column=0, sticky="", padx=16, pady=(0, 10))
+        row += 1
+
+        # Populate existing rules
+        for rule_data in self._routing_rules_initial:
+            if isinstance(rule_data, dict):
+                self._add_routing_rule_row(
+                    dest=rule_data.get("dest", ""),
+                    match_type="extensions" if rule_data.get("extensions") else "folders",
+                    match_value=", ".join(rule_data.get("extensions") or rule_data.get("folders") or []),
+                )
+
         # ---- Validation label ----
         self._validation_label = ctk.CTkLabel(
             body, text="", font=FONT_SMALL, text_color=TEXT_ERR, anchor="center",
@@ -1333,6 +1486,73 @@ class CustomGamePanel(ctk.CTkFrame):
                 wraplength=WRAP,
             )
             self._data_path_entry.configure(placeholder_text="e.g. Data   (leave empty for game root)")
+
+    def _add_routing_rule_row(self, dest: str = "", match_type: str = "extensions",
+                              match_value: str = "") -> None:
+        container = self._routing_rules_container
+        row_idx = len(self._routing_rules_rows)
+
+        row_frame = ctk.CTkFrame(container, fg_color=BG_ROW, corner_radius=4, height=36)
+        row_frame.grid(row=row_idx, column=0, sticky="ew", pady=2)
+        row_frame.grid_columnconfigure(0, weight=1)
+        row_frame.grid_columnconfigure(1, weight=0)
+        row_frame.grid_columnconfigure(2, weight=1)
+        row_frame.grid_columnconfigure(3, weight=0)
+
+        dest_var = tk.StringVar(value=dest)
+        type_var = tk.StringVar(value=match_type)
+        value_var = tk.StringVar(value=match_value)
+
+        ctk.CTkEntry(
+            row_frame, textvariable=dest_var, font=FONT_MONO,
+            fg_color=BG_DEEP, text_color=TEXT_MAIN, border_color=BORDER,
+            placeholder_text="dest (e.g. pak_mods)", width=140,
+        ).grid(row=0, column=0, sticky="ew", padx=(6, 4), pady=4)
+
+        ctk.CTkOptionMenu(
+            row_frame, variable=type_var, values=["extensions", "folders"],
+            font=FONT_SMALL, fg_color=BG_DEEP, text_color=TEXT_MAIN,
+            button_color=BG_HEADER, button_hover_color=BG_HOVER, width=100,
+        ).grid(row=0, column=1, padx=2, pady=4)
+
+        ctk.CTkEntry(
+            row_frame, textvariable=value_var, font=FONT_MONO,
+            fg_color=BG_DEEP, text_color=TEXT_MAIN, border_color=BORDER,
+            placeholder_text="e.g. .pak, .utoc", width=140,
+        ).grid(row=0, column=2, sticky="ew", padx=(4, 4), pady=4)
+
+        row_data = {"frame": row_frame, "dest": dest_var, "type": type_var, "value": value_var}
+        self._routing_rules_rows.append(row_data)
+
+        ctk.CTkButton(
+            row_frame, text="X", width=28, height=28, font=FONT_SMALL,
+            fg_color=RED_BTN, hover_color=RED_HOV, text_color="white",
+            command=lambda rd=row_data: self._remove_routing_rule_row(rd),
+        ).grid(row=0, column=3, padx=(2, 6), pady=4)
+
+    def _remove_routing_rule_row(self, row_data: dict) -> None:
+        if row_data in self._routing_rules_rows:
+            self._routing_rules_rows.remove(row_data)
+            row_data["frame"].destroy()
+            for i, rd in enumerate(self._routing_rules_rows):
+                rd["frame"].grid(row=i, column=0, sticky="ew", pady=2)
+
+    def _collect_routing_rules(self) -> list[dict]:
+        rules = []
+        for rd in self._routing_rules_rows:
+            dest = rd["dest"].get().strip()
+            match_type = rd["type"].get()
+            raw_value = rd["value"].get().strip()
+            values = [v.strip() for v in raw_value.split(",") if v.strip()]
+            if not values and not dest:
+                continue
+            rule: dict = {"dest": dest}
+            if match_type == "extensions":
+                rule["extensions"] = values
+            else:
+                rule["folders"] = values
+            rules.append(rule)
+        return rules
 
     def _scroll_body(self, direction: int):
         try:
@@ -1435,6 +1655,7 @@ class CustomGamePanel(ctk.CTkFrame):
             "wine_dll_overrides":             _parse_dll_text(
                 self._dll_textbox.get("0.0", "end")
             ),
+            "custom_routing_rules":           self._collect_routing_rules(),
         }
 
         save_custom_game_definition(defn)

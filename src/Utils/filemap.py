@@ -28,6 +28,7 @@ so build_filemap() can skip the normalize step entirely.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -568,12 +569,30 @@ def build_filemap(
     overrides:     dict[str, set[str]] = {s: set() for s in priority_order}
     overridden_by: dict[str, set[str]] = {s: set() for s in priority_order}
 
-    _ignore_fnames = {f.lower() for f in conflict_ignore_filenames} if conflict_ignore_filenames else set()
+    _ignore_patterns = [f.lower() for f in conflict_ignore_filenames] if conflict_ignore_filenames else []
+
+    def _is_ignored(rel_key: str) -> bool:
+        if not _ignore_patterns:
+            return False
+        fname = rel_key.rsplit("/", 1)[-1]
+        return any(fnmatch.fnmatch(fname, p) for p in _ignore_patterns)
+
+    # Remove ignored files from filemap_winner and filemap so they are never
+    # deployed or shown in the Data tab.
+    if _ignore_patterns:
+        for key in list(filemap_winner.keys()):
+            if _is_ignored(key):
+                del filemap_winner[key]
+        for key in list(filemap.keys()):
+            if _is_ignored(key):
+                del filemap[key]
+        for name in mod_files:
+            mod_files[name] = {k for k in mod_files[name] if not _is_ignored(k)}
 
     current_holder: dict[str, str] = {}
     for name in priority_order:
         for key in mod_files.get(name, ()):
-            if _ignore_fnames and key.rsplit("/", 1)[-1] in _ignore_fnames:
+            if _is_ignored(key):
                 continue
             if key in current_holder:
                 loser = current_holder[key]
