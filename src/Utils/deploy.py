@@ -331,6 +331,7 @@ class CustomRule:
 
 
 _CUSTOM_RULES_LOG_NAME = "custom_rules_deployed.txt"
+_CUSTOM_RULES_BACKUP_DIR = "custom_rules_backup"
 
 
 def _default_core(deploy_dir: Path) -> Path:
@@ -1471,6 +1472,11 @@ def deploy_custom_rules(
     if not tasks:
         return handled_lower
 
+    # Backup directory for vanilla files that will be overwritten
+    backup_dir = filemap_path.parent / _CUSTOM_RULES_BACKUP_DIR
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+
     # Create destination directories
     needed_dirs: set[Path] = {dst.parent for _, dst in tasks}
     for d in needed_dirs:
@@ -1479,32 +1485,35 @@ def deploy_custom_rules(
     placed_abs: list[str] = []
     total = len(tasks)
     done_count = 0
+    _game_root = game_root
 
-    def _do_transfer_cr(item: tuple[Path, Path]) -> tuple[str | None, tuple[Path, OSError] | None]:
-        src, dst = item
+    for src, dst in tasks:
+        done_count += 1
+        # Back up any vanilla file we are about to overwrite
+        if dst.exists() and not dst.is_symlink():
+            try:
+                rel = dst.relative_to(_game_root)
+                bak = backup_dir / rel
+                bak.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dst), str(bak))
+            except (ValueError, OSError) as e:
+                _log(f"  WARN: could not back up {dst}: {e}")
+        elif dst.is_symlink():
+            dst.unlink()
+
         try:
-            if dst.is_symlink() or dst.is_file():
-                dst.unlink()
             if mode is LinkMode.HARDLINK:
                 os.link(src, dst)
             elif mode is LinkMode.SYMLINK:
                 os.symlink(src, dst)
             else:
                 shutil.copy2(src, dst)
-            return str(dst), None
+            placed_abs.append(str(dst))
         except OSError as e:
-            return None, (dst, e)
+            _log(f"  WARN: could not transfer {dst}: {e}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        for result, err in pool.map(_do_transfer_cr, tasks):
-            done_count += 1
-            if result is not None:
-                placed_abs.append(result)
-            elif err is not None:
-                dst_err, exc = err
-                _log(f"  WARN: could not transfer {dst_err}: {exc}")
-            if progress_fn is not None and (done_count % 200 == 0 or done_count == total):
-                progress_fn(done_count, total)
+        if progress_fn is not None and (done_count % 200 == 0 or done_count == total):
+            progress_fn(done_count, total)
 
     log_path = filemap_path.parent / _CUSTOM_RULES_LOG_NAME
     try:
@@ -1533,6 +1542,7 @@ def restore_custom_rules(
     """
     _log = log_fn or (lambda _: None)
     log_path = filemap_path.parent / _CUSTOM_RULES_LOG_NAME
+    backup_dir = filemap_path.parent / _CUSTOM_RULES_BACKUP_DIR
 
     if not log_path.is_file():
         return 0
@@ -1565,6 +1575,21 @@ def restore_custom_rules(
                 break
             dirs_to_prune.add(parent)
             parent = parent.parent
+
+    # Restore backed-up vanilla files
+    if backup_dir.is_dir():
+        for bak_src in backup_dir.rglob("*"):
+            if not bak_src.is_file():
+                continue
+            rel = bak_src.relative_to(backup_dir)
+            orig = game_root / rel
+            if not _path_under_root(orig, game_root):
+                _log(f"  SKIP: path traversal blocked — {rel}")
+                continue
+            orig.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(bak_src), str(orig))
+            _log(f"  Restored {rel} from custom_rules_backup/")
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
     # Prune empty subdirectories deepest-first; never touch game_root itself
     for d in sorted(dirs_to_prune, key=lambda x: len(x.parts), reverse=True):
