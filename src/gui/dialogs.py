@@ -2256,8 +2256,8 @@ class OverwritesPanel(ctk.CTkFrame):
         body = tk.Frame(self, bg=BG_DEEP)
         body.pack(fill="both", expand=True)
         body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(0, weight=2)
+        body.grid_columnconfigure(1, weight=3)
 
         left = tk.Frame(body, bg=BG_DEEP)
         left.grid(row=0, column=0, sticky="nsew")
@@ -2299,7 +2299,7 @@ class OverwritesPanel(ctk.CTkFrame):
             footer, text="Close",
             fg_color="#c0392b", hover_color="#a93226",
             text_color=TEXT_MAIN, font=FONT_BOLD,
-            width=80, height=28,
+            width=80, height=32,
             command=self._on_close,
         ).pack(side="right", padx=12, pady=6)
 
@@ -2313,7 +2313,7 @@ class OverwritesPanel(ctk.CTkFrame):
         tk.Label(
             outer, text=header,
             bg=BG_PANEL, fg=header_color,
-            font=("Segoe UI", 10, "bold"), anchor="w",
+            font=font_sized_px("Segoe UI", 10, "bold"), anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
 
         tree_frame = tk.Frame(outer, bg=BG_DEEP)
@@ -2325,11 +2325,11 @@ class OverwritesPanel(ctk.CTkFrame):
         style = ttk.Style()
         style.configure(f"{uid}.Treeview",
                         background=BG_DEEP, foreground=TEXT_MAIN,
-                        fieldbackground=BG_DEEP, rowheight=20,
-                        font=("Segoe UI", 9))
+                        fieldbackground=BG_DEEP, rowheight=scaled(20),
+                        font=font_sized_px("Segoe UI", 9))
         style.configure(f"{uid}.Treeview.Heading",
                         background=BG_HEADER, foreground=TEXT_SEP,
-                        font=("Segoe UI", 9, "bold"), relief="flat")
+                        font=font_sized_px("Segoe UI", 9, "bold"), relief="flat")
         style.map(f"{uid}.Treeview",
                   background=[("selected", BG_SELECT)],
                   foreground=[("selected", TEXT_MAIN)])
@@ -2344,8 +2344,14 @@ class OverwritesPanel(ctk.CTkFrame):
         )
         tv.heading("#0",   text=col0_title, anchor="w")
         tv.heading("col1", text=col1_title, anchor="w")
-        tv.column("#0",   minwidth=180, stretch=True)
-        tv.column("col1", minwidth=150, width=180, stretch=False)
+        tv.column("#0",   minwidth=100, stretch=True)
+        tv.column("col1", minwidth=100, stretch=True)
+
+        def _resize_cols(event, _tv=tv):
+            half = event.width // 2
+            _tv.column("#0",   width=half)
+            _tv.column("col1", width=half)
+        tv.bind("<Configure>", _resize_cols)
 
         vsb = tk.Scrollbar(tree_frame, orient="vertical", command=tv.yview,
                            bg=BG_SEP, troughcolor=BG_DEEP, activebackground=ACCENT,
@@ -2371,7 +2377,7 @@ class OverwritesPanel(ctk.CTkFrame):
         tk.Label(
             outer, text=header,
             bg=BG_PANEL, fg=header_color,
-            font=("Segoe UI", 10, "bold"), anchor="w",
+            font=font_sized_px("Segoe UI", 10, "bold"), anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
 
         tree_frame = tk.Frame(outer, bg=BG_DEEP)
@@ -2383,11 +2389,11 @@ class OverwritesPanel(ctk.CTkFrame):
         style = ttk.Style()
         style.configure(f"{uid}.Treeview",
                         background=BG_DEEP, foreground=TEXT_MAIN,
-                        fieldbackground=BG_DEEP, rowheight=20,
-                        font=("Segoe UI", 9))
+                        fieldbackground=BG_DEEP, rowheight=scaled(20),
+                        font=font_sized_px("Segoe UI", 9))
         style.configure(f"{uid}.Treeview.Heading",
                         background=BG_HEADER, foreground=TEXT_SEP,
-                        font=("Segoe UI", 9, "bold"), relief="flat")
+                        font=font_sized_px("Segoe UI", 9, "bold"), relief="flat")
         style.map(f"{uid}.Treeview",
                   background=[("selected", BG_SELECT)],
                   foreground=[("selected", TEXT_MAIN)])
@@ -5437,14 +5443,14 @@ class DeploymentPathsPanel(ctk.CTkFrame):
         style.configure(
             f"{_uid}.Treeview",
             background=_tree_bg, foreground=TEXT_MAIN,
-            fieldbackground=_tree_bg, rowheight=22,
-            font=("Segoe UI", 10),
+            fieldbackground=_tree_bg, rowheight=scaled(22),
+            font=("Segoe UI", _theme.FS10),
             bordercolor=BG_ROW, borderwidth=1, focuscolor=_tree_bg,
         )
         style.configure(
             f"{_uid}.Treeview.Heading",
             background=BG_HEADER, foreground=TEXT_SEP,
-            font=("Segoe UI", 10), borderwidth=0,
+            font=("Segoe UI", _theme.FS10), borderwidth=0,
         )
         style.map(
             f"{_uid}.Treeview",
@@ -5461,8 +5467,8 @@ class DeploymentPathsPanel(ctk.CTkFrame):
         )
         self._tree.heading("#0", text="Folder", anchor="w")
         self._tree.heading("check", text="", anchor="w")
-        self._tree.column("#0", minwidth=200, stretch=True)
-        self._tree.column("check", width=28, stretch=False)
+        self._tree.column("#0", minwidth=scaled(200), stretch=True)
+        self._tree.column("check", width=scaled(28), stretch=False)
 
         vsb = tk.Scrollbar(
             list_frame, orient="vertical", command=self._tree.yview,

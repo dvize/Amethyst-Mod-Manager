@@ -327,11 +327,11 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=BG_DEEP)
         init_fonts(self)
-        self.geometry("1280x800")
-        # Scale minsize at higher UI scales; 16:9 minimum (1280x720)
+        self.geometry("1280x720")
+        # Scale minsize with UI scale so window can't be shrunk below the toolbar
         _s = get_ui_scale()
-        _min_w = max(1080, int(1080 * _s))
-        _min_h = max(720, int(720 * _s))
+        _min_w = int(1280 * _s)
+        _min_h = int(720 * _s)
         self.minsize(_min_w, _min_h)
         # Thread-safe callback queue — background threads must never call
         # widget.after() directly (Python 3.13 Tkinter enforces this).

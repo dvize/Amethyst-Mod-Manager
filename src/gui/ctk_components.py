@@ -296,6 +296,7 @@ class CTkNotification(ctk.CTkToplevel):
     def __init__(self, master, state: str = "info", message: str = "message", side: str = "right_bottom"):
         from gui.theme import BG_PANEL
         super().__init__(master, fg_color=BG_PANEL)
+        self.withdraw()
         self.root = master
         self.width = 400
         self.resizable(False, False)
@@ -325,6 +326,7 @@ class CTkNotification(ctk.CTkToplevel):
         self._focus_out_bid = master.bind("<FocusOut>", self._on_focus_out, add="+")
         self._focus_in_bid = master.bind("<FocusIn>", self._on_focus_in, add="+")
         self._update_geometry()
+        self.deiconify()
 
     def _focus_still_in_app(self):
         try:

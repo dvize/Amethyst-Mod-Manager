@@ -209,16 +209,16 @@ class SettingsPanel(ctk.CTkFrame):
         is_auto = (current_ini == "auto")
         init_scale = detect_hidpi_scale() if is_auto else (float(current_ini) if current_ini else 1.0)
 
-        self._scale_var = tk.DoubleVar(value=round(init_scale, 1))
+        self._scale_var = tk.DoubleVar(value=round(init_scale * 20) / 20)
         self._slider = ctk.CTkSlider(
-            body, from_=1.0, to=2.0, number_of_steps=10,
+            body, from_=1.0, to=2.0, number_of_steps=20,
             variable=self._scale_var,
             width=scaled(220),
             command=self._on_slider,
         )
         self._slider.grid(row=1, column=0, sticky="w", padx=(0, 10))
 
-        self._scale_lbl = ctk.CTkLabel(body, text=f"{init_scale:.1f}×",
+        self._scale_lbl = ctk.CTkLabel(body, text=f"{round(init_scale * 20) / 20:.2f}×",
                                        font=FONT_NORMAL, text_color=TEXT_MAIN, width=scaled(40))
         self._scale_lbl.grid(row=1, column=1, sticky="w")
 
@@ -265,14 +265,15 @@ class SettingsPanel(ctk.CTkFrame):
             return "auto"
 
     def _on_slider(self, _value=None):
-        self._scale_lbl.configure(text=f"{round(self._scale_var.get(), 1):.1f}×")
+        v = round(self._scale_var.get() * 20) / 20
+        self._scale_lbl.configure(text=f"{v:.2f}×")
 
     def _on_auto_toggle(self):
         self._update_slider_state()
         if self._auto_var.get():
             detected = detect_hidpi_scale()
-            self._scale_var.set(round(detected, 1))
-            self._scale_lbl.configure(text=f"{detected:.1f}×")
+            self._scale_var.set(round(detected * 20) / 20)
+            self._scale_lbl.configure(text=f"{round(detected * 20) / 20:.2f}×")
 
     def _update_slider_state(self):
         self._slider.configure(state="disabled" if self._auto_var.get() else "normal")
@@ -284,7 +285,7 @@ class SettingsPanel(ctk.CTkFrame):
         if self._auto_var.get():
             save_ui_scale("auto")
         else:
-            save_ui_scale(round(self._scale_var.get(), 1))
+            save_ui_scale(round(self._scale_var.get() * 20) / 20)
         self._on_done(self)
         python = sys.executable
         os.execv(python, [python] + sys.argv)
