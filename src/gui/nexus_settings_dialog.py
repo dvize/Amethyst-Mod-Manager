@@ -26,6 +26,7 @@ from Nexus.nexus_oauth import NexusOAuthClient, OAuthTokens, clear_oauth_tokens,
 from Utils.app_log import app_log
 from Nexus.nxm_handler import NxmHandler
 
+from Utils.ui_config import get_ui_scale
 from gui.theme import (
     BG_DEEP,
     BG_PANEL,
@@ -63,7 +64,10 @@ class NexusSettingsDialog(ctk.CTkToplevel):
     def __init__(self, parent, on_key_changed=None, log_fn: Optional[Callable[[str], None]] = None):
         super().__init__(parent, fg_color=BG_DEEP)
         self.title("Nexus Mods Settings")
-        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        s = get_ui_scale()
+        w = round(self.WIDTH * s)
+        h = round(self.HEIGHT * s)
+        self.geometry(f"{w}x{h}")
         self.resizable(False, False)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -87,6 +91,7 @@ class NexusSettingsDialog(ctk.CTkToplevel):
 
     def _build(self):
         pad = {"padx": 16, "pady": (8, 0)}
+        wrap = self.WIDTH - 32
 
         # -- Header --
         ctk.CTkLabel(
@@ -97,7 +102,7 @@ class NexusSettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             self,
             text="Log in via browser, or paste a personal API key manually.",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(padx=16, pady=(2, 8), anchor="w")
 
         # -- OAuth Login --
@@ -138,7 +143,7 @@ class NexusSettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             manual_frame,
             text="If the redirect didn't work, paste the code from the Nexus page below:",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
         manual_inner = ctk.CTkFrame(manual_frame, fg_color="transparent")
@@ -185,23 +190,24 @@ class NexusSettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             self,
             text="Current Nexus API request quota (hourly and daily). Click Refresh to fetch latest.",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(padx=16, pady=(0, 6), anchor="w")
 
         rate_frame = ctk.CTkFrame(self, fg_color="transparent")
         rate_frame.pack(padx=16, pady=4, fill="x")
-
-        self._rate_limit_label = ctk.CTkLabel(
-            rate_frame, text="", font=FONT_SMALL, text_color=TEXT_DIM,
-        )
-        self._rate_limit_label.pack(side="left", padx=(0, 12))
 
         self._rate_refresh_btn = ctk.CTkButton(
             rate_frame, text="Refresh", width=80, font=FONT_BOLD,
             fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
             command=self._on_refresh_rate_limits,
         )
-        self._rate_refresh_btn.pack(side="left")
+        self._rate_refresh_btn.pack(side="right")
+
+        self._rate_limit_label = ctk.CTkLabel(
+            rate_frame, text="", font=FONT_SMALL, text_color=TEXT_DIM,
+            anchor="w", justify="left",
+        )
+        self._rate_limit_label.pack(side="left", fill="x", expand=True)
         self._update_rate_limit_display()
 
         # -- Separator --
@@ -216,7 +222,7 @@ class NexusSettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             self,
             text="Handles nxm:// links from the \"Download with Manager\" button.",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(padx=16, pady=(0, 8), anchor="w")
 
         nxm_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -618,6 +624,7 @@ class NexusSettingsPanel(ctk.CTkFrame):
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
+        wrap = 448
 
         # Title bar
         title_bar = ctk.CTkFrame(self, fg_color=BG_HEADER, corner_radius=0, height=40)
@@ -651,7 +658,7 @@ class NexusSettingsPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             body,
             text="Log in via browser, or paste a personal API key manually.",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(padx=16, pady=(2, 8), anchor="center")
 
         # OAuth Login
@@ -690,7 +697,7 @@ class NexusSettingsPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             manual_frame,
             text="If the redirect didn't work, paste the code from the Nexus page below:",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
         manual_inner = ctk.CTkFrame(manual_frame, fg_color="transparent")
@@ -748,23 +755,24 @@ class NexusSettingsPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             body,
             text="Current Nexus API request quota (hourly and daily). Click Refresh to fetch latest.",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(padx=16, pady=(0, 6), anchor="center")
 
         rate_frame = ctk.CTkFrame(body, fg_color="transparent")
-        rate_frame.pack(padx=16, pady=4)
-
-        self._rate_limit_label = ctk.CTkLabel(
-            rate_frame, text="", font=FONT_SMALL, text_color=TEXT_DIM,
-        )
-        self._rate_limit_label.pack(side="left", padx=(0, 12))
+        rate_frame.pack(padx=16, pady=4, fill="x")
 
         self._rate_refresh_btn = ctk.CTkButton(
             rate_frame, text="Refresh", width=80, font=FONT_BOLD,
             fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
             command=self._on_refresh_rate_limits,
         )
-        self._rate_refresh_btn.pack(side="left")
+        self._rate_refresh_btn.pack(side="right")
+
+        self._rate_limit_label = ctk.CTkLabel(
+            rate_frame, text="", font=FONT_SMALL, text_color=TEXT_DIM,
+            anchor="w", justify="left",
+        )
+        self._rate_limit_label.pack(side="left", fill="x", expand=True)
         self._update_rate_limit_display()
 
         ctk.CTkFrame(body, fg_color=BORDER, height=1).pack(fill="x", padx=16, pady=4)
@@ -778,7 +786,7 @@ class NexusSettingsPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             body,
             text="Handles nxm:// links from the \"Download with Manager\" button.",
-            font=FONT_SMALL, text_color=TEXT_DIM,
+            font=FONT_SMALL, text_color=TEXT_DIM, wraplength=wrap,
         ).pack(padx=16, pady=(0, 8), anchor="center")
 
         nxm_frame = ctk.CTkFrame(body, fg_color="transparent")

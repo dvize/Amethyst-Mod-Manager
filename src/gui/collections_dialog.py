@@ -22,6 +22,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from gui.ctk_components import CTkAlert
+from gui.dialogs import CollectionInstallModeDialog
 from gui.game_helpers import (
     _create_profile,
     _profiles_for_game,
@@ -30,6 +31,7 @@ from gui.game_helpers import (
 )
 from gui.install_mod import install_mod_from_archive
 from gui.mod_card import CARD_PAD, make_placeholder_image
+from Utils.ui_config import get_ui_scale
 from gui.mod_name_utils import _suggest_mod_names
 from Utils.modlist import write_modlist, read_modlist, ModEntry
 from Utils.filemap import rebuild_mod_index
@@ -40,8 +42,8 @@ from Utils.xdg import open_url
 
 # Collections-specific card dimensions (5-column grid)
 _COLL_COLS  = 5
-_COLL_W     = 200
-_COLL_IMG_W = 190
+_COLL_W     = 220  # 200 was too narrow at 1.25x–1.5x scale; extra width avoids clipping
+_COLL_IMG_W = 210
 _COLL_IMG_H = 240
 from gui.theme import (
     BG_DEEP,
@@ -59,10 +61,12 @@ from gui.theme import (
     FONT_NORMAL,
     FONT_BOLD,
     FONT_SMALL,
+    font_sized,
+    font_sized_px,
+    scaled,
 )
 
 PAGE_SIZE    = 20
-_SUMMARY_MAX = 200
 
 
 def _topo_sort_collection(schema_mods: list[dict], mod_rules: list[dict]) -> dict[int, int]:
@@ -227,11 +231,21 @@ class CollectionCard:
     def __init__(self, parent: tk.Widget, collection, on_view: Callable):
         self._collection = collection
         self._img_label: Optional[ctk.CTkLabel] = None
+        self._coll_w = scaled(_COLL_W)
+        self._coll_img_w = scaled(_COLL_IMG_W)
+        self._coll_img_h = scaled(_COLL_IMG_H)
+        # Text area: name + stats + author only (summary moved to hover tooltip).
+        s = get_ui_scale()
+        text_h = max(50, int(90 * s))
+        # Include image pady so card height matches actual layout (image + pady + btn + text)
+        _img_pady = scaled(6) + scaled(3)
+        _btn_row_h = scaled(60)  # taller at high scale so View button is fully visible
+        self._coll_h = self._coll_img_h + _img_pady + _btn_row_h + text_h
 
         # Outer card frame — fixed size, content clips if too long.
         self.card = tk.Frame(
             parent,
-            width=_COLL_W, height=480,
+            width=self._coll_w, height=self._coll_h,
             bg=BG_PANEL,
             highlightbackground=BORDER,
             highlightthickness=1,
@@ -244,7 +258,8 @@ class CollectionCard:
     def _build(self, on_view: Callable):
         col = self._collection
 
-        # Tile image placeholder
+        # Tile image placeholder — use unscaled dims for CTkImage/CTkLabel since
+        # CTk applies set_widget_scaling internally (scaled() would double-scale).
         placeholder = make_placeholder_image(_COLL_IMG_W, _COLL_IMG_H)
         ph_ctk = ctk.CTkImage(light_image=placeholder, dark_image=placeholder,
                                size=(_COLL_IMG_W, _COLL_IMG_H))
@@ -252,60 +267,70 @@ class CollectionCard:
             self.card, image=ph_ctk, text="",
             width=_COLL_IMG_W, height=_COLL_IMG_H,
         )
-        self._img_label.pack(padx=5, pady=(6, 3))
 
-        # Button row — fixed-height footer so all cards align consistently (packed first so it's anchored to the bottom)
-        btn_frame = tk.Frame(self.card, bg=BG_PANEL, height=44)
-        btn_frame.pack(side="bottom", fill="x")
+        _btn_row_h = scaled(60)
+        text_h = self._coll_h - self._coll_img_h - scaled(6) - scaled(3) - _btn_row_h
+        text_frame = tk.Frame(self.card, bg=BG_PANEL, height=text_h)
+        text_frame.pack_propagate(False)
+
+        btn_frame = tk.Frame(self.card, bg=BG_PANEL, height=_btn_row_h)
         btn_frame.pack_propagate(False)
+        # CTk scales widget width/height via set_widget_scaling(); use unscaled design
+        # values so CTk scales once to fit the card (avoid double-scaling overflow)
+        _btn_w = _COLL_W - 20
+        _btn_h = 28
         ctk.CTkButton(
             btn_frame, text="View",
-            width=_COLL_W - 20, height=28,
+            width=_btn_w, height=_btn_h,
             fg_color=ACCENT, hover_color=ACCENT_HOV,
             text_color="#ffffff", font=FONT_SMALL,
             command=on_view,
         ).place(relx=0.5, rely=0.5, anchor="center")
 
-        # Text area — fills width, grows to fit its content
-        text_frame = tk.Frame(self.card, bg=BG_PANEL)
-        text_frame.pack(fill="x")
+        # Use grid: row0=image (fixed), row2=btn (fixed), row1=text (flexible remainder).
+        # No minsize on row1 — it gets whatever is left so btn row never overflows the card.
+        self.card.grid_rowconfigure(0, minsize=self._coll_img_h + scaled(6) + scaled(3), weight=0)
+        self.card.grid_rowconfigure(1, weight=1)
+        self.card.grid_rowconfigure(2, minsize=_btn_row_h, weight=0)
+        pad = scaled(5)
+        self._img_label.grid(row=0, column=0, padx=pad, pady=(scaled(6), scaled(3)), sticky="n")
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        btn_frame.grid(row=2, column=0, sticky="ew")
+        self.card.grid_columnconfigure(0, weight=1)
 
+        # Use tk.Label (not CTkLabel) so wraplength is in pixels with no CTk scaling
+        _wrap = self._coll_w - scaled(16)
         # Name
         name_text = col.name or f"Collection {col.id}"
-        ctk.CTkLabel(
+        tk.Label(
             text_frame, text=name_text,
-            font=FONT_BOLD, text_color=TEXT_MAIN,
-            wraplength=_COLL_W - 16, justify="left", anchor="w",
-        ).pack(padx=8, fill="x")
+            bg=BG_PANEL, fg=TEXT_MAIN,
+            font=FONT_BOLD,
+            wraplength=_wrap, justify="left", anchor="w",
+        ).pack(padx=scaled(8), fill="x")
 
         # Stats: downloads, endorsements, mod count
         stats = f"↓{col.total_downloads:,}  ♥{col.endorsements:,}  {col.mod_count} mods"
-        ctk.CTkLabel(
+        tk.Label(
             text_frame, text=stats,
-            font=FONT_SMALL, text_color=TEXT_DIM,
-            anchor="w",
-        ).pack(padx=8, fill="x")
+            bg=BG_PANEL, fg=TEXT_DIM,
+            font=FONT_SMALL,
+            anchor="w", wraplength=_wrap,
+        ).pack(padx=scaled(8), fill="x")
 
         # Author
         if col.user_name:
-            ctk.CTkLabel(
+            tk.Label(
                 text_frame, text=f"by {col.user_name}",
-                font=FONT_SMALL, text_color=TEXT_DIM,
-                anchor="w",
-            ).pack(padx=8, fill="x")
+                bg=BG_PANEL, fg=TEXT_DIM,
+                font=FONT_SMALL,
+                anchor="w", wraplength=_wrap,
+            ).pack(padx=scaled(8), fill="x")
 
-        # Summary
+        # Summary shown as a hover tooltip on the card instead of inline text.
         summary = (col.summary or "").strip()
-        if len(summary) > _SUMMARY_MAX:
-            summary = summary[:_SUMMARY_MAX].rstrip() + "…"
         if summary:
-            ctk.CTkLabel(
-                text_frame, text=summary,
-                font=FONT_SMALL, text_color=TEXT_DIM,
-                wraplength=_COLL_W - 16, justify="left", anchor="w",
-            ).pack(padx=8, pady=(2, 0), fill="x")
-
-
+            self._attach_tooltip(self.card, summary)
 
     def load_image_async(self, url: str, cache: dict, loading: set, root: tk.Widget):
         """Start async tile image load (same pattern as mod_card.py)."""
@@ -325,17 +350,19 @@ class CollectionCard:
                 r.raise_for_status()
                 from io import BytesIO
                 raw = Image.open(BytesIO(r.content)).convert("RGBA")
-                # Scale to cover the slot (zoom), then center-crop
+                # Scale to cover the slot (zoom), then center-crop.
+                # Use unscaled design dims — CTk applies set_widget_scaling internally.
                 src_w, src_h = raw.size
-                scale = max(_COLL_IMG_W / src_w, _COLL_IMG_H / src_h)
+                iw, ih = _COLL_IMG_W, _COLL_IMG_H
+                scale = max(iw / src_w, ih / src_h)
                 new_w = int(src_w * scale)
                 new_h = int(src_h * scale)
                 raw = raw.resize((new_w, new_h), Image.LANCZOS)
-                x_off = (new_w - _COLL_IMG_W) // 2
-                y_off = (new_h - _COLL_IMG_H) // 2
-                bg = raw.crop((x_off, y_off, x_off + _COLL_IMG_W, y_off + _COLL_IMG_H))
+                x_off = (new_w - iw) // 2
+                y_off = (new_h - ih) // 2
+                bg = raw.crop((x_off, y_off, x_off + iw, y_off + ih))
                 photo = ctk.CTkImage(light_image=bg, dark_image=bg,
-                                     size=(_COLL_IMG_W, _COLL_IMG_H))
+                                     size=(iw, ih))
                 cache[url] = photo
                 root.after(0, lambda: self._apply_image(photo))
             except Exception:
@@ -351,6 +378,56 @@ class CollectionCard:
                 self._img_label.configure(image=photo)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Hover tooltip for collection summary
+    # ------------------------------------------------------------------
+
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        """Attach a hover tooltip showing *text* to *widget* and all its children."""
+        self._tooltip_win: tk.Toplevel | None = None
+        self._tooltip_text = text
+
+        def _enter(event):
+            if self._tooltip_win is not None:
+                return
+            tw = tk.Toplevel(widget)
+            tw.overrideredirect(True)
+            tw.attributes("-alpha", 0.95)
+            tw.configure(bg=BG_DEEP)
+            wrap = min(scaled(340), scaled(int(self._coll_w * 1.4)))
+            tk.Label(
+                tw, text=self._tooltip_text,
+                bg=BG_DEEP, fg=TEXT_MAIN,
+                font=FONT_SMALL,
+                wraplength=wrap, justify="left",
+                padx=scaled(8), pady=scaled(6),
+            ).pack()
+            # Position near cursor, keep on-screen
+            x = event.x_root + scaled(12)
+            y = event.y_root + scaled(12)
+            tw.update_idletasks()
+            sw = tw.winfo_screenwidth()
+            sh = tw.winfo_screenheight()
+            if x + tw.winfo_reqwidth() > sw:
+                x = event.x_root - tw.winfo_reqwidth() - scaled(4)
+            if y + tw.winfo_reqheight() > sh:
+                y = event.y_root - tw.winfo_reqheight() - scaled(4)
+            tw.geometry(f"+{x}+{y}")
+            self._tooltip_win = tw
+
+        def _leave(event):
+            if self._tooltip_win:
+                self._tooltip_win.destroy()
+                self._tooltip_win = None
+
+        def _bind_recursive(w: tk.Widget) -> None:
+            w.bind("<Enter>", _enter, add="+")
+            w.bind("<Leave>", _leave, add="+")
+            for child in w.winfo_children():
+                _bind_recursive(child)
+
+        _bind_recursive(widget)
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +549,7 @@ class CollectionDetailDialog(tk.Frame):
     """
 
     _TV_COLS = ("Order", "Mod Name", "Author", "File", "Size", "Opt")
-    _TV_WIDTHS = (50, 250, 120, 200, 80, 40)
+    _TV_WIDTHS_BASE = (50, 250, 120, 200, 80, 40)
 
     def __init__(self, parent, collection, game_domain: str, api, game=None, app_root=None, log_fn=None, on_close=None, profile_dir=None):
         super().__init__(parent, bg=BG_DEEP)
@@ -510,14 +587,14 @@ class CollectionDetailDialog(tk.Frame):
         tk.Label(
             hdr, textvariable=self._name_var,
             bg=BG_HEADER, fg=TEXT_MAIN,
-            font=("Segoe UI", 13, "bold"),
+            font=font_sized_px("Segoe UI", 13, "bold"),
             anchor="w",
         ).pack(side="left", padx=14)
 
         tk.Label(
             hdr, textvariable=self._size_var,
             bg=BG_HEADER, fg=TEXT_DIM,
-            font=("Segoe UI", 10),
+            font=font_sized_px("Segoe UI", 10),
             anchor="e",
         ).pack(side="right", padx=14)
 
@@ -525,7 +602,7 @@ class CollectionDetailDialog(tk.Frame):
         self._status_lbl = tk.Label(
             self, textvariable=self._status_var,
             bg=BG_DEEP, fg=TEXT_DIM,
-            font=("Segoe UI", 9),
+            font=font_sized_px("Segoe UI", 9),
             anchor="w", bd=0, highlightthickness=0,
         )
         self._status_lbl.pack(fill="x", side="top", padx=10, pady=(4, 0))
@@ -549,17 +626,18 @@ class CollectionDetailDialog(tk.Frame):
         # Do NOT call theme_use() here — it changes the global ttk theme and
         # breaks every other ttk widget in the application.
         style = ttk.Style()
+        import gui.theme as _theme
         style.configure(
             "CollDetail.Treeview",
             background=BG_PANEL, foreground=TEXT_MAIN,
-            fieldbackground=BG_PANEL, rowheight=24,
-            font=("Segoe UI", 9),
+            fieldbackground=BG_PANEL, rowheight=scaled(24),
+            font=("Segoe UI", _theme.FS9),
             borderwidth=0, relief="flat",
         )
         style.configure(
             "CollDetail.Treeview.Heading",
             background=BG_HEADER, foreground=TEXT_MAIN,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", _theme.FS9, "bold"),
             borderwidth=0, relief="flat",
         )
         style.map(
@@ -591,11 +669,12 @@ class CollectionDetailDialog(tk.Frame):
         self._tree.pack(fill="both", expand=True)
 
         # Column headings + widths
-        for col_id, width in zip(self._TV_COLS, self._TV_WIDTHS):
+        tv_widths = tuple(scaled(w) for w in self._TV_WIDTHS_BASE)
+        for col_id, width in zip(self._TV_COLS, tv_widths):
             anchor = "center" if col_id == "Order" else "w"
             self._tree.heading(col_id, text=col_id, anchor=anchor)
             stretch = col_id in ("Mod Name", "File")
-            self._tree.column(col_id, width=width, minwidth=30, anchor=anchor, stretch=stretch)
+            self._tree.column(col_id, width=width, minwidth=scaled(30), anchor=anchor, stretch=stretch)
 
         self._tree.tag_configure("odd", background=BG_ROW)
         self._tree.tag_configure("even", background=BG_PANEL)
@@ -605,7 +684,7 @@ class CollectionDetailDialog(tk.Frame):
         # --- Priority note ---
         note = tk.Label(
             self, text="Order = author's install order  (↓ installed last = highest priority)",
-            bg=BG_DEEP, fg=TEXT_DIM, font=("Segoe UI", 8), anchor="w",
+            bg=BG_DEEP, fg=TEXT_DIM, font=font_sized_px("Segoe UI", 8), anchor="w",
         )
         note.pack(fill="x", side="top", padx=10, pady=(0, 2))
 
@@ -615,44 +694,33 @@ class CollectionDetailDialog(tk.Frame):
 
         ctk.CTkButton(
             ftr, text="Close",
-            height=30, fg_color="#3c3c3c", hover_color="#505050",
-            text_color=TEXT_MAIN, font=("Segoe UI", 10),
+            height=scaled(30), fg_color="#3c3c3c", hover_color="#505050",
+            text_color=TEXT_MAIN, font=font_sized("Segoe UI", 10),
             border_width=0,
             command=self._on_close,
         ).pack(side="right", padx=10, pady=6)
 
         ctk.CTkButton(
             ftr, text="Install Collection",
-            height=30, fg_color="#2d7a2d", hover_color="#3a9e3a",
-            text_color="#ffffff", font=("Segoe UI", 10, "bold"),
+            height=scaled(30), fg_color="#2d7a2d", hover_color="#3a9e3a",
+            text_color="#ffffff", font=font_sized("Segoe UI", 10, "bold"),
             border_width=0,
             command=self._on_install_collection,
         ).pack(side="right", padx=(10, 0), pady=6)
 
-        self._clear_cache_btn = ctk.CTkButton(
-            ftr, text="Clear Cache (—)",
-            height=30, fg_color="#5a3a00", hover_color="#7a5200",
-            text_color="#ffffff", font=("Segoe UI", 10),
-            border_width=0,
-            command=self._on_clear_cache,
-        )
-        self._clear_cache_btn.pack(side="right", padx=(10, 0), pady=6)
-
         self._open_missing_btn = ctk.CTkButton(
             ftr, text="Open Missing on Nexus",
-            height=30, fg_color="#5a3a00", hover_color="#7a5200",
-            text_color="#ffffff", font=("Segoe UI", 10),
+            height=scaled(30), fg_color="#5a3a00", hover_color="#7a5200",
+            text_color="#ffffff", font=font_sized("Segoe UI", 10),
             border_width=0,
             command=self._on_open_missing_on_nexus,
         )
         # Shown only when collection is installed and has missing mods; see _update_open_missing_btn_visibility()
 
-        self.after(100, self._refresh_cache_size)
-
         self._reset_btn = ctk.CTkButton(
             ftr, text="Reset Load Order",
-            height=30, fg_color="#5a3a00", hover_color="#7a5200",
-            text_color="#ffffff", font=("Segoe UI", 10),
+            height=scaled(30), fg_color="#5a3a00", hover_color="#7a5200",
+            text_color="#ffffff", font=font_sized("Segoe UI", 10),
             border_width=0,
             command=self._on_reset_load_order,
         )
@@ -716,6 +784,11 @@ class CollectionDetailDialog(tk.Frame):
                 pass
 
     def _populate(self, collection_name: str, total_size: int, mod_count: int, mods, dl_path: str = "", schema_order=None):
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
         schema_order = schema_order or {}
         self._name_var.set(collection_name)
         self._size_var.set(f"Total size: {_fmt_size(total_size)}  |  {mod_count:,} mods")
@@ -847,26 +920,62 @@ class CollectionDetailDialog(tk.Frame):
         if not self._game:
             return
 
-        # Sanitise collection name → profile name
-        raw = self._collection.name or self._collection.slug or "Collection"
-        profile_name = re.sub(r"[^\w\s\-]", "", raw).strip().replace(" ", "_")[:64] or "Collection"
+        existing_profiles = _profiles_for_game(self._game.name)
+        plugin_panel = getattr(app, "_plugin_panel", None)
+        overlay_parent = plugin_panel if plugin_panel is not None else self
 
-        self._status_var.set(f"Creating profile '{profile_name}'…")
-        try:
-            profile_dir = _create_profile(
-                self._game.name, profile_name, profile_specific_mods=True
-            )
-        except Exception as exc:
-            self._status_var.set(f"Profile creation failed: {exc}")
+        def _on_mode_chosen(result):
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
+            if result is None:
+                self._status_var.set("Install cancelled.")
+                return
+            self._finish_install_collection(app, mods, downloader, result)
+
+        overlay = CollectionInstallModeDialog(overlay_parent, existing_profiles, _on_mode_chosen)
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+
+    def _finish_install_collection(self, app, mods, downloader, mode_result):
+        """Called after the install-mode overlay is dismissed."""
+        if not self._game:
             return
 
-        self._log(f"Collection install: created profile '{profile_name}' at {profile_dir}")
-        # Store collection URL in profile_settings.json for "Open Current" button
-        game_domain = getattr(self._game, "nexus_game_domain", None) or self._game_domain
-        collection_url = f"https://www.nexusmods.com/{game_domain}/collections/{self._collection.slug}"
-        save_collection_url_to_profile(profile_dir, collection_url)
-        # Refresh the profile dropdown immediately so the new profile is visible
-        self._refresh_profile_menu()
+        mode, append_profile_name, overwrite_existing = mode_result
+
+        if mode == "new":
+            # Sanitise collection name → profile name
+            raw = self._collection.name or self._collection.slug or "Collection"
+            profile_name = re.sub(r"[^\w\s\-]", "", raw).strip().replace(" ", "_")[:64] or "Collection"
+
+            self._status_var.set(f"Creating profile '{profile_name}'…")
+            try:
+                profile_dir = _create_profile(
+                    self._game.name, profile_name, profile_specific_mods=True
+                )
+            except Exception as exc:
+                self._status_var.set(f"Profile creation failed: {exc}")
+                return
+
+            self._log(f"Collection install: created profile '{profile_name}' at {profile_dir}")
+            # Store collection URL in profile_settings.json for "Open Current" button
+            game_domain = getattr(self._game, "nexus_game_domain", None) or self._game_domain
+            collection_url = f"https://www.nexusmods.com/{game_domain}/collections/{self._collection.slug}"
+            save_collection_url_to_profile(profile_dir, collection_url)
+            # Refresh the profile dropdown immediately so the new profile is visible
+            self._refresh_profile_menu()
+        else:
+            # Append into an existing profile
+            profile_name = append_profile_name
+            profile_root = self._game.get_profile_root()
+            profile_dir = profile_root / "profiles" / profile_name
+            if not profile_dir.is_dir():
+                self._status_var.set(f"Profile '{profile_name}' not found.")
+                return
+            self._log(f"Collection install: appending into existing profile '{profile_name}' at {profile_dir}")
+
         self._status_var.set(f"Starting install of {len(mods)} mods into '{profile_name}'…")
 
         # Save the old profile dir so we can restore it after install
@@ -882,11 +991,12 @@ class CollectionDetailDialog(tk.Frame):
                 downloader,
                 app,
                 len(mods),
+                None if mode == "new" else overwrite_existing,
             ),
             daemon=True,
         ).start()
 
-    def _run_install(self, mods, download_link_path, profile_dir, old_profile, downloader, app, total):
+    def _run_install(self, mods, download_link_path, profile_dir, old_profile, downloader, app, total, overwrite_existing: "bool | None" = None):
         """Background thread: download then install each mod in collection-defined order.
 
         Load order is driven by ``collection.json`` from the collection archive:
@@ -1259,6 +1369,7 @@ class CollectionDetailDialog(tk.Frame):
                     headless=True,
                     preferred_name=_preferred,
                     skip_index_update=True,
+                    overwrite_existing=overwrite_existing,
                 )
             finally:
                 if _large_sem is not None:
@@ -1347,25 +1458,29 @@ class CollectionDetailDialog(tk.Frame):
 
         # ------------------------------------------------------------------
         # Step 3: Write modlist.txt in collection-defined order
-        # Position 0 = highest priority (topo sort) → first in modlist.txt
+        # Skipped when appending into an existing profile — the user's
+        # existing load order is preserved; new mods are added by
+        # install_mod_from_archive via ensure_mod_preserving_position.
         # ------------------------------------------------------------------
-        install_order.sort(key=lambda x: x[0])
-        modlist_entries = [
-            ModEntry(name=folder, enabled=True, locked=False)
-            for _, folder in install_order
-        ]
-        if modlist_entries:
-            try:
-                write_modlist(modlist_path, modlist_entries)
-                self._log(f"Collection install: wrote modlist.txt with {len(modlist_entries)} entries")
-            except Exception as exc:
-                self._log(f"Collection install: failed to write modlist.txt: {exc}")
+        if overwrite_existing is None:
+            install_order.sort(key=lambda x: x[0])
+            modlist_entries = [
+                ModEntry(name=folder, enabled=True, locked=False)
+                for _, folder in install_order
+            ]
+            if modlist_entries:
+                try:
+                    write_modlist(modlist_path, modlist_entries)
+                    self._log(f"Collection install: wrote modlist.txt with {len(modlist_entries)} entries")
+                except Exception as exc:
+                    self._log(f"Collection install: failed to write modlist.txt: {exc}")
 
         # ------------------------------------------------------------------
         # Step 4: Write plugins.txt from collection.json if available
+        # Also skipped when appending — existing plugin order is preserved.
         # ------------------------------------------------------------------
         schema_plugins: list[dict] = collection_schema.get("plugins", [])
-        if schema_plugins:
+        if schema_plugins and overwrite_existing is None:
             try:
                 lines = []
                 for plugin in schema_plugins:
@@ -1530,84 +1645,6 @@ class CollectionDetailDialog(tk.Frame):
         for mod_id in sorted(missing):
             url = f"https://www.nexusmods.com/{self._game_domain}/mods/{mod_id}"
             open_url(url)
-
-    def _refresh_cache_size(self):
-        """Update the Clear Cache button text with the current cache folder size."""
-        cache_dir = get_download_cache_dir()
-
-        def _worker():
-            size = _get_dir_size(cache_dir)
-            try:
-                self.after(0, lambda: self._update_clear_cache_btn(size))
-            except Exception:
-                pass
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _update_clear_cache_btn(self, size_bytes: int):
-        """Update the Clear Cache button label (call from main thread)."""
-        try:
-            if hasattr(self, "_clear_cache_btn") and self._clear_cache_btn.winfo_exists():
-                self._clear_cache_btn.configure(text=f"Clear Cache ({_fmt_size(size_bytes)})")
-        except Exception:
-            pass
-
-    def _on_clear_cache(self):
-        """Clear the download cache after user confirmation."""
-        cache_dir = get_download_cache_dir()
-        if not cache_dir.is_dir():
-            self._status_var.set("Download cache is empty.")
-            self._refresh_cache_size()
-            return
-
-        size = _get_dir_size(cache_dir)
-        if size <= 0:
-            self._status_var.set("Download cache is empty.")
-            self._refresh_cache_size()
-            return
-
-        alert = CTkAlert(
-            state="warning",
-            title="Clear Download Cache",
-            body_text=(
-                f"Clear {_fmt_size(size)} of cached downloads?\n\n"
-                f"Location: {cache_dir}\n\n"
-                "This removes archives downloaded for collection installs. "
-                "They will be re-downloaded if you install collections again."
-            ),
-            btn1="Clear",
-            btn2="Cancel",
-            parent=self.winfo_toplevel(),
-            height=280,
-        )
-        if alert.get() != "Clear":
-            return
-
-        def _worker():
-            cleared = 0
-            try:
-                for p in cache_dir.iterdir():
-                    try:
-                        if p.is_file():
-                            p.unlink(missing_ok=True)
-                            cleared += 1
-                        elif p.is_dir():
-                            import shutil
-                            shutil.rmtree(p, ignore_errors=True)
-                            cleared += 1
-                    except OSError:
-                        pass
-                self.after(0, lambda: self._on_clear_cache_done(cleared))
-            except Exception as exc:
-                self.after(0, lambda: self._status_var.set(f"Clear cache failed: {exc}"))
-
-        self._status_var.set("Clearing cache…")
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_clear_cache_done(self, items_cleared: int):
-        """Called after cache clear completes."""
-        self._status_var.set(f"Cache cleared ({items_cleared} items removed).")
-        self._refresh_cache_size()
 
     def _on_reset_load_order(self):
         """Show confirmation then launch background reset thread."""
@@ -1834,19 +1871,19 @@ class CollectionsDialog(tk.Frame):
         self.grid_columnconfigure(0, weight=1)
 
         # Toolbar
-        toolbar = tk.Frame(self, bg=BG_HEADER, height=28)
+        toolbar = tk.Frame(self, bg=BG_HEADER, height=scaled(28))
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.grid_propagate(False)
 
         # Close button — top-right, returns to modlist
         ctk.CTkButton(
-            toolbar, text="✕ Close", width=72, height=26,
+            toolbar, text="✕ Close", width=scaled(72), height=scaled(26),
             fg_color="#b33a3a", hover_color="#c94848", text_color="white",
             font=FONT_HEADER, command=self._do_close,
         ).pack(side="right", padx=(4, 8), pady=2)
 
         self._prev_btn = ctk.CTkButton(
-            toolbar, text="← Prev", width=70, height=26,
+            toolbar, text="← Prev", width=scaled(70), height=scaled(26),
             fg_color="#c37800", hover_color="#e28b00", text_color="white",
             font=FONT_HEADER, command=self._go_prev_page,
             state="disabled",
@@ -1854,7 +1891,7 @@ class CollectionsDialog(tk.Frame):
         self._prev_btn.pack(side="left", padx=(8, 4), pady=2)
 
         self._next_btn = ctk.CTkButton(
-            toolbar, text="Next →", width=52, height=26,
+            toolbar, text="Next →", width=scaled(52), height=scaled(26),
             fg_color="#c37800", hover_color="#e28b00", text_color="white",
             font=FONT_HEADER, command=self._go_next_page,
             state="disabled",
@@ -1862,7 +1899,7 @@ class CollectionsDialog(tk.Frame):
         self._next_btn.pack(side="left", padx=4, pady=2)
 
         self._open_current_btn = ctk.CTkButton(
-            toolbar, text="Open Current", width=95, height=26,
+            toolbar, text="Open Current", width=scaled(95), height=scaled(26),
             fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
             font=FONT_HEADER, command=self._open_current_collection,
         )
@@ -1871,7 +1908,7 @@ class CollectionsDialog(tk.Frame):
         self._update_open_current_visibility()
 
         self._url_toggle_btn = ctk.CTkButton(
-            toolbar, text="Open URL…", width=90, height=26,
+            toolbar, text="Open URL…", width=scaled(90), height=scaled(26),
             fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
             font=FONT_HEADER, command=self._toggle_url_bar,
         )
@@ -1884,7 +1921,7 @@ class CollectionsDialog(tk.Frame):
         self._status_label.pack(side="left", padx=8, fill="x", expand=True)
 
         # URL bar (hidden by default — shown when "Open URL" button is pressed)
-        self._url_bar = tk.Frame(self, bg=BG_HEADER, height=30)
+        self._url_bar = tk.Frame(self, bg=BG_HEADER, height=scaled(30))
         self._url_bar.grid(row=1, column=0, sticky="ew")
         self._url_bar.grid_propagate(False)
         self._url_bar.grid_remove()   # hidden until toggled
@@ -1899,7 +1936,7 @@ class CollectionsDialog(tk.Frame):
             self._url_bar,
             textvariable=self._url_var,
             fg_color=BG_ROW, text_color=TEXT_MAIN,
-            font=FONT_SMALL, height=26,
+            font=FONT_SMALL, height=scaled(26),
             border_width=0,
         )
         self._url_entry.pack(side="left", fill="x", expand=True, pady=4)
@@ -1911,13 +1948,13 @@ class CollectionsDialog(tk.Frame):
         self._url_entry.bind("<Escape>", lambda _e: self._toggle_url_bar())
 
         ctk.CTkButton(
-            self._url_bar, text="Go", width=40, height=26,
+            self._url_bar, text="Go", width=scaled(40), height=scaled(26),
             fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
             font=FONT_HEADER, command=self._go_from_url,
         ).pack(side="left", padx=4, pady=4)
 
         ctk.CTkButton(
-            self._url_bar, text="✕", width=32, height=26,
+            self._url_bar, text="✕", width=scaled(32), height=scaled(26),
             fg_color="#b33a3a", hover_color="#c94848", text_color="white",
             font=FONT_HEADER, command=self._toggle_url_bar,
         ).pack(side="left", padx=(0, 8), pady=4)
@@ -1946,13 +1983,14 @@ class CollectionsDialog(tk.Frame):
 
         self._inner.bind("<Configure>", self._on_inner_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self._canvas.bind("<Map>", self._on_canvas_map)
         for w in (self._canvas, self._inner):
             w.bind("<Button-4>",   lambda e: self._scroll(-80))
             w.bind("<Button-5>",   lambda e: self._scroll(80))
             w.bind("<MouseWheel>", self._on_mousewheel)
 
         # Search bar
-        search_bar = tk.Frame(self, bg=BG_HEADER, height=30)
+        search_bar = tk.Frame(self, bg=BG_HEADER, height=scaled(30))
         search_bar.grid(row=3, column=0, sticky="ew")
         search_bar.grid_propagate(False)
 
@@ -1966,7 +2004,7 @@ class CollectionsDialog(tk.Frame):
             search_bar,
             textvariable=self._search_var,
             fg_color=BG_ROW, text_color=TEXT_MAIN,
-            font=FONT_SMALL, height=26,
+            font=FONT_SMALL, height=scaled(26),
             border_width=0,
         )
         self._search_entry.pack(side="left", fill="x", expand=True, pady=4, padx=(0, 4))
@@ -1977,14 +2015,14 @@ class CollectionsDialog(tk.Frame):
         )
 
         self._search_btn = ctk.CTkButton(
-            search_bar, text="Search", width=64, height=26,
+            search_bar, text="Search", width=scaled(64), height=scaled(26),
             fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
             font=FONT_HEADER, command=self._do_search,
         )
         self._search_btn.pack(side="left", padx=2, pady=4)
 
         self._clear_btn = ctk.CTkButton(
-            search_bar, text="✕", width=32, height=26,
+            search_bar, text="✕", width=scaled(32), height=scaled(26),
             fg_color="#b33a3a", hover_color="#c94848", text_color="white",
             font=FONT_HEADER, command=self._clear_search,
         )
@@ -2070,13 +2108,25 @@ class CollectionsDialog(tk.Frame):
     # ------------------------------------------------------------------
 
     def _on_inner_configure(self, _event=None):
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        self._canvas.configure(scrollregion=(
+            0, 0, self._inner.winfo_reqwidth(), self._inner.winfo_reqheight(),
+        ))
 
     def _on_canvas_configure(self, event):
-        self._canvas.itemconfig(self._inner_id, width=event.width)
         if hasattr(self, '_regrid_after_id') and self._regrid_after_id:
             self.after_cancel(self._regrid_after_id)
-        self._regrid_after_id = self.after(250, self._regrid_cards)
+        self._regrid_after_id = self.after(50, self._schedule_regrid)
+
+    def _on_canvas_map(self, _event=None):
+        """Re-grid when canvas becomes visible (e.g. after restore from minimized)."""
+        if self._regrid_after_id:
+            self.after_cancel(self._regrid_after_id)
+        self._regrid_after_id = self.after(150, self._schedule_regrid)
+
+    def _schedule_regrid(self):
+        self._regrid_after_id = None
+        self._canvas.update_idletasks()
+        self._regrid_cards()
 
     def _scroll(self, units: int):
         self._canvas.yview_scroll(units, "units")
@@ -2135,26 +2185,32 @@ class CollectionsDialog(tk.Frame):
             self._detail_panel = None
 
     def _regrid_cards(self):
-        canvas_w = self._canvas.winfo_width() or (_COLL_COLS * (_COLL_W + CARD_PAD * 2))
-        # Compute how many fixed-width cards fit across the available width
-        cols = max(1, canvas_w // (_COLL_W + CARD_PAD * 2))
-        self._cols = cols
+        coll_w = scaled(_COLL_W)
+        col_gap = scaled(4)  # gap between columns
+        slot_w = coll_w + col_gap * 2
+        canvas_w = self._canvas.winfo_width() or (_COLL_COLS * slot_w)
+        self._cols = max(1, canvas_w // slot_w)
 
-        total_card_w = cols * _COLL_W + (cols - 1) * CARD_PAD
-        x_pad = max(CARD_PAD, (canvas_w - total_card_w) // 2)
+        # Inner frame = content width; center it in canvas by positioning the window
+        content_w = self._cols * slot_w
+        self._canvas.itemconfig(self._inner_id, width=content_w)
+        x_off = max(0, (canvas_w - content_w) // 2)
+        self._canvas.coords(self._inner_id, x_off, 0)
 
+        # Grid: simple columns, no spacers (centering done via canvas window position)
+        for c in range(self._cols):
+            self._inner.grid_columnconfigure(c, weight=0, minsize=slot_w)
+
+        _pad = col_gap
         for idx, c in enumerate(self._cards):
-            col = idx % cols
-            row = idx // cols
+            col = idx % self._cols
+            row = idx // self._cols
             c.card.grid(
                 row=row, column=col,
-                padx=(x_pad if col == 0 else CARD_PAD // 2,
-                       x_pad if col == cols - 1 else CARD_PAD // 2),
-                pady=CARD_PAD,
+                padx=(_pad, _pad),
+                pady=scaled(CARD_PAD),
                 sticky="n",
             )
-        for c in range(cols):
-            self._inner.grid_columnconfigure(c, weight=1)
 
     def _load_images(self):
         for card in self._cards:

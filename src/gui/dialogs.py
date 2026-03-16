@@ -35,6 +35,8 @@ from gui.theme import (
     FONT_MONO,
     FONT_NORMAL,
     FONT_SMALL,
+    font_sized_px,
+    scaled,
     TEXT_DIM,
     TEXT_MAIN,
     TEXT_SEP,
@@ -80,6 +82,18 @@ def _center_dialog(dlg, parent, w: int, h: int):
         dlg.geometry(f"{w}x{h}+{x}+{y}")
     except Exception:
         dlg.geometry(f"{w}x{h}")
+
+
+def _center_crop_to_square(img: "_PilImage.Image", size: int) -> "_PilImage.Image":
+    """Scale image to cover a size×size square, then center-crop. Returns square PIL Image."""
+    src_w, src_h = img.size
+    scale = max(size / src_w, size / src_h)
+    new_w, new_h = int(src_w * scale), int(src_h * scale)
+    resample = _PilImage.Resampling.LANCZOS if hasattr(_PilImage, "Resampling") else _PilImage.LANCZOS  # type: ignore
+    img = img.resize((new_w, new_h), resample)
+    x_off = (new_w - size) // 2
+    y_off = (new_h - size) // 2
+    return img.crop((x_off, y_off, x_off + size, y_off + size))
 
 
 def ask_yes_no(title: str, message: str, parent=None) -> bool:
@@ -172,11 +186,12 @@ def _build_tree_str(paths: list[str]) -> str:
 # Game picker dialog — card grid
 # ---------------------------------------------------------------------------
 class _GamePickerDialog(ctk.CTkToplevel):
-    _CARD_W  = 160
+    _CARD_W  = 175  # no scale() — use design dimensions
     _CARD_H  = 200
     _IMG_H   = 130
+    _IMG_SQ  = 130  # square image slot — avoids vertical stretch at high UI scale
     _COLS    = 4
-    _PAD     = 12
+    _PAD     = 6    # smaller gap so rightmost card isn't cut off at high UI scale
 
     def __init__(self, parent, game_names: list[str], games: dict | None = None,
                  show_download_custom_handler_fn=None):
@@ -254,9 +269,12 @@ class _GamePickerDialog(ctk.CTkToplevel):
         ).pack(side="left", padx=4, pady=10)
 
         cols = self._COLS
-        w = cols * (self._CARD_W + self._PAD) + self._PAD + 8
+        _pad = scaled(self._PAD)
+        slot_w = scaled(self._CARD_W + self._PAD * 2)
+        slot_h = scaled(self._CARD_H + self._PAD)
+        w = cols * slot_w + _pad + 8
         rows_count = (len(game_names) + cols - 1) // cols
-        content_h = rows_count * (self._CARD_H + self._PAD) + self._PAD
+        content_h = rows_count * slot_h + _pad
         h = min(max(300, content_h + 120), 700)
         owner = parent
         x = owner.winfo_rootx() + (owner.winfo_width()  - w) // 2
@@ -277,6 +295,8 @@ class _GamePickerDialog(ctk.CTkToplevel):
         game = self._games.get(name)
         game_id = game.game_id if game else name.lower().replace(" ", "_")
 
+        _img_sz = scaled(self._IMG_SQ)  # image scales with UI (tk.Frame uses actual pixels)
+        # CTk scales widget dimensions; use unscaled design values so we scale once (like browse panel)
         card = ctk.CTkFrame(
             parent,
             fg_color=BG_PANEL,
@@ -286,21 +306,22 @@ class _GamePickerDialog(ctk.CTkToplevel):
             width=self._CARD_W,
             height=self._CARD_H,
         )
+        card.grid_propagate(False)
+        _pad = scaled(self._PAD)
         card.grid(
             row=row, column=col,
-            padx=(self._PAD if col == 0 else self._PAD // 2, self._PAD // 2),
-            pady=(self._PAD, 0),
-            sticky="nsew",
+            padx=(_pad if col == 0 else _pad // 2, _pad // 2),
+            pady=(_pad, 0),
+            sticky="n",
         )
-        card.grid_propagate(False)
         card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=0, minsize=_img_sz)
+        card.grid_rowconfigure(1, weight=0, minsize=32)
+        card.grid_rowconfigure(2, weight=0)
 
-        # Game image
-        img_frame = ctk.CTkFrame(card, fg_color=BG_DEEP, corner_radius=6,
-                                  width=self._CARD_W - 8, height=self._IMG_H)
-        img_frame.grid(row=0, column=0, padx=4, pady=(4, 0), sticky="nsew")
-        img_frame.grid_propagate(False)
+        img_frame = tk.Frame(card, bg=BG_DEEP, width=_img_sz, height=_img_sz)
+        img_frame.grid(row=0, column=0, padx=4, pady=(4, 0), sticky="n")
+        img_frame.pack_propagate(False)
 
         img_path = self._icons_dir / f"{game_id}.png"
         if not img_path.is_file():
@@ -313,21 +334,21 @@ class _GamePickerDialog(ctk.CTkToplevel):
                 img_path = custom_img
         if img_path.is_file():
             raw = _PilImage.open(img_path).convert("RGBA")
-            tw, th = self._CARD_W - 8, self._IMG_H
-            raw.thumbnail((tw, th), _PilImage.LANCZOS)
-            ctk_img = ctk.CTkImage(light_image=raw, dark_image=raw, size=(raw.width, raw.height))
-            self._img_refs.append(ctk_img)
-            img_lbl = ctk.CTkLabel(img_frame, image=ctk_img, text="")
+            raw = _center_crop_to_square(raw, self._IMG_SQ)
+            raw = raw.resize((_img_sz, _img_sz), _PilImage.Resampling.LANCZOS if hasattr(_PilImage, "Resampling") else _PilImage.LANCZOS)  # type: ignore
+            photo = _PilTk.PhotoImage(raw.convert("RGB"))
+            self._img_refs.append(photo)
+            img_lbl = tk.Label(img_frame, image=photo, bg=BG_DEEP)
         else:
-            img_lbl = ctk.CTkLabel(img_frame, text="?", font=("Segoe UI", 36, "bold"),
-                                   text_color=TEXT_DIM)
+            img_lbl = tk.Label(img_frame, text="?", font=("Segoe UI", 36, "bold"),
+                              fg=TEXT_DIM, bg=BG_DEEP)
         img_lbl.place(relx=0.5, rely=0.5, anchor="center")
 
         # Register so live image updates can find this card
         self._img_labels[game_id] = (img_lbl, img_frame)
         ctk.CTkLabel(
             card, text=name, font=("Segoe UI", 12, "bold"), text_color=TEXT_MAIN,
-            wraplength=self._CARD_W - 10, anchor="center", justify="center",
+            wraplength=scaled(self._CARD_W - 8), anchor="center", justify="center",
         ).grid(row=1, column=0, padx=4, pady=(4, 2), sticky="ew")
 
         # Add / Select button
@@ -373,11 +394,12 @@ class _GamePickerDialog(ctk.CTkToplevel):
                 return
             try:
                 raw = _PilImage.open(img_path).convert("RGBA")
-                tw, th = self._CARD_W - 8, self._IMG_H
-                raw.thumbnail((tw, th), _PilImage.LANCZOS)
-                ctk_img = ctk.CTkImage(light_image=raw, dark_image=raw, size=(raw.width, raw.height))
-                self._img_refs.append(ctk_img)
-                img_lbl.configure(image=ctk_img, text="")
+                raw = _center_crop_to_square(raw, self._IMG_SQ)
+                sz = scaled(self._IMG_SQ)
+                raw = raw.resize((sz, sz), _PilImage.Resampling.LANCZOS if hasattr(_PilImage, "Resampling") else _PilImage.LANCZOS)  # type: ignore
+                photo = _PilTk.PhotoImage(raw.convert("RGB"))
+                self._img_refs.append(photo)
+                img_lbl.configure(image=photo, text="")
             except Exception:
                 pass
         self.after(0, _apply)
@@ -426,10 +448,11 @@ class GamePickerPanel(tk.Frame):
         Called when the user clicks the "✕ Cancel" / Close button.
     """
 
-    _CARD_W = 160
+    _CARD_W = 175
     _CARD_H = 200
     _IMG_H  = 130
-    _PAD    = 12
+    _IMG_SQ = 130   # square image slot — no scale() to avoid layout/clipping issues
+    _PAD    = 6     # smaller gap so rightmost card isn't cut off at high UI scale
 
     def __init__(
         self,
@@ -476,23 +499,23 @@ class GamePickerPanel(tk.Frame):
         self.grid_columnconfigure(0, weight=1)
 
         # ---- Title bar ----
-        title_bar = tk.Frame(self, bg=BG_HEADER, height=40)
+        title_bar = tk.Frame(self, bg=BG_HEADER, height=scaled(40))
         title_bar.grid(row=0, column=0, sticky="ew")
         title_bar.grid_propagate(False)
 
         tk.Label(
             title_bar, text="Add Game",
-            font=FONT_BOLD, fg=TEXT_MAIN, bg=BG_HEADER, anchor="w",
-        ).pack(side="left", padx=12, pady=8)
+            font=font_sized_px("Segoe UI", 14, "bold"), fg=TEXT_MAIN, bg=BG_HEADER, anchor="w",
+        ).pack(side="left", padx=scaled(12), pady=scaled(8))
 
         tk.Button(
             title_bar, text="✕  Cancel",
             bg="#6b3333", fg="#ffffff", activebackground="#8c4444",
             activeforeground="#ffffff",
-            relief="flat", font=FONT_SMALL,
+            relief="flat", font=font_sized_px("Segoe UI", 12),
             bd=0, highlightthickness=0, cursor="hand2",
             command=self._on_cancel,
-        ).pack(side="right", padx=(4, 12), pady=6)
+        ).pack(side="right", padx=(scaled(4), scaled(12)), pady=scaled(6))
 
         # Separator under title bar
         tk.Frame(self, bg=BORDER, height=1).grid(row=0, column=0, sticky="ews")
@@ -500,27 +523,34 @@ class GamePickerPanel(tk.Frame):
         # ---- Subtitle ----
         tk.Label(
             self, text="Select a game to add:",
-            font=FONT_BOLD, fg=TEXT_MAIN, bg=BG_DEEP, anchor="w",
-        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 2))
+            font=font_sized_px("Segoe UI", 14, "bold"), fg=TEXT_MAIN, bg=BG_DEEP, anchor="w",
+        ).grid(row=1, column=0, sticky="ew", padx=scaled(16), pady=(scaled(8), scaled(2)))
 
         # ---- Scrollable canvas ----
         canvas_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
         canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
+        canvas_frame.grid_rowconfigure(1, weight=0)
         canvas_frame.grid_columnconfigure(0, weight=1)
 
         self._canvas = tk.Canvas(
             canvas_frame, bg=BG_DEEP, bd=0,
-            highlightthickness=0, yscrollincrement=4, takefocus=0,
+            highlightthickness=0, yscrollincrement=4, xscrollincrement=4, takefocus=0,
         )
         vsb = tk.Scrollbar(
             canvas_frame, orient="vertical", command=self._canvas.yview,
             bg="#383838", troughcolor=BG_DEEP, activebackground=ACCENT,
             highlightthickness=0, bd=0,
         )
-        self._canvas.configure(yscrollcommand=vsb.set)
+        hsb = tk.Scrollbar(
+            canvas_frame, orient="horizontal", command=self._canvas.xview,
+            bg="#383838", troughcolor=BG_DEEP, activebackground=ACCENT,
+            highlightthickness=0, bd=0,
+        )
+        self._canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self._canvas.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
 
         self._inner = ctk.CTkFrame(self._canvas, fg_color=BG_DEEP)
         self._inner_id = self._canvas.create_window(
@@ -531,15 +561,16 @@ class GamePickerPanel(tk.Frame):
         self._canvas.bind("<Configure>", self._on_canvas_configure)
 
         # Forward scroll from anywhere in this overlay to the canvas.
-        # bind_all covers every child widget (including CTkButton internals).
         # Linux: Button-4/5; Flatpak/Wayland: may send MouseWheel — handle both.
+        # Shift+wheel scrolls horizontally when content overflows.
         def _fwd_scroll(e):
             num = getattr(e, "num", None)
             delta = getattr(e, "delta", 0) or 0
-            if num == 4 or delta > 0:
-                self._canvas.yview_scroll(-50, "units")
-            elif num == 5 or delta < 0:
-                self._canvas.yview_scroll(50, "units")
+            up = num == 4 or delta > 0
+            if getattr(e, "state", 0) & 0x1:  # Shift held: horizontal scroll
+                self._canvas.xview_scroll(-50 if up else 50, "units")
+            else:
+                self._canvas.yview_scroll(-50 if up else 50, "units")
         self.bind_all("<Button-4>", _fwd_scroll)
         self.bind_all("<Button-5>", _fwd_scroll)
         self.bind_all("<MouseWheel>", _fwd_scroll)
@@ -577,7 +608,8 @@ class GamePickerPanel(tk.Frame):
     def _build_card(self, name: str):
         game    = self._games.get(name)
         game_id = game.game_id if game else name.lower().replace(" ", "_")
-
+        _img_sz = scaled(self._IMG_SQ)  # image scales with UI (tk.Frame uses actual pixels)
+        # CTk scales widget dimensions; use unscaled design values so we scale once (like browse panel)
         card = ctk.CTkFrame(
             self._inner,
             fg_color=BG_PANEL,
@@ -589,15 +621,13 @@ class GamePickerPanel(tk.Frame):
         )
         card.grid_propagate(False)
         card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=0, minsize=_img_sz)
+        card.grid_rowconfigure(1, weight=0, minsize=32)
+        card.grid_rowconfigure(2, weight=0)
 
-        # Image area
-        img_frame = ctk.CTkFrame(
-            card, fg_color=BG_DEEP, corner_radius=6,
-            width=self._CARD_W - 8, height=self._IMG_H,
-        )
-        img_frame.grid(row=0, column=0, padx=4, pady=(4, 0), sticky="nsew")
-        img_frame.grid_propagate(False)
+        img_frame = tk.Frame(card, bg=BG_DEEP, width=_img_sz, height=_img_sz)
+        img_frame.grid(row=0, column=0, padx=4, pady=(4, 0), sticky="n")
+        img_frame.pack_propagate(False)
 
         img_path = self._icons_dir / f"{game_id}.png"
         if not img_path.is_file():
@@ -610,25 +640,21 @@ class GamePickerPanel(tk.Frame):
 
         if img_path.is_file():
             raw = _PilImage.open(img_path).convert("RGBA")
-            tw, th = self._CARD_W - 8, self._IMG_H
-            raw.thumbnail((tw, th), _PilImage.LANCZOS)
-            ctk_img = ctk.CTkImage(
-                light_image=raw, dark_image=raw, size=(raw.width, raw.height)
-            )
-            self._img_refs.append(ctk_img)
-            img_lbl = ctk.CTkLabel(img_frame, image=ctk_img, text="")
+            raw = _center_crop_to_square(raw, self._IMG_SQ)
+            raw = raw.resize((_img_sz, _img_sz), _PilImage.Resampling.LANCZOS if hasattr(_PilImage, "Resampling") else _PilImage.LANCZOS)  # type: ignore
+            photo = _PilTk.PhotoImage(raw.convert("RGB"))
+            self._img_refs.append(photo)
+            img_lbl = tk.Label(img_frame, image=photo, bg=BG_DEEP)
         else:
-            img_lbl = ctk.CTkLabel(
-                img_frame, text="?", font=("Segoe UI", 36, "bold"),
-                text_color=TEXT_DIM,
-            )
+            img_lbl = tk.Label(img_frame, text="?", font=("Segoe UI", 36, "bold"),
+                              fg=TEXT_DIM, bg=BG_DEEP)
         img_lbl.place(relx=0.5, rely=0.5, anchor="center")
         self._img_labels[game_id] = (img_lbl, img_frame)
 
         ctk.CTkLabel(
             card, text=name,
             font=("Segoe UI", 12, "bold"), text_color=TEXT_MAIN,
-            wraplength=self._CARD_W - 10, anchor="center", justify="center",
+            wraplength=scaled(self._CARD_W - 8), anchor="center", justify="center",
         ).grid(row=1, column=0, padx=4, pady=(4, 2), sticky="ew")
 
         is_configured = bool(game and game.is_configured())
@@ -673,38 +699,63 @@ class GamePickerPanel(tk.Frame):
     # ------------------------------------------------------------------
 
     def _on_inner_configure(self, _event=None):
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        bbox = self._canvas.bbox("all")
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            cw = self._canvas.winfo_width() or 1
+            ch = self._canvas.winfo_height() or 1
+            # scr_w must extend to x2 so full content is scrollable when narrowed
+            scr_w = max(x2, cw + 1)
+            scr_h = max(y2 - y1, ch + 1)
+            self._canvas.configure(scrollregion=(0, 0, scr_w, scr_h))
 
     def _on_canvas_configure(self, event):
-        self._canvas.itemconfig(self._inner_id, width=event.width)
         if hasattr(self, '_regrid_after_id') and self._regrid_after_id:
             self.after_cancel(self._regrid_after_id)
         self._regrid_after_id = self.after(250, self._regrid_cards)
 
     def _regrid_cards(self):
-        canvas_w = self._canvas.winfo_width() or (
-            self._curr_cols * (self._CARD_W + self._PAD * 2)
-        )
-        cols = max(1, canvas_w // (self._CARD_W + self._PAD * 2))
+        # Layout uses scaled slot to match browse panel: slot = (card + padding) * ui_scale.
+        # CTk scales card dimensions; add small buffer so rightmost card isn't clipped at high scale.
+        _pad = scaled(self._PAD)
+        _slack = scaled(4)  # extra px per slot to prevent rightmost card clipping
+        slot_w = scaled(self._CARD_W + self._PAD * 2) + _slack
+        canvas_w = self._canvas.winfo_width() or (self._curr_cols * slot_w)
+        # Margin when wide (avoid too many cols); no margin when narrow (allow h-scroll)
+        margin = scaled(24) if canvas_w > slot_w * 2 else 0
+        avail_w = max(slot_w, canvas_w - margin)
+        cols = max(1, avail_w // slot_w)
         self._curr_cols = cols
 
-        total_card_w = cols * self._CARD_W + (cols - 1) * self._PAD
-        x_pad = max(self._PAD, (canvas_w - total_card_w) // 2)
+        # Inner width = content only; center via canvas coords (prevents column squeeze/clipping)
+        content_w = cols * slot_w
+        self._canvas.itemconfig(self._inner_id, width=content_w)
+        x_off = max(0, (canvas_w - content_w) // 2)
+        self._canvas.coords(self._inner_id, x_off, 0)
+
+        for c in range(cols):
+            self._inner.grid_columnconfigure(c, weight=0, minsize=slot_w)
 
         for idx, card in enumerate(self._card_widgets):
             col = idx % cols
             row = idx // cols
             card.grid(
                 row=row, column=col,
-                padx=(
-                    x_pad if col == 0 else self._PAD // 2,
-                    x_pad if col == cols - 1 else self._PAD // 2,
-                ),
-                pady=self._PAD,
+                padx=_pad,
+                pady=_pad,
                 sticky="n",
             )
-        for c in range(cols):
-            self._inner.grid_columnconfigure(c, weight=1)
+
+        # Ensure scroll region allows horizontal scroll when content exceeds viewport
+        self._canvas.update_idletasks()
+        cw = self._canvas.winfo_width() or 1
+        ch = self._canvas.winfo_height() or 1
+        # scr_w must exceed cw when content is wider, so horizontal scrollbar activates
+        scr_w = max(content_w + x_off, cw + 1)
+        bbox = self._canvas.bbox("all")
+        scr_h = (bbox[3] - bbox[1]) if bbox else max(1000, ch + 1)
+        scr_h = max(scr_h, ch + 1)
+        self._canvas.configure(scrollregion=(0, 0, scr_w, scr_h))
 
     # ------------------------------------------------------------------
     # Live image updates (custom games)
@@ -728,13 +779,12 @@ class GamePickerPanel(tk.Frame):
                 return
             try:
                 raw = _PilImage.open(img_path).convert("RGBA")
-                tw, th = self._CARD_W - 8, self._IMG_H
-                raw.thumbnail((tw, th), _PilImage.LANCZOS)
-                ctk_img = ctk.CTkImage(
-                    light_image=raw, dark_image=raw, size=(raw.width, raw.height)
-                )
-                self._img_refs.append(ctk_img)
-                img_lbl.configure(image=ctk_img, text="")
+                raw = _center_crop_to_square(raw, self._IMG_SQ)
+                sz = scaled(self._IMG_SQ)
+                raw = raw.resize((sz, sz), _PilImage.Resampling.LANCZOS if hasattr(_PilImage, "Resampling") else _PilImage.LANCZOS)  # type: ignore
+                photo = _PilTk.PhotoImage(raw.convert("RGB"))
+                self._img_refs.append(photo)
+                img_lbl.configure(image=photo, text="")
             except Exception:
                 pass
         try:
@@ -2206,8 +2256,8 @@ class OverwritesPanel(ctk.CTkFrame):
         body = tk.Frame(self, bg=BG_DEEP)
         body.pack(fill="both", expand=True)
         body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(0, weight=2)
+        body.grid_columnconfigure(1, weight=3)
 
         left = tk.Frame(body, bg=BG_DEEP)
         left.grid(row=0, column=0, sticky="nsew")
@@ -2249,7 +2299,7 @@ class OverwritesPanel(ctk.CTkFrame):
             footer, text="Close",
             fg_color="#c0392b", hover_color="#a93226",
             text_color=TEXT_MAIN, font=FONT_BOLD,
-            width=80, height=28,
+            width=80, height=32,
             command=self._on_close,
         ).pack(side="right", padx=12, pady=6)
 
@@ -2263,7 +2313,7 @@ class OverwritesPanel(ctk.CTkFrame):
         tk.Label(
             outer, text=header,
             bg=BG_PANEL, fg=header_color,
-            font=("Segoe UI", 10, "bold"), anchor="w",
+            font=font_sized_px("Segoe UI", 10, "bold"), anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
 
         tree_frame = tk.Frame(outer, bg=BG_DEEP)
@@ -2275,11 +2325,11 @@ class OverwritesPanel(ctk.CTkFrame):
         style = ttk.Style()
         style.configure(f"{uid}.Treeview",
                         background=BG_DEEP, foreground=TEXT_MAIN,
-                        fieldbackground=BG_DEEP, rowheight=20,
-                        font=("Segoe UI", 9))
+                        fieldbackground=BG_DEEP, rowheight=scaled(20),
+                        font=font_sized_px("Segoe UI", 9))
         style.configure(f"{uid}.Treeview.Heading",
                         background=BG_HEADER, foreground=TEXT_SEP,
-                        font=("Segoe UI", 9, "bold"), relief="flat")
+                        font=font_sized_px("Segoe UI", 9, "bold"), relief="flat")
         style.map(f"{uid}.Treeview",
                   background=[("selected", BG_SELECT)],
                   foreground=[("selected", TEXT_MAIN)])
@@ -2294,8 +2344,14 @@ class OverwritesPanel(ctk.CTkFrame):
         )
         tv.heading("#0",   text=col0_title, anchor="w")
         tv.heading("col1", text=col1_title, anchor="w")
-        tv.column("#0",   minwidth=180, stretch=True)
-        tv.column("col1", minwidth=150, width=180, stretch=False)
+        tv.column("#0",   minwidth=100, stretch=True)
+        tv.column("col1", minwidth=100, stretch=True)
+
+        def _resize_cols(event, _tv=tv):
+            half = event.width // 2
+            _tv.column("#0",   width=half)
+            _tv.column("col1", width=half)
+        tv.bind("<Configure>", _resize_cols)
 
         vsb = tk.Scrollbar(tree_frame, orient="vertical", command=tv.yview,
                            bg=BG_SEP, troughcolor=BG_DEEP, activebackground=ACCENT,
@@ -2321,7 +2377,7 @@ class OverwritesPanel(ctk.CTkFrame):
         tk.Label(
             outer, text=header,
             bg=BG_PANEL, fg=header_color,
-            font=("Segoe UI", 10, "bold"), anchor="w",
+            font=font_sized_px("Segoe UI", 10, "bold"), anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
 
         tree_frame = tk.Frame(outer, bg=BG_DEEP)
@@ -2333,11 +2389,11 @@ class OverwritesPanel(ctk.CTkFrame):
         style = ttk.Style()
         style.configure(f"{uid}.Treeview",
                         background=BG_DEEP, foreground=TEXT_MAIN,
-                        fieldbackground=BG_DEEP, rowheight=20,
-                        font=("Segoe UI", 9))
+                        fieldbackground=BG_DEEP, rowheight=scaled(20),
+                        font=font_sized_px("Segoe UI", 9))
         style.configure(f"{uid}.Treeview.Heading",
                         background=BG_HEADER, foreground=TEXT_SEP,
-                        font=("Segoe UI", 9, "bold"), relief="flat")
+                        font=font_sized_px("Segoe UI", 9, "bold"), relief="flat")
         style.map(f"{uid}.Treeview",
                   background=[("selected", BG_SELECT)],
                   foreground=[("selected", TEXT_MAIN)])
@@ -5387,14 +5443,14 @@ class DeploymentPathsPanel(ctk.CTkFrame):
         style.configure(
             f"{_uid}.Treeview",
             background=_tree_bg, foreground=TEXT_MAIN,
-            fieldbackground=_tree_bg, rowheight=22,
-            font=("Segoe UI", 10),
+            fieldbackground=_tree_bg, rowheight=scaled(22),
+            font=("Segoe UI", _theme.FS10),
             bordercolor=BG_ROW, borderwidth=1, focuscolor=_tree_bg,
         )
         style.configure(
             f"{_uid}.Treeview.Heading",
             background=BG_HEADER, foreground=TEXT_SEP,
-            font=("Segoe UI", 10), borderwidth=0,
+            font=("Segoe UI", _theme.FS10), borderwidth=0,
         )
         style.map(
             f"{_uid}.Treeview",
@@ -5411,8 +5467,8 @@ class DeploymentPathsPanel(ctk.CTkFrame):
         )
         self._tree.heading("#0", text="Folder", anchor="w")
         self._tree.heading("check", text="", anchor="w")
-        self._tree.column("#0", minwidth=200, stretch=True)
-        self._tree.column("check", width=28, stretch=False)
+        self._tree.column("#0", minwidth=scaled(200), stretch=True)
+        self._tree.column("check", width=scaled(28), stretch=False)
 
         vsb = tk.Scrollbar(
             list_frame, orient="vertical", command=self._tree.yview,
@@ -5933,4 +5989,145 @@ class MissingReqsPanel(ctk.CTkFrame):
             self._ignored_set.discard(self._mod_name)
         self._save_ignored_fn()
         self._on_done(self)
+
+
+class CollectionInstallModeDialog(tk.Frame):
+    """Overlay panel that asks how to install a collection.
+
+    Placed over the plugin panel with place(relx=0, rely=0, relwidth=1, relheight=1).
+    Calls on_done(result) when finished, where result is one of:
+      ("new", None, False)                          — create a new profile
+      ("append", profile_name, overwrite_existing)  — append into existing profile
+      None                                          — cancelled
+    """
+
+    def __init__(self, parent, existing_profiles: list[str], on_done):
+        super().__init__(parent, bg=BG_DEEP)
+        self._on_done = on_done
+        self._existing_profiles = existing_profiles
+
+        self._mode_var = tk.StringVar(value="new")
+        self._overwrite_var = tk.BooleanVar(value=False)
+        self._profile_var = tk.StringVar(
+            value=existing_profiles[0] if existing_profiles else ""
+        )
+
+        self._build()
+
+    def _build(self):
+        # Full-size container so we can centre the card
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # Centred card
+        card = tk.Frame(self, bg=BG_PANEL, bd=0, highlightthickness=1,
+                        highlightbackground=BORDER)
+        card.grid(row=0, column=0)
+        card.grid_columnconfigure(0, weight=1)
+
+        row = 0
+
+        # Header bar
+        header = tk.Frame(card, bg=BG_HEADER, height=42)
+        header.grid(row=row, column=0, sticky="ew")
+        header.grid_propagate(False)
+        tk.Label(
+            header, text="Install Collection",
+            font=FONT_BOLD, fg=TEXT_MAIN, bg=BG_HEADER,
+        ).pack(side="left", padx=12, pady=8)
+        row += 1
+
+        # Separator
+        tk.Frame(card, bg=BORDER, height=1).grid(row=row, column=0, sticky="ew")
+        row += 1
+
+        # Body
+        body = tk.Frame(card, bg=BG_PANEL)
+        body.grid(row=row, column=0, sticky="ew", padx=24, pady=(16, 8))
+        body.grid_columnconfigure(0, weight=1)
+        row += 1
+
+        tk.Label(
+            body, text="How would you like to install this collection?",
+            font=FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="center", justify="center",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 14))
+
+        ctk.CTkRadioButton(
+            body, text="Create a new profile",
+            variable=self._mode_var, value="new",
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+            command=self._on_mode_change,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+
+        ctk.CTkRadioButton(
+            body, text="Append to existing profile",
+            variable=self._mode_var, value="append",
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+            command=self._on_mode_change,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 8))
+
+        self._profile_menu = ctk.CTkOptionMenu(
+            body, values=self._existing_profiles or ["(no profiles)"],
+            variable=self._profile_var,
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+            fg_color=BG_DEEP, button_color=BG_HEADER, button_hover_color=BG_HOVER,
+            dropdown_fg_color=BG_PANEL, dropdown_text_color=TEXT_MAIN,
+            dropdown_hover_color=BG_HOVER,
+            state="disabled", width=280,
+        )
+        self._profile_menu.grid(row=3, column=0, sticky="w", padx=(16, 0), pady=(0, 6))
+
+        self._overwrite_cb = ctk.CTkCheckBox(
+            body, text="Overwrite existing mods",
+            variable=self._overwrite_var,
+            font=FONT_NORMAL, text_color=TEXT_DIM,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+            checkmark_color="white",
+            state="disabled",
+        )
+        self._overwrite_cb.grid(row=4, column=0, sticky="w", padx=(16, 0), pady=(0, 4))
+
+        # Separator before buttons
+        tk.Frame(card, bg=BORDER, height=1).grid(row=row, column=0, sticky="ew")
+        row += 1
+
+        # Button bar
+        bar = tk.Frame(card, bg=BG_HEADER, height=44)
+        bar.grid(row=row, column=0, sticky="ew")
+        bar.grid_propagate(False)
+        ctk.CTkButton(
+            bar, text="Cancel", width=80, height=28, font=FONT_NORMAL,
+            fg_color=BG_DEEP, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._on_cancel,
+        ).pack(side="right", padx=(4, 12), pady=8)
+        ctk.CTkButton(
+            bar, text="Install", width=80, height=28, font=FONT_BOLD,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            command=self._on_ok,
+        ).pack(side="right", padx=4, pady=8)
+
+    def _on_mode_change(self):
+        is_append = self._mode_var.get() == "append"
+        state = "normal" if is_append else "disabled"
+        self._profile_menu.configure(state=state)
+        self._overwrite_cb.configure(
+            state=state,
+            text_color=TEXT_MAIN if is_append else TEXT_DIM,
+        )
+
+    def _on_ok(self):
+        mode = self._mode_var.get()
+        if mode == "new":
+            result = ("new", None, False)
+        else:
+            profile = self._profile_var.get()
+            if not profile or profile == "(no profiles)":
+                return
+            result = ("append", profile, self._overwrite_var.get())
+        self._on_done(result)
+
+    def _on_cancel(self):
+        self._on_done(None)
 
