@@ -12,6 +12,7 @@ command: amethyst-mod-manager
 # - home: mod staging (user-configurable path, e.g. anywhere in ~/), game paths, Steam libraries, config (~/.config/AmethystModManager)
 # - run/media, media, mnt: Steam libraries on SD cards and removable drives (Steam Deck, etc.)
 # - ~/.var/app/com.valvesoftware.Steam: Steam Flatpak data (home excludes ~/.var/app)
+# - ~/.var/app/com.heroicgameslauncher.hgl: Heroic Flatpak
 # - talk-name=org.freedesktop.secrets: keyring (Nexus API key storage and retrieval)
 finish-args:
   - --share=network
@@ -24,6 +25,7 @@ finish-args:
   - --filesystem=/media
   - --filesystem=/mnt
   - --filesystem=~/.var/app/com.valvesoftware.Steam
+  - --filesystem=~/.var/app/com.heroicgameslauncher.hgl
   - --talk-name=org.freedesktop.secrets
 
 tags:
