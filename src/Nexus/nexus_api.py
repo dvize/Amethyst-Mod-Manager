@@ -233,11 +233,12 @@ class NexusCollectionMod:
 
 
 # ---------------------------------------------------------------------------
-# API key persistence (system keyring)
+# API key persistence (system keyring, with file fallback)
 # ---------------------------------------------------------------------------
 
 _KEYRING_SERVICE = "AmethystModManager"
 _KEYRING_USER = "nexus_api_key"
+_API_KEY_FILE = "nexus_api_key.bin"
 
 
 def _api_key_path() -> Path:
@@ -245,32 +246,107 @@ def _api_key_path() -> Path:
     return get_config_dir() / "nexus_api_key"
 
 
-def _migrate_legacy_key() -> str: # plain text key used during testing only. No longer used.
-    """If legacy plaintext file exists, move it to keyring and return the key."""
+def _api_key_file_path() -> Path:
+    """Path for file-based API key fallback."""
+    return get_config_dir() / _API_KEY_FILE
+
+
+def _keyring_ok() -> bool:
+    """Check if keyring is available (reuses probe from nexus_oauth)."""
+    try:
+        from Nexus.nexus_oauth import _keyring_available
+        return _keyring_available
+    except Exception:
+        return True  # Assume available if we can't check
+
+
+def _derive_key() -> bytes:
+    """Derive a Fernet key from the machine ID so keys are only usable on this device."""
+    import base64, hashlib
+    machine_id = ""
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            with open(p) as f:
+                machine_id = f.read().strip()
+            if machine_id:
+                break
+        except OSError:
+            continue
+    if not machine_id:
+        machine_id = "fallback-no-machine-id"
+    dk = hashlib.pbkdf2_hmac("sha256", machine_id.encode(), b"AmethystModManager", 100_000)
+    return base64.urlsafe_b64encode(dk)
+
+
+def _load_key_file() -> str:
+    """Load API key from encrypted file fallback."""
+    p = _api_key_file_path()
+    try:
+        if not p.is_file():
+            return ""
+        from cryptography.fernet import Fernet
+        import json as _json
+        cipher = Fernet(_derive_key())
+        data = _json.loads(cipher.decrypt(p.read_bytes()))
+        return data.get("api_key", "").strip()
+    except Exception:
+        return ""
+
+
+def _save_key_file(key: str) -> None:
+    """Save API key to encrypted file fallback."""
+    from cryptography.fernet import Fernet
+    import json as _json, os as _os
+    p = _api_key_file_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cipher = Fernet(_derive_key())
+    p.write_bytes(cipher.encrypt(_json.dumps({"api_key": key}).encode()))
+    _os.chmod(p, 0o600)
+
+
+def _clear_key_file() -> None:
+    """Remove file-based API key."""
+    p = _api_key_file_path()
+    try:
+        if p.is_file():
+            p.unlink()
+    except OSError:
+        pass
+
+
+def _migrate_legacy_key() -> str:
+    """If legacy plaintext file exists, move it to keyring/file and return the key."""
     p = _api_key_path()
     if not p.is_file():
         return ""
     try:
         key = p.read_text().strip()
         if key:
-            keyring.set_password(_KEYRING_SERVICE, _KEYRING_USER, key)
+            if _keyring_ok():
+                try:
+                    keyring.set_password(_KEYRING_SERVICE, _KEYRING_USER, key)
+                except Exception:
+                    _save_key_file(key)
+            else:
+                _save_key_file(key)
         try:
             p.unlink(missing_ok=True)
         except OSError:
             pass
         return key
-    except (OSError, keyring.errors.KeyringError) as e:
+    except OSError as e:
         app_log(f"Nexus API key migration from file failed: {e}")
         return ""
 
 
 def load_api_key() -> str:
-    """Load saved API key from system keyring, or return empty string."""
+    """Load saved API key from system keyring or file fallback."""
+    if not _keyring_ok():
+        return _load_key_file() or _migrate_legacy_key()
     try:
         key = keyring.get_password(_KEYRING_SERVICE, _KEYRING_USER)
         if key:
             return key.strip()
-        # No key in keyring: try migrating from legacy file
         return _migrate_legacy_key()
     except UnicodeDecodeError as e:
         app_log(f"Nexus API key in keyring is invalid/corrupted ({e}). Clear and re-enter in Nexus settings.")
@@ -280,30 +356,22 @@ def load_api_key() -> str:
             pass
         return _migrate_legacy_key()
     except keyring.errors.KeyringError as e:
-        app_log(
-            f"Keyring unavailable for Nexus API key: {e}\n"
-            "To fix, run in a terminal:\n"
-            "  sudo pacman -S gnome-keyring libsecret\n"
-            "  systemctl --user enable gnome-keyring-daemon\n"
-            "  systemctl --user start gnome-keyring-daemon"
-        )
-        return _migrate_legacy_key()
+        app_log(f"Keyring unavailable for Nexus API key: {e} — using file fallback")
+        return _load_key_file() or _migrate_legacy_key()
 
 
 def save_api_key(key: str) -> None:
-    """Persist the API key to the system keyring."""
+    """Persist the API key to the system keyring or file fallback."""
     key = key.strip()
+    if not _keyring_ok():
+        _save_key_file(key)
+        return
     try:
         keyring.set_password(_KEYRING_SERVICE, _KEYRING_USER, key)
     except keyring.errors.KeyringError as e:
-        app_log(
-            f"Keyring unavailable for saving Nexus API key: {e}\n"
-            "To fix, run in a terminal:\n"
-            "  sudo pacman -S gnome-keyring libsecret\n"
-            "  systemctl --user enable gnome-keyring-daemon\n"
-            "  systemctl --user start gnome-keyring-daemon"
-        )
-        raise RuntimeError(f"Cannot save API key: {e}") from e
+        app_log(f"Keyring unavailable for saving Nexus API key: {e} — using file fallback")
+        _save_key_file(key)
+        return
     # Remove legacy file if it exists
     try:
         _api_key_path().unlink(missing_ok=True)
@@ -312,13 +380,15 @@ def save_api_key(key: str) -> None:
 
 
 def clear_api_key() -> None:
-    """Delete the stored API key from the keyring."""
-    try:
-        keyring.delete_password(_KEYRING_SERVICE, _KEYRING_USER)
-    except keyring.errors.PasswordDeleteError:
-        pass
-    except keyring.errors.KeyringError as e:
-        app_log(f"Keyring unavailable when clearing Nexus API key: {e}")
+    """Delete the stored API key from keyring and file."""
+    _clear_key_file()
+    if _keyring_ok():
+        try:
+            keyring.delete_password(_KEYRING_SERVICE, _KEYRING_USER)
+        except keyring.errors.PasswordDeleteError:
+            pass
+        except keyring.errors.KeyringError as e:
+            app_log(f"Keyring unavailable when clearing Nexus API key: {e}")
     try:
         _api_key_path().unlink(missing_ok=True)
     except OSError:

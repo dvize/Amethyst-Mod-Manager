@@ -14,6 +14,7 @@ import customtkinter as ctk
 from pathlib import Path
 
 from Utils.config_paths import get_logs_dir, get_download_cache_dir
+from Utils.xdg import xdg_open
 from Utils.ui_config import load_ui_scale, save_ui_scale, detect_hidpi_scale
 from gui.ctk_components import CTkProgressPopup, CTkAlert, CTkNotification
 from gui.theme import (
@@ -195,7 +196,7 @@ class StatusBar(ctk.CTkFrame):
     def _open_logs_folder(self):
         logs_dir = get_logs_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(["xdg-open", str(logs_dir)])
+        xdg_open(logs_dir)
 
     def _toggle_log(self):
         self._visible = not self._visible

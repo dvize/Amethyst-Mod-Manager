@@ -12,7 +12,7 @@ saved to ~/.config/AmethystModManager/download_locations.json.
 import os
 import tkinter as tk
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Set
 
 import customtkinter as ctk
 from gui.ctk_components import CTkPopupMenu
@@ -89,11 +89,13 @@ class DownloadsPanel:
         log_fn=None,
         install_fn=None,
         on_open_locations: Optional[Callable[[], None]] = None,
+        get_installed_filenames: Optional[Callable[[], Set[str]]] = None,
     ):
         self._parent = parent_tab
         self._log = log_fn or (lambda msg: None)
         self._install_fn = install_fn or (lambda path: None)
         self._on_open_locations = on_open_locations or (lambda: None)
+        self._get_installed_filenames = get_installed_filenames or (lambda: set())
 
         self._files: list[Path] = []
         self._sel_idx: int = -1
@@ -209,13 +211,16 @@ class DownloadsPanel:
             btn.destroy()
         self._btn_widgets.clear()
 
+        installed_filenames = self._get_installed_filenames()
+
         for fpath in self._files:
+            is_installed = fpath.name in installed_filenames
             btn = tk.Button(
                 self._canvas,
-                text="Install",
-                bg="#2d7a2d",
+                text="Reinstall" if is_installed else "Install",
+                bg="#c37800" if is_installed else "#2d7a2d",
                 fg="#ffffff",
-                activebackground="#3a9e3a",
+                activebackground="#e28b00" if is_installed else "#3a9e3a",
                 activeforeground="#ffffff",
                 relief="flat",
                 font=FONT_SMALL,

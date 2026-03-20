@@ -2,7 +2,7 @@
 # Build Amethyst Mod Manager as a Flatpak
 #
 # Prerequisites:
-#   - Flatpak and flatpak-builder installed
+#   - Flatpak installed; flatpak-builder is installed automatically when missing (needs sudo)
 #   - GNOME runtime: flatpak install flathub org.gnome.Platform//49 org.gnome.Sdk//49
 #
 # Usage:
@@ -11,6 +11,32 @@
 #   ./flatpak/build.sh --bundle  # Build and create .flatpak bundle file
 #
 set -euo pipefail
+
+ensure_flatpak_builder() {
+  if command -v flatpak-builder >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "flatpak-builder not found; installing via system package manager (sudo required)..."
+  if command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --needed --noconfirm flatpak-builder
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y flatpak-builder
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y flatpak-builder
+  elif command -v zypper >/dev/null 2>&1; then
+    sudo zypper install -y flatpak-builder
+  elif command -v apk >/dev/null 2>&1; then
+    sudo apk add flatpak-builder
+  else
+    echo "Could not detect a package manager. Install flatpak-builder manually, then re-run this script." >&2
+    exit 1
+  fi
+  if ! command -v flatpak-builder >/dev/null 2>&1; then
+    echo "flatpak-builder is still not available after install. Check the output above." >&2
+    exit 1
+  fi
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -31,6 +57,8 @@ echo "=== Building Amethyst Mod Manager Flatpak ==="
 echo "  Manifest: $MANIFEST"
 echo "  Project:  $PROJECT_DIR"
 echo ""
+
+ensure_flatpak_builder
 
 flatpak-builder \
   --verbose \

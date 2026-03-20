@@ -31,6 +31,7 @@ class CTkToolTip(Toplevel):
         self.widget = widget
 
         self.withdraw()
+        self.geometry("+99999+99999")
 
         # Disable ToolTip's title bar
         self.overrideredirect(True)

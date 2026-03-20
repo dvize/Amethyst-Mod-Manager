@@ -182,17 +182,9 @@ class AddGameDialog(ctk.CTkToplevel):
         body.grid(row=1, column=0, sticky="nsew")
         body.grid_columnconfigure(0, weight=1)
 
-        # Forward scroll wheel to body (CTkScrollableFrame doesn't receive wheel in Flatpak)
-        def _fwd_scroll(event):
-            num = getattr(event, "num", None)
-            delta = getattr(event, "delta", 0) or 0
-            if num == 4 or delta > 0:
-                body._parent_canvas.yview_scroll(-50, "units")
-            elif num == 5 or delta < 0:
-                body._parent_canvas.yview_scroll(50, "units")
-        self.bind_all("<Button-4>", _fwd_scroll)
-        self.bind_all("<Button-5>", _fwd_scroll)
-        self.bind_all("<MouseWheel>", _fwd_scroll)
+        self._scroll_body = body
+        # Forward scroll wheel to body — bind per-widget so buttons don't swallow events
+        self.after(100, self._bind_scroll_recursive)
         self.bind("<Destroy>", self._add_game_dialog_on_destroy)
 
         # --- Game path section ---
@@ -863,12 +855,23 @@ class AddGameDialog(ctk.CTkToplevel):
         self.grab_release()
         self.destroy()
 
+    def _bind_scroll_recursive(self, widget=None):
+        """Bind Linux scroll-wheel events to every child widget so buttons don't swallow them."""
+        if widget is None:
+            widget = self._scroll_body
+        try:
+            widget.bind("<Button-4>", lambda e: self._scroll_body._parent_canvas.yview_scroll(-3, "units"), add="+")
+            widget.bind("<Button-5>", lambda e: self._scroll_body._parent_canvas.yview_scroll( 3, "units"), add="+")
+            widget.bind("<MouseWheel>", lambda e: self._scroll_body._parent_canvas.yview_scroll(
+                -3 if (getattr(e, "delta", 0) or 0) > 0 else 3, "units"), add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_scroll_recursive(child)
+
     def _add_game_dialog_on_destroy(self, event):
         if event.widget is self:
             try:
-                self.unbind_all("<Button-4>")
-                self.unbind_all("<Button-5>")
-                self.unbind_all("<MouseWheel>")
                 self.unbind("<Destroy>", self._add_game_dialog_on_destroy)
             except Exception:
                 pass
@@ -968,10 +971,14 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         )
         _scroll.grid(row=1, column=0, sticky="nsew")
         _scroll.grid_columnconfigure(0, weight=1)
+        self._scroll_frame = _scroll
 
         body = ctk.CTkFrame(_scroll, fg_color="transparent")
         body.grid(row=0, column=0, sticky="nsew", pady=12)
         body.grid_columnconfigure(0, weight=1)
+
+        # Forward scroll wheel — bind per-widget so buttons don't swallow events
+        self.after(100, self._bind_scroll_recursive)
 
         # --- Game path section ---
         ctk.CTkLabel(
@@ -1179,6 +1186,20 @@ class ReconfigureGamePanel(ctk.CTkFrame):
                 text_color="white", command=self._on_clean_game_folder
             )
             self._clean_btn.pack(side="left", padx=(0, 4), pady=10)
+
+    def _bind_scroll_recursive(self, widget=None):
+        """Bind Linux scroll-wheel events to every child widget so buttons don't swallow them."""
+        if widget is None:
+            widget = self._scroll_frame
+        try:
+            widget.bind("<Button-4>", lambda e: self._scroll_frame._parent_canvas.yview_scroll(-3, "units"), add="+")
+            widget.bind("<Button-5>", lambda e: self._scroll_frame._parent_canvas.yview_scroll( 3, "units"), add="+")
+            widget.bind("<MouseWheel>", lambda e: self._scroll_frame._parent_canvas.yview_scroll(
+                -3 if (getattr(e, "delta", 0) or 0) > 0 else 3, "units"), add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_scroll_recursive(child)
 
     # ------------------------------------------------------------------
     # Steam / prefix scan workers

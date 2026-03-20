@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
-from gui.ctk_components import CTkPopupMenu
+from gui.ctk_components import CTkLoader, CTkPopupMenu
 from gui.mod_card import ModCard, CARD_W, CARD_PAD, CARD_COLS
 from gui.theme import (
     BG_DEEP,
@@ -81,6 +81,7 @@ class TrackedModsPanel:
         self._cols: int = CARD_COLS
         self._context_menu: CTkPopupMenu | None = None
         self._regrid_after_id = None
+        self._loader: CTkLoader | None = None
 
         self._build(parent_tab)
 
@@ -111,7 +112,7 @@ class TrackedModsPanel:
         self._status_label.pack(side="left", padx=4, fill="x", expand=True)
 
         # Scrollable card area
-        canvas_frame = tk.Frame(tab, bg=BG_DEEP, bd=0, highlightthickness=0)
+        self._canvas_frame = canvas_frame = tk.Frame(tab, bg=BG_DEEP, bd=0, highlightthickness=0)
         canvas_frame.grid(row=1, column=0, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
@@ -211,6 +212,7 @@ class TrackedModsPanel:
             self._cards.append(self._make_card(entry, installed_ids))
         self._regrid_cards()
         self._load_images()
+        self._hide_loader()
 
     def _regrid_cards(self):
         col_gap = 6
@@ -246,6 +248,22 @@ class TrackedModsPanel:
             )
 
     # ------------------------------------------------------------------
+    # Loader overlay
+    # ------------------------------------------------------------------
+
+    def _show_loader(self):
+        if self._loader is None:
+            self._loader = CTkLoader(self._canvas_frame)
+
+    def _hide_loader(self):
+        if self._loader is not None:
+            try:
+                self._loader.stop_loader()
+            except Exception:
+                pass
+            self._loader = None
+
+    # ------------------------------------------------------------------
     # Refresh
     # ------------------------------------------------------------------
 
@@ -265,6 +283,7 @@ class TrackedModsPanel:
         self._loading = True
         self._refresh_btn.configure(state="disabled")
         self._status_label.configure(text="Loading…")
+        self._show_loader()
 
         def _worker():
             try:
@@ -313,6 +332,7 @@ class TrackedModsPanel:
 
             except Exception as exc:
                 def _err():
+                    self._hide_loader()
                     self._loading = False
                     self._refresh_btn.configure(state="normal")
                     self._status_label.configure(text="Error")

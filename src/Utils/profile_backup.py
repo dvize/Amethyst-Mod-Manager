@@ -21,9 +21,14 @@ _TIMESTAMP_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 _BACKUP_FILES = [
     "modlist.txt",
     "plugins.txt",
+    "profile_state.json",
+    # Legacy individual files — kept so old backups can still be restored
     "collapsed_seps.json",
     "plugin_locks.json",
     "separator_locks.json",
+    "disabled_plugins.json",
+    "excluded_mod_files.json",
+    "profile_settings.json",
 ]
 
 
@@ -44,8 +49,7 @@ def _parse_timestamp_from_dirname(name: str) -> datetime | None:
 def create_backup(profile_dir: Path, log_fn=None) -> None:
     """
     Create a new backup in profile_dir/backups/<timestamp>/ containing
-    modlist.txt, plugins.txt, and (if present) collapsed_seps.json,
-    plugin_locks.json, separator_locks.json.
+    modlist.txt, plugins.txt, and (if present) profile_state.json.
     Keep at most _MAX_BACKUPS backup folders; delete oldest when over limit.
     """
     _log = log_fn or (lambda _: None)

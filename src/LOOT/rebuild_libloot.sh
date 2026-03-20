@@ -32,13 +32,47 @@ echo ""
 
 # ── Require C toolchain (Rust needs it to link) ───────────────────────
 if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
-    echo "ERROR: No C compiler (cc/gcc) found. Rust needs it to build the extension." >&2
-    echo "Install a C toolchain, then run this script again. Examples:" >&2
-    echo "  Debian/Ubuntu:  sudo apt install build-essential" >&2
-    echo "  Arch:            sudo pacman -S base-devel" >&2
-    echo "  Fedora:          sudo dnf install gcc" >&2
-    echo "  openSUSE:        sudo zypper install gcc" >&2
-    exit 1
+    echo "=== No C compiler found. Attempting to install base-devel... ==="
+
+    if ! command -v pacman >/dev/null 2>&1; then
+        echo "ERROR: No C compiler (cc/gcc) found. Rust needs it to build the extension." >&2
+        echo "Install a C toolchain, then run this script again. Examples:" >&2
+        echo "  Debian/Ubuntu:  sudo apt install build-essential" >&2
+        echo "  Arch:            sudo pacman -S base-devel" >&2
+        echo "  Fedora:          sudo dnf install gcc" >&2
+        echo "  openSUSE:        sudo zypper install gcc" >&2
+        exit 1
+    fi
+
+    # Make filesystem writable (SteamOS uses btrfs read-only root)
+    echo "  Unlocking filesystem..."
+    sudo btrfs property set / ro false 2>/dev/null || true
+
+    # Remove stale pacman lock if present
+    PACMAN_LOCK="/usr/lib/holo/pacmandb/db.lck"
+    if [ -f "$PACMAN_LOCK" ]; then
+        echo "  Removing stale pacman lock: $PACMAN_LOCK"
+        sudo rm -f "$PACMAN_LOCK"
+    fi
+
+    # Trust the SteamOS CI package signing key
+    STEAMOS_KEY="AF1D2199EF0A3CCF"
+    echo "  Trusting SteamOS package key $STEAMOS_KEY..."
+    sudo pacman-key --lsign-key "$STEAMOS_KEY" 2>/dev/null || true
+
+    # Remove lock again in case lsign-key recreated it
+    if [ -f "$PACMAN_LOCK" ]; then
+        sudo rm -f "$PACMAN_LOCK"
+    fi
+
+    sudo pacman -S --noconfirm base-devel
+
+    if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+        echo "ERROR: Failed to install C toolchain automatically." >&2
+        exit 1
+    fi
+    echo "  C toolchain installed successfully."
+    echo ""
 fi
 
 # ── Create .venv and install requirements + maturin ───────────────────

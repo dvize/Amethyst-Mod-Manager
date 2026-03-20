@@ -425,10 +425,10 @@ class TopBar(ctk.CTkFrame):
                 app._plugin_panel._data_dir = data_path
                 app._plugin_panel._game = game
                 # Mod Files tab paths
-                from Utils.plugins import read_excluded_mod_files as _ref
+                from Utils.profile_state import read_excluded_mod_files as _read_exc
                 app._plugin_panel._mod_files_index_path = _staging.parent / "modindex.bin"
-                app._plugin_panel._mod_files_excluded_path = profile_dir / "excluded_mod_files.json"
-                _exc_raw = _ref(app._plugin_panel._mod_files_excluded_path)
+                app._plugin_panel._mod_files_profile_dir = profile_dir
+                _exc_raw = _read_exc(profile_dir, None)
                 app._plugin_panel._mod_files_excluded = {k: set(v) for k, v in _exc_raw.items()}
                 app._plugin_panel._mod_files_on_change = app._mod_panel._rebuild_filemap
                 app._plugin_panel.show_mod_files(None)
@@ -854,8 +854,8 @@ class TopBar(ctk.CTkFrame):
                 filemap_out  = staging.parent / "filemap.txt"
                 if modlist_path.is_file():
                     try:
-                        from Utils.plugins import read_excluded_mod_files as _read_exc
-                        _exc_raw = _read_exc(modlist_path.parent / "excluded_mod_files.json")
+                        from Utils.profile_state import read_excluded_mod_files as _read_exc
+                        _exc_raw = _read_exc(modlist_path.parent, None)
                         _exc = {k: set(v) for k, v in _exc_raw.items()} if _exc_raw else None
                         build_filemap(
                             modlist_path, staging, filemap_out,

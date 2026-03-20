@@ -10,6 +10,11 @@ from pathlib import Path
 from Games.base_game import BaseGame
 from Utils.config_paths import get_config_dir, get_profiles_dir, get_last_game_path
 from Utils.game_loader import discover_games
+from Utils.profile_state import (
+    merge_profile_settings,
+    read_profile_settings,
+    write_profile_settings,
+)
 
 # Game handlers — populated by _load_games() when first called
 _GAMES: dict[str, BaseGame] = {}
@@ -67,38 +72,19 @@ def _profiles_for_game(game_name: str) -> list[str]:
 
 def profile_uses_specific_mods(profile_dir: Path) -> bool:
     """Return True if this profile stores its own mods folder inside itself."""
-    settings_path = profile_dir / "profile_settings.json"
-    try:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        return bool(data.get("profile_specific_mods", False))
-    except (OSError, ValueError):
-        return False
+    return bool(read_profile_settings(profile_dir, None).get("profile_specific_mods", False))
 
 
 def get_collection_url_from_profile(profile_dir: Path) -> str | None:
-    """Return the collection URL from profile_settings.json, or None if not set."""
-    settings_path = profile_dir / "profile_settings.json"
-    try:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        return data.get("collection_url") or None
-    except (OSError, ValueError):
-        return None
+    """Return the collection URL from profile_state profile_settings, or None if not set."""
+    url = read_profile_settings(profile_dir, None).get("collection_url")
+    return url if url else None
 
 
 def save_collection_url_to_profile(profile_dir: Path, collection_url: str) -> None:
-    """Save collection_url to profile_settings.json, merging with existing settings."""
-    settings_path = profile_dir / "profile_settings.json"
-    try:
-        data = (
-            json.loads(settings_path.read_text(encoding="utf-8"))
-            if settings_path.exists()
-            else {}
-        )
-    except (OSError, ValueError):
-        data = {}
-    data["collection_url"] = collection_url
+    """Save collection_url into profile_settings, merging with existing keys."""
     profile_dir.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    merge_profile_settings(profile_dir, {"collection_url": collection_url})
 
 
 def _create_profile(
@@ -130,11 +116,7 @@ def _create_profile(
             else:
                 modlist.touch()
     if profile_specific_mods:
-        settings_path = profile_dir / "profile_settings.json"
-        settings_path.write_text(
-            json.dumps({"profile_specific_mods": True}, indent=2),
-            encoding="utf-8",
-        )
+        write_profile_settings(profile_dir, {"profile_specific_mods": True})
         # Create the profile-specific mods, overwrite, and Root_Folder directories
         # up front so they exist as soon as the profile is selected.
         (profile_dir / "mods").mkdir(exist_ok=True)

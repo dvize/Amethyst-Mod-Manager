@@ -35,56 +35,15 @@ from pathlib import Path
 
 
 def load_per_mod_strip_prefixes(profile_dir: Path) -> dict[str, list[str]]:
-    """Load per-mod strip prefixes from profile_dir/mod_strip_prefixes.json.
-
-    Returns a dict mapping mod name to list of top-level folder names to
-    ignore during deployment (contents move up one level). Missing or
-    invalid file returns {}.
-    """
-    path = profile_dir / "mod_strip_prefixes.json"
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        return {
-            k: v if isinstance(v, list) else []
-            for k, v in data.items()
-            if isinstance(k, str)
-        }
-    except (OSError, json.JSONDecodeError):
-        return {}
+    """Load per-mod strip prefixes from profile_state.json (falls back to legacy file)."""
+    from Utils.profile_state import read_mod_strip_prefixes
+    return read_mod_strip_prefixes(profile_dir)
 
 
 def load_separator_deploy_paths(profile_dir: Path) -> dict[str, dict]:
-    """Load separator_deploy_paths.json → {sep_name: {"path": str, "raw": bool}}.
-
-    Values may be plain strings (legacy) or dicts with "path" and "raw" keys.
-    Missing or invalid file returns {}.
-    """
-    path = profile_dir / "separator_deploy_paths.json"
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        result = {}
-        for k, v in data.items():
-            if not isinstance(k, str):
-                continue
-            if isinstance(v, str):
-                # Legacy format: plain path string
-                result[k] = {"path": v, "raw": False}
-            elif isinstance(v, dict):
-                result[k] = {
-                    "path": v.get("path", "") if isinstance(v.get("path"), str) else "",
-                    "raw": bool(v.get("raw", False)),
-                }
-        return result
-    except (OSError, json.JSONDecodeError):
-        return {}
+    """Load separator deploy paths from profile_state.json (falls back to legacy file)."""
+    from Utils.profile_state import read_separator_deploy_paths
+    return read_separator_deploy_paths(profile_dir)
 
 
 def expand_separator_deploy_paths(

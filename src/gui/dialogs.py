@@ -49,6 +49,7 @@ import gui.theme as _theme
 from gui.path_utils import _to_wine_path
 from Utils.config_paths import get_exe_args_path, get_profile_exe_args_path, get_custom_game_images_dir, get_vcredist_cache_path, get_dotnet_cache_dir, get_custom_games_dir
 from Utils.exe_args_builder import EXE_PROFILES
+from gui.ctk_components import CTkLoader
 from Utils.xdg import xdg_open, open_url
 
 
@@ -537,6 +538,7 @@ class GamePickerPanel(tk.Frame):
         self._curr_cols: int = 4
         self._show_installed_only = tk.BooleanVar(value=False)
         self._installed_game_names: set[str] | None = None  # None = not yet scanned
+        self._loader: CTkLoader | None = None
 
         self._build()
 
@@ -587,7 +589,7 @@ class GamePickerPanel(tk.Frame):
         ).grid(row=1, column=0, sticky="ew", padx=scaled(16), pady=(scaled(8), scaled(2)))
 
         # ---- Scrollable canvas ----
-        canvas_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
+        self._canvas_frame = canvas_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
         canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_rowconfigure(1, weight=0)
@@ -640,10 +642,16 @@ class GamePickerPanel(tk.Frame):
             _w.bind("<MouseWheel>", _fwd_scroll, add="+")
         self.bind("<Destroy>", self._on_destroy)
 
-        # Build cards
-        for name in self._game_names:
-            self._build_card(name)
-        self._regrid_cards()
+        # Show loader while cards are being built
+        self._loader = CTkLoader(canvas_frame)
+
+        def _deferred_build():
+            for name in self._game_names:
+                self._build_card(name)
+            self._regrid_cards()
+            self._hide_loader()
+
+        self.after(50, _deferred_build)
 
         # ---- Bottom button bar ----
         btn_bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=52)
@@ -671,6 +679,22 @@ class GamePickerPanel(tk.Frame):
             fg_color=ACCENT, hover_color=ACCENT_HOV,
             command=self._on_installed_filter_toggle,
         ).pack(side="left", padx=(8, 4), pady=10)
+
+    # ------------------------------------------------------------------
+    # Loader overlay
+    # ------------------------------------------------------------------
+
+    def _show_loader(self):
+        if self._loader is None:
+            self._loader = CTkLoader(self._canvas_frame)
+
+    def _hide_loader(self):
+        if self._loader is not None:
+            try:
+                self._loader.stop_loader()
+            except Exception:
+                pass
+            self._loader = None
 
     # ------------------------------------------------------------------
     # Card building

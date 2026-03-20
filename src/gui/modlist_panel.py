@@ -11,6 +11,7 @@ import threading
 
 from Utils.xdg import xdg_open, open_url
 import tkinter as tk
+import tkinter.font as tkfont
 import tkinter.messagebox
 import tkinter.ttk as ttk
 from pathlib import Path
@@ -97,16 +98,35 @@ from Utils.modlist import (
 )
 from Utils.plugin_parser import check_missing_masters
 from Utils.plugins import (
-    read_disabled_plugins, write_disabled_plugins,
     read_plugins, write_plugins, PluginEntry,
     read_loadorder, write_loadorder,
-    read_excluded_mod_files,
 )
 from Utils.profile_backup import create_backup
+from Utils.profile_state import (
+    read_profile_state,
+    read_collapsed_seps,
+    read_separator_locks,
+    read_separator_colors,
+    read_separator_deploy_paths,
+    read_root_folder_state,
+    read_mod_strip_prefixes,
+    read_disabled_plugins,
+    read_excluded_mod_files,
+    read_ignored_missing_requirements,
+    write_collapsed_seps,
+    write_separator_locks,
+    write_separator_colors,
+    write_separator_deploy_paths,
+    write_root_folder_state,
+    write_mod_strip_prefixes,
+    write_disabled_plugins,
+    write_ignored_missing_requirements,
+)
 from Nexus.nexus_api import NexusAPI, NexusAPIError, NexusModRequirement
 from gui.collections_dialog import CollectionsDialog
 from gui.nexus_browser_overlay import NexusBrowserOverlay
 from gui.changelog_overlay import ChangelogOverlay
+from gui.mod_files_overlay import ModFilesOverlay
 from Nexus.nexus_meta import build_meta_from_download, ensure_installed_stamp, read_meta, write_meta
 from Nexus.nexus_download import delete_archive_and_sidecar
 from Utils.config_paths import get_download_cache_dir
@@ -143,8 +163,8 @@ def _truncate_text_for_width(widget: tk.Widget, text: str, font: tuple, max_px: 
         result = (text[: max_chars - 1] + "…") if len(text) > max_chars else text
     if len(_truncate_cache) >= _TRUNCATE_CACHE_MAX:
         # Evict oldest half to keep memory bounded
-        keep = _TRUNCATE_CACHE_MAX // 2
-        for k in list(_truncate_cache)[:keep]:
+        evict = len(_truncate_cache) - _TRUNCATE_CACHE_MAX // 2
+        for k in list(_truncate_cache)[:evict]:
             del _truncate_cache[k]
     _truncate_cache[key] = result
     return result
@@ -170,7 +190,7 @@ def _scan_meta_flags_impl(entries: list, mods_dir: Path) -> dict:
             meta = read_meta(meta_path)
             if not meta.installed and ensure_installed_stamp(meta_path):
                 meta = read_meta(meta_path)
-            if meta.has_update:
+            if meta.has_update and not meta.ignore_update:
                 update_mods.add(entry.name)
             if meta.missing_requirements:
                 missing_reqs.add(entry.name)
@@ -232,6 +252,7 @@ class ModListPanel(ctk.CTkFrame):
         self._call_threadsafe = call_threadsafe_fn
 
         self._game = None
+        self.__profile_state: dict = {}   # cached profile_state.json for current profile load
         self._entries:  list[ModEntry] = []
         self._sel_idx:  int = -1          # anchor of the current selection
         self._sel_set:  set[int] = set()  # all selected entry indices
@@ -347,7 +368,7 @@ class ModListPanel(ctk.CTkFrame):
         self._drag_start_y:  int = 0
         self._drag_moved:    bool = False
         self._drag_is_block: bool = False   # True when dragging a separator+its mods
-        self._drag_block:    list  = []     # snapshot of (entry, cb, var) at mousedown
+        self._drag_block:    list  = []     # snapshot of (entry, var) at mousedown
         self._drag_sel_indices: list[int] = []  # actual entry indices for sparse multi-select drag
         self._drag_cursor_y: int  = 0      # raw widget-space Y during drag (for ghost)
         self._drag_slot:     int  = -1     # last computed insertion slot (in vis-without-drag space)
@@ -393,6 +414,7 @@ class ModListPanel(ctk.CTkFrame):
         self._visible_indices: list[int] = []  # entry indices matching current filter
         self._vis_dirty: bool = True           # True when _visible_indices needs recomputing
         self._priorities: dict[int, int] = {}  # entry index → priority number (cached)
+        self._sep_block_cache: dict[int, range] = {}  # sep_idx → range (cached)
 
         # Column sorting (visual only — never touches modlist.txt)
         # _sort_column: None or one of "name", "installed", "flags", "conflicts", "priority"
@@ -401,9 +423,6 @@ class ModListPanel(ctk.CTkFrame):
 
         # Per-entry logical state (parallel to _entries, aligned by index)
         self._check_vars:    list[tk.BooleanVar | None] = []
-        # _check_buttons kept as a None-filled list so drag reorder code can pop/insert
-        # without touching real widgets.  Visual rendering uses the pool below.
-        self._check_buttons: list[None] = []
 
         # Lock canvas items for separator rows: sep_name → canvas item id
         # Pure canvas rect + checkmark — scroll in sync automatically.
@@ -474,17 +493,9 @@ class ModListPanel(ctk.CTkFrame):
         self._staging_requires_subdir = getattr(game, "mod_staging_requires_subdir", False)
         self._normalize_folder_case = getattr(game, "normalize_folder_case", True)
         self._conflict_ignore_filenames = getattr(game, "conflict_ignore_filenames", set())
-        # Load ignored missing-requirements list (one mod name per line)
-        ignored_path = profile_dir / "ignored_missing_requirements.txt"
-        self._ignored_missing_reqs = set()
-        if ignored_path.is_file():
-            try:
-                self._ignored_missing_reqs = {
-                    line.strip() for line in ignored_path.read_text().splitlines()
-                    if line.strip()
-                }
-            except OSError:
-                pass
+        # Load profile_state.json once; individual loaders pull from it
+        self.__profile_state = read_profile_state(profile_dir)
+        self._ignored_missing_reqs = read_ignored_missing_requirements(profile_dir, self.__profile_state)
         self._reload()
         if hasattr(self, "_restore_backup_btn"):
             self._restore_backup_btn.configure(state="normal")
@@ -1067,159 +1078,71 @@ class ModListPanel(ctk.CTkFrame):
     # Load / reload
     # ------------------------------------------------------------------
 
-    def _locks_path(self) -> Path | None:
-        if self._modlist_path is None:
-            return None
-        return self._modlist_path.parent / "separator_locks.json"
-
     def _load_sep_locks(self) -> None:
-        path = self._locks_path()
-        if path and path.is_file():
-            try:
-                self._sep_locks = json.loads(path.read_text(encoding="utf-8"))
-                return
-            except Exception:
-                pass
-        self._sep_locks = {}
+        if self._modlist_path is None:
+            self._sep_locks = {}
+            return
+        self._sep_locks = read_separator_locks(self._modlist_path.parent, self.__profile_state)
 
     def _save_sep_locks(self) -> None:
-        path = self._locks_path()
-        if path is None:
-            return
-        path.write_text(json.dumps(self._sep_locks, indent=2), encoding="utf-8")
-
-    def _sep_colors_path(self) -> Path | None:
         if self._modlist_path is None:
-            return None
-        return self._modlist_path.parent / "separator_colors.json"
+            return
+        write_separator_locks(self._modlist_path.parent, self._sep_locks)
 
     def _load_sep_colors(self) -> None:
-        path = self._sep_colors_path()
-        if path and path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._sep_colors = {k: v for k, v in data.items()
-                                        if isinstance(k, str) and isinstance(v, str)}
-                    return
-            except Exception:
-                pass
-        self._sep_colors = {}
+        if self._modlist_path is None:
+            self._sep_colors = {}
+            return
+        self._sep_colors = read_separator_colors(self._modlist_path.parent, self.__profile_state)
 
     def _save_sep_colors(self) -> None:
-        path = self._sep_colors_path()
-        if path is None:
-            return
-        path.write_text(json.dumps(self._sep_colors, indent=2), encoding="utf-8")
-
-    def _sep_deploy_paths_path(self) -> Path | None:
         if self._modlist_path is None:
-            return None
-        return self._modlist_path.parent / "separator_deploy_paths.json"
+            return
+        write_separator_colors(self._modlist_path.parent, self._sep_colors)
 
     def _load_sep_deploy_paths(self) -> None:
-        path = self._sep_deploy_paths_path()
-        if path and path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    result = {}
-                    for k, v in data.items():
-                        if not isinstance(k, str):
-                            continue
-                        if isinstance(v, str):
-                            result[k] = {"path": v, "raw": False}
-                        elif isinstance(v, dict):
-                            result[k] = {
-                                "path": v.get("path", "") if isinstance(v.get("path"), str) else "",
-                                "raw": bool(v.get("raw", False)),
-                            }
-                    self._sep_deploy_paths = result
-                    return
-            except Exception:
-                pass
-        self._sep_deploy_paths = {}
+        if self._modlist_path is None:
+            self._sep_deploy_paths = {}
+            return
+        self._sep_deploy_paths = read_separator_deploy_paths(self._modlist_path.parent, self.__profile_state)
 
     def _save_sep_deploy_paths(self) -> None:
-        path = self._sep_deploy_paths_path()
-        if path is None:
+        if self._modlist_path is None:
             return
-        path.write_text(json.dumps(self._sep_deploy_paths, indent=2), encoding="utf-8")
-
-    def _root_folder_state_path(self) -> Path | None:
-        if self._modlist_path is None:
-            return None
-        return self._modlist_path.parent / "root_folder_state.json"
-
-    def _mod_strip_prefixes_path(self) -> Path | None:
-        if self._modlist_path is None:
-            return None
-        return self._modlist_path.parent / "mod_strip_prefixes.json"
+        write_separator_deploy_paths(self._modlist_path.parent, self._sep_deploy_paths)
 
     def _load_mod_strip_prefixes(self) -> None:
-        path = self._mod_strip_prefixes_path()
-        if path and path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._mod_strip_prefixes = {
-                        k: v if isinstance(v, list) else []
-                        for k, v in data.items() if isinstance(k, str)
-                    }
-                    return
-            except Exception:
-                pass
-        self._mod_strip_prefixes = {}
+        if self._modlist_path is None:
+            self._mod_strip_prefixes = {}
+            return
+        self._mod_strip_prefixes = read_mod_strip_prefixes(self._modlist_path.parent, self.__profile_state)
 
     def _save_mod_strip_prefixes(self) -> None:
-        path = self._mod_strip_prefixes_path()
-        if path is None:
+        if self._modlist_path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self._mod_strip_prefixes, indent=2), encoding="utf-8")
+        write_mod_strip_prefixes(self._modlist_path.parent, self._mod_strip_prefixes)
 
     def _load_root_folder_state(self) -> None:
-        path = self._root_folder_state_path()
-        if path and path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self._root_folder_enabled = bool(data.get("enabled", True))
-                return
-            except Exception:
-                pass
-        self._root_folder_enabled = True
+        if self._modlist_path is None:
+            self._root_folder_enabled = True
+            return
+        self._root_folder_enabled = read_root_folder_state(self._modlist_path.parent, self.__profile_state)
 
     def _save_root_folder_state(self) -> None:
-        path = self._root_folder_state_path()
-        if path is None:
-            return
-        path.write_text(
-            json.dumps({"enabled": self._root_folder_enabled}, indent=2),
-            encoding="utf-8"
-        )
-
-    def _collapsed_path(self) -> Path | None:
         if self._modlist_path is None:
-            return None
-        return self._modlist_path.parent / "collapsed_seps.json"
+            return
+        write_root_folder_state(self._modlist_path.parent, self._root_folder_enabled)
 
     def _load_collapsed(self) -> None:
-        path = self._collapsed_path()
-        if path and path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self._collapsed_seps = set(data) if isinstance(data, list) else set()
-                return
-            except Exception:
-                pass
-        self._collapsed_seps = set()
+        if self._modlist_path is None:
+            self._collapsed_seps = set()
+            return
+        self._collapsed_seps = read_collapsed_seps(self._modlist_path.parent, self.__profile_state)
 
     def _save_collapsed(self) -> None:
-        path = self._collapsed_path()
-        if path is None:
+        if self._modlist_path is None:
             return
-        path.write_text(json.dumps(sorted(self._collapsed_seps), indent=2),
-                        encoding="utf-8")
+        write_collapsed_seps(self._modlist_path.parent, self._collapsed_seps)
 
     def _compute_bundle_groups(self) -> None:
         """Rebuild _bundle_groups from current _entries.
@@ -1343,38 +1266,29 @@ class ModListPanel(ctk.CTkFrame):
         self._update_info()
 
     def _scan_update_flags(self):
-        """Scan meta.ini for update flags. Delegates to _scan_meta_flags for single-pass efficiency."""
-        self._scan_meta_flags()
+        """Scan meta.ini for update flags. Uses async to avoid blocking UI."""
+        self._scan_meta_flags_async()
 
     def _scan_missing_reqs_flags(self):
-        """Scan meta.ini for missing requirements. Delegates to _scan_meta_flags for single-pass efficiency."""
-        self._scan_meta_flags()
+        """Scan meta.ini for missing requirements. Uses async to avoid blocking UI."""
+        self._scan_meta_flags_async()
 
     def _scan_endorsed_flags(self):
-        """Scan meta.ini for endorsed mods. Delegates to _scan_meta_flags for single-pass efficiency."""
-        self._scan_meta_flags()
+        """Scan meta.ini for endorsed mods. Uses async to avoid blocking UI."""
+        self._scan_meta_flags_async()
 
     def _scan_install_dates(self):
-        """Scan meta.ini for install dates. Delegates to _scan_meta_flags for single-pass efficiency."""
-        self._scan_meta_flags()
+        """Scan meta.ini for install dates. Uses async to avoid blocking UI."""
+        self._scan_meta_flags_async()
 
     def _save_ignored_missing_reqs(self) -> None:
-        """Persist _ignored_missing_reqs to profile's ignored_missing_requirements.txt."""
+        """Persist _ignored_missing_reqs to profile_state.json."""
         if self._modlist_path is None:
             return
-        profile_dir = self._modlist_path.parent
-        path = profile_dir / "ignored_missing_requirements.txt"
-        try:
-            if self._ignored_missing_reqs:
-                path.write_text("\n".join(sorted(self._ignored_missing_reqs)) + "\n")
-            elif path.is_file():
-                path.unlink()
-        except OSError:
-            pass
+        write_ignored_missing_requirements(self._modlist_path.parent, self._ignored_missing_reqs)
 
     def _rebuild_check_widgets(self):
         """Rebuild per-entry BooleanVars (logical state only — visual pool is separate)."""
-        self._check_buttons.clear()
         self._check_vars.clear()
         self._invalidate_derived_caches()
 
@@ -1382,11 +1296,9 @@ class ModListPanel(ctk.CTkFrame):
             if entry.is_separator:
                 # Placeholder keeps indices aligned with self._entries
                 self._check_vars.append(None)
-                self._check_buttons.append(None)
                 continue
             var = tk.BooleanVar(value=entry.enabled)
             self._check_vars.append(var)
-            self._check_buttons.append(None)  # visual widget comes from pool
 
     def _invalidate_derived_caches(self) -> None:
         """Mark cached data derived from _entries as stale.
@@ -1396,6 +1308,7 @@ class ModListPanel(ctk.CTkFrame):
         """
         self._vis_dirty = True
         self._priorities = {}
+        self._sep_block_cache: dict[int, range] = {}
         self._compute_bundle_groups()
 
     # ------------------------------------------------------------------
@@ -1515,6 +1428,15 @@ class ModListPanel(ctk.CTkFrame):
         c.delete("drag_overlay")
         cw = self._canvas_w
         dragging = self._drag_idx >= 0 and self._drag_moved
+
+        # Pre-compute font tuples (avoid re-creating inside the inner loop)
+        _FONT_NAME = ("Segoe UI", _theme.FS11)
+        _FONT_SEP_BOLD = ("Segoe UI", _theme.FS10, "bold")
+        _FONT_SMALL = ("Segoe UI", _theme.FS10)
+        _FONT_TINY = ("Segoe UI", _theme.FS9)
+        _FONT_CHECK = ("Segoe UI", _theme.FS12, "bold")
+        _FONT_RADIO = ("Segoe UI", _theme.FS13, "bold")
+        _FONT_STAR = ("Segoe UI", _theme.FS11)
 
         canvas_top = int(c.canvasy(0))
         canvas_h = c.winfo_height()
@@ -1668,7 +1590,7 @@ class ModListPanel(ctk.CTkFrame):
                         label_x = left_edge + scaled(4)
                         c.coords(self._pool_name[s], label_x, y_mid)
                         c.itemconfigure(self._pool_name[s], text=label, anchor="w",
-                                        fill=txt_col, font=("Segoe UI", _theme.FS10, "bold"), state="normal")
+                                        fill=txt_col, font=_FONT_SEP_BOLD, state="normal")
                         # Approximate bold label width at FS10 (~7px per char)
                         badge_x = label_x + len(label) * scaled(7) + scaled(8)
                         _deploy_path = _badge_info.get("path", "") if isinstance(_badge_info, dict) else str(_badge_info)
@@ -1694,7 +1616,7 @@ class ModListPanel(ctk.CTkFrame):
                         # Centered label with flanking decorative lines (default)
                         c.coords(self._pool_name[s], mid_x, y_mid)
                         c.itemconfigure(self._pool_name[s], text=label, anchor="center",
-                                        fill=txt_col, font=("Segoe UI", _theme.FS10, "bold"), state="normal")
+                                        fill=txt_col, font=_FONT_SEP_BOLD, state="normal")
                         c.itemconfigure(self._pool_sep_badge[s], state="hidden")
                         text_pad     = scaled(6)
                         label_hw     = len(label) * scaled(4) + text_pad
@@ -1775,7 +1697,7 @@ class ModListPanel(ctk.CTkFrame):
                             )
                             mark_id = c.create_text(
                                 cb_cx, y_mid, text="✓", anchor="center",
-                                fill=ACCENT, font=("Segoe UI", _theme.FS12, "bold"),
+                                fill=ACCENT, font=_FONT_CHECK,
                                 state="normal" if checked_rf else "hidden",
                                 tags=(lk_tag, "lock_cb"),
                             )
@@ -1821,7 +1743,7 @@ class ModListPanel(ctk.CTkFrame):
                             else:
                                 mark2_id = c.create_text(
                                     lk_x, y_mid, text="🔒", anchor="center",
-                                    fill=TEXT_SEP, font=("Segoe UI", _theme.FS9),
+                                    fill=TEXT_SEP, font=_FONT_TINY,
                                     state="normal" if locked_state else "hidden",
                                     tags=(lk_tag2, "lock_cb"),
                                 )
@@ -1870,7 +1792,7 @@ class ModListPanel(ctk.CTkFrame):
 
                     # Name text (truncate if it would overlap the category column)
                     name_color = TEXT_DIM if not entry.enabled else TEXT_MAIN
-                    name_font = ("Segoe UI", _theme.FS11)
+                    name_font = _FONT_NAME
                     is_bundle_variant = entry.bundle_name is not None
                     _name_indent = 0
                     name_width = self._COL_W[1] - scaled(4) - _name_indent
@@ -1889,7 +1811,7 @@ class ModListPanel(ctk.CTkFrame):
                     # Category text (truncate if it would overlap the flags column)
                     cat_text = self._category_names.get(entry.name, "")
                     if cat_text:
-                        cat_font = ("Segoe UI", _theme.FS10)
+                        cat_font = _FONT_SMALL
                         cat_width = self._COL_W[2] - scaled(4)
                         display_cat = _truncate_text_for_width(c, cat_text, cat_font, cat_width)
                         cat_cx = self._COL_X[2] + self._COL_W[2] // 2
@@ -1915,7 +1837,7 @@ class ModListPanel(ctk.CTkFrame):
                         c.coords(self._pool_install_text[s], flag_x, y_mid)
                         c.itemconfigure(self._pool_install_text[s],
                                         text="★", anchor="center", fill="#e5c07b",
-                                        font=("Segoe UI", _theme.FS11), state="normal")
+                                        font=_FONT_STAR, state="normal")
                         # secondary icon after star
                         flag_x2 = flag_x + 18
                         if entry.name in self._update_mods and self._icon_update:
@@ -1980,7 +1902,7 @@ class ModListPanel(ctk.CTkFrame):
                             c.coords(self._pool_install_text[s], inst_cx, y_mid)
                             c.itemconfigure(self._pool_install_text[s],
                                             text=install_text, anchor="center",
-                                            fill=TEXT_DIM, font=("Segoe UI", _theme.FS10), state="normal")
+                                            fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
                         else:
                             c.itemconfigure(self._pool_install_text[s], state="hidden")
 
@@ -1989,7 +1911,7 @@ class ModListPanel(ctk.CTkFrame):
                         c.coords(self._pool_priority_text[s], prio_cx, y_mid)
                         c.itemconfigure(self._pool_priority_text[s],
                                         text=str(priorities.get(i, "")), anchor="center",
-                                        fill=TEXT_DIM, font=("Segoe UI", _theme.FS10), state="normal")
+                                        fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
                     else:
                         # locked row — install date / priority still shown
                         install_text = self._install_dates.get(entry.name, "")
@@ -1998,12 +1920,12 @@ class ModListPanel(ctk.CTkFrame):
                                       self._COL_X[5] + self._COL_W[5] // 2, y_mid)
                         c.itemconfigure(self._pool_install_text[s],
                                         text=install_text, anchor="center",
-                                        fill=TEXT_DIM, font=("Segoe UI", _theme.FS10), state="normal")
+                                        fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
                         c.coords(self._pool_priority_text[s],
                                  self._COL_X[6] + self._COL_W[6] // 2, y_mid)
                         c.itemconfigure(self._pool_priority_text[s],
                                         text=str(priorities.get(i, "")), anchor="center",
-                                        fill=TEXT_DIM, font=("Segoe UI", _theme.FS10), state="normal")
+                                        fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
 
                     # Enable/disable control (canvas-drawn)
                     # Bundle variants → radio circle (● / ○); normal mods → checkbox
@@ -2018,7 +1940,7 @@ class ModListPanel(ctk.CTkFrame):
                             c.itemconfigure(self._pool_cb_mark[s],
                                             text="●" if checked else "○",
                                             fill=ACCENT if checked else TEXT_DIM,
-                                            font=("Segoe UI", _theme.FS13, "bold"),
+                                            font=_FONT_RADIO,
                                             state="normal")
                         else:
                             cb_size = scaled(14)
@@ -2032,7 +1954,7 @@ class ModListPanel(ctk.CTkFrame):
                             c.itemconfigure(self._pool_cb_mark[s],
                                             text="✓",
                                             fill=ACCENT,
-                                            font=("Segoe UI", _theme.FS12, "bold"),
+                                            font=_FONT_CHECK,
                                             state="normal" if checked else "hidden")
                     else:
                         c.itemconfigure(self._pool_cb_rect[s], state="hidden")
@@ -2526,7 +2448,7 @@ class ModListPanel(ctk.CTkFrame):
                     return
                 # Shift+click on separator: extend selection range (in display order)
                 if shift and self._sel_idx >= 0:
-                    vis = self._compute_visible_indices()
+                    vis = self._visible_indices
                     try:
                         lo_row = vis.index(self._sel_idx)
                         hi_row = vis.index(idx)
@@ -2546,7 +2468,7 @@ class ModListPanel(ctk.CTkFrame):
                 if self._sep_locks.get(self._entries[idx].name, False):
                     blk = self._sep_block_range(idx)
                     pending_block = [
-                        (self._entries[i], None, self._check_vars[i])
+                        (self._entries[i], self._check_vars[i])
                         for i in blk
                     ]
                     is_block = True
@@ -2576,7 +2498,7 @@ class ModListPanel(ctk.CTkFrame):
 
         # Shift+click: extend selection from anchor to clicked row (in display order)
         if shift and self._sel_idx >= 0:
-            vis = self._compute_visible_indices()
+            vis = self._visible_indices
             try:
                 lo_row = vis.index(self._sel_idx)
                 hi_row = vis.index(idx)
@@ -2629,9 +2551,15 @@ class ModListPanel(ctk.CTkFrame):
         # If multiple items are selected and the dragged item is in the selection,
         # treat the whole selection as the drag block (sorted by entry index).
         if len(self._sel_set) > 1 and idx in self._sel_set and not is_block:
-            sorted_sel = sorted(self._sel_set)
+            # Filter out locked entries — they should not be draggable
+            sorted_sel = sorted(
+                i for i in self._sel_set
+                if not self._entries[i].locked
+            )
+            if not sorted_sel:
+                return
             block = [
-                (self._entries[i], None, self._check_vars[i])
+                (self._entries[i], self._check_vars[i])
                 for i in sorted_sel
             ]
             # Remember the actual (possibly sparse) indices for correct removal later
@@ -2653,11 +2581,19 @@ class ModListPanel(ctk.CTkFrame):
     def _sep_block_range(self, sep_idx: int) -> range:
         """Return the range of indices [sep_idx, end) belonging to this separator block.
         The block is the separator plus every non-separator entry below it
-        until the next separator (or end of list)."""
+        until the next separator (or end of list). Results are cached."""
+        cache = getattr(self, "_sep_block_cache", None)
+        if cache is not None:
+            cached = cache.get(sep_idx)
+            if cached is not None:
+                return cached
         end = sep_idx + 1
         while end < len(self._entries) and not self._entries[end].is_separator:
             end += 1
-        return range(sep_idx, end)
+        result = range(sep_idx, end)
+        if cache is not None:
+            cache[sep_idx] = result
+        return result
 
     def _sep_block_has_disabled(self, sep_idx: int) -> bool:
         """True if this separator's block contains at least one disabled mod."""
@@ -2755,15 +2691,19 @@ class ModListPanel(ctk.CTkFrame):
         cy = self._event_canvas_y(event)
         blk_size = len(self._drag_block) if self._drag_is_block else 1
 
-        # Compute visible indices; for a collapsed separator drag the hidden
+        # Use cached visible indices; for a collapsed separator drag the hidden
         # mods are already excluded from this list so we only subtract the
         # *visible* portion of the dragged block (usually just 1 — the separator).
-        vis = self._compute_visible_indices()
+        if self._vis_dirty:
+            self._visible_indices = self._compute_visible_indices()
+            self._vis_dirty = False
+        vis = self._visible_indices
         if self._drag_sel_indices:
             drag_set = set(self._drag_sel_indices)
         else:
             drag_set = set(range(self._drag_idx, self._drag_idx + blk_size))
-        drag_vis_count = sum(1 for i in drag_set if i in set(vis))
+        vis_set = set(vis)
+        drag_vis_count = sum(1 for i in drag_set if i in vis_set)
         n_rendered = len(vis) - drag_vis_count
 
         # Which slot in the rendered list (without dragged items) is the cursor over?
@@ -2785,7 +2725,7 @@ class ModListPanel(ctk.CTkFrame):
             # Commit the deferred move now that the user released the mouse.
             slot = self._drag_target_slot
             blk_size = len(self._drag_block) if self._drag_is_block else 1
-            vis = self._compute_visible_indices()
+            vis = self._visible_indices
             if self._drag_sel_indices:
                 drag_set = set(self._drag_sel_indices)
             else:
@@ -2798,12 +2738,10 @@ class ModListPanel(ctk.CTkFrame):
                     # (highest index first to preserve lower indices during removal)
                     for i in sorted(self._drag_sel_indices, reverse=True):
                         self._entries.pop(i)
-                        self._check_buttons.pop(i)
                         self._check_vars.pop(i)
                 else:
                     # Contiguous block (separator drag)
                     del self._entries[self._drag_idx:self._drag_idx + blk_size]
-                    del self._check_buttons[self._drag_idx:self._drag_idx + blk_size]
                     del self._check_vars[self._drag_idx:self._drag_idx + blk_size]
 
                 if slot >= len(vis_without_drag):
@@ -2816,9 +2754,8 @@ class ModListPanel(ctk.CTkFrame):
                         and insert_at > len(self._entries) - 1):
                     insert_at = len(self._entries) - 1
 
-                for j, (entry, cb, var) in enumerate(self._drag_block):
+                for j, (entry, var) in enumerate(self._drag_block):
                     self._entries.insert(insert_at + j, entry)
-                    self._check_buttons.insert(insert_at + j, cb)
                     self._check_vars.insert(insert_at + j, var)
                 self._drag_idx = insert_at
                 # Update selection to the moved block's new positions
@@ -2827,7 +2764,6 @@ class ModListPanel(ctk.CTkFrame):
                     self._sel_idx = insert_at
             else:
                 entry = self._entries.pop(self._drag_idx)
-                cb    = self._check_buttons.pop(self._drag_idx)
                 var   = self._check_vars.pop(self._drag_idx)
 
                 if slot >= len(vis_without_drag):
@@ -2841,7 +2777,6 @@ class ModListPanel(ctk.CTkFrame):
                     insert_at = len(self._entries) - 1
 
                 self._entries.insert(insert_at, entry)
-                self._check_buttons.insert(insert_at, cb)
                 self._check_vars.insert(insert_at, var)
                 self._drag_idx = insert_at
                 self._sel_idx  = insert_at
@@ -2875,6 +2810,7 @@ class ModListPanel(ctk.CTkFrame):
         """Show a tooltip window near the given screen coordinates."""
         self._hide_tooltip()
         tw = tk.Toplevel(self)
+        tw.withdraw()
         tw.wm_overrideredirect(True)
         tw.configure(bg="#1a1a2e")
         lbl = tk.Label(
@@ -2888,6 +2824,7 @@ class ModListPanel(ctk.CTkFrame):
         tip_w = tw.winfo_reqwidth()
         tip_x = x - tip_w - 4
         tw.wm_geometry(f"+{tip_x}+{y + 8}")
+        tw.deiconify()
         self._tooltip_win = tw
 
     def _hide_tooltip(self) -> None:
@@ -2908,23 +2845,27 @@ class ModListPanel(ctk.CTkFrame):
             self._hover_idx = new_hover
             self._redraw()
 
-        # Show tooltip when hovering over the flags column warning icon
+        # Show tooltip when hovering over the flags column icons
         x = event.x
         flags_col_start = self._COL_X[3]
         flags_col_end = self._COL_X[4] if len(self._COL_X) > 4 else flags_col_start + 56
         if flags_col_start <= x < flags_col_end and 0 <= row < len(vis):
             entry = self._entries[vis[row]]
-            if (not entry.is_separator
-                    and entry.name in self._missing_reqs
-                    and entry.name not in self._ignored_missing_reqs):
-                missing = self._missing_reqs_detail.get(entry.name, [])
-                if missing:
-                    text = "Missing requirements:\n" + "\n".join(f"  - {m}" for m in missing)
-                else:
-                    text = "Missing requirements"
-                if self._tooltip_win is None:
-                    self._show_tooltip(event.x_root, event.y_root, text)
-                return
+            if not entry.is_separator:
+                if (entry.name in self._missing_reqs
+                        and entry.name not in self._ignored_missing_reqs):
+                    missing = self._missing_reqs_detail.get(entry.name, [])
+                    if missing:
+                        text = "Missing requirements:\n" + "\n".join(f"  - {m}" for m in missing)
+                    else:
+                        text = "Missing requirements"
+                    if self._tooltip_win is None:
+                        self._show_tooltip(event.x_root, event.y_root, text)
+                    return
+                if entry.name in self._update_mods:
+                    if self._tooltip_win is None:
+                        self._show_tooltip(event.x_root, event.y_root, "Update available on Nexus Mods")
+                    return
         self._hide_tooltip()
 
     def _on_mouse_leave(self, event):
@@ -3065,6 +3006,8 @@ class ModListPanel(ctk.CTkFrame):
                         nexus_url = f"https://www.nexusmods.com/{_domain}/mods/{_ctx_meta.mod_id}"
                         menu.add_command("Open on Nexus",
                             lambda: self._open_nexus_page(nexus_url))
+                        menu.add_command("Change Version",
+                            lambda mn=mod_name_capture: self._update_nexus_mod(mn))
                         if _ctx_meta.endorsed:
                             menu.add_command("Abstain from Endorsement",
                                 lambda: self._abstain_nexus_mod(mod_name_capture, _domain, _ctx_meta))
@@ -3081,9 +3024,6 @@ class ModListPanel(ctk.CTkFrame):
                                 lambda nc=mod_name_capture, ap=_archive_path: self._reinstall_mod(nc, ap))
                 except Exception:
                     pass
-            if mod_name_capture in self._update_mods:
-                menu.add_command("Update Mod",
-                    lambda: self._update_nexus_mod(mod_name_capture))
             if mod_name_capture in self._missing_reqs:
                 dep_names = self._missing_reqs_detail.get(mod_name_capture, [])
                 menu.add_command("Missing Requirements",
@@ -3235,7 +3175,6 @@ class ModListPanel(ctk.CTkFrame):
             sname = self._entries[idx].name
             self._entries.pop(idx)
             self._check_vars.pop(idx)
-            self._check_buttons.pop(idx)
             # Clean up lock canvas items for this separator
             if sname in self._lock_cb_rects:
                 self._canvas.delete(self._lock_cb_rects.pop(sname))
@@ -3334,7 +3273,6 @@ class ModListPanel(ctk.CTkFrame):
         # Remove from lists (highest index first to keep lower indices stable)
         for rem_idx in bundle_indices:
             self._entries.pop(rem_idx)
-            self._check_buttons.pop(rem_idx)
             self._check_vars.pop(rem_idx)
             if self._sel_idx == rem_idx:
                 self._sel_idx = -1
@@ -3410,7 +3348,6 @@ class ModListPanel(ctk.CTkFrame):
             if staging_root is not None:
                 removed_names.append(entry.name)
             self._entries.pop(i)
-            self._check_buttons.pop(i)
             self._check_vars.pop(i)
         if index_path is not None and removed_names:
             # Remove deployed files from the game directory before deleting the
@@ -3632,11 +3569,12 @@ class ModListPanel(ctk.CTkFrame):
                 pass
             self._sep_settings_overlay = None
 
-    def _show_separator_picker(self, mod_idx: int, sep_names: list[str],
-                               parent_dismiss=None,
-                               parent_popup=None) -> tk.Toplevel:
-        """Show a second popup listing all separators; clicking one moves the mod below it.
-        Returns the popup widget so the caller can manage its lifecycle."""
+    def _show_picker_popup(self, items: list, displays: list[str],
+                           on_pick, parent_dismiss=None,
+                           parent_popup=None) -> tk.Toplevel:
+        """Generic scrollable picker popup. *items* and *displays* are parallel lists.
+        *on_pick(item)* is called when the user clicks an entry.
+        Returns the popup widget."""
         popup = tk.Toplevel(self._canvas)
         popup.wm_withdraw()
         popup.wm_overrideredirect(True)
@@ -3645,165 +3583,25 @@ class ModListPanel(ctk.CTkFrame):
 
         _alive = [True]
 
-        def _dismiss(_event=None):
-            if _alive[0]:
-                _alive[0] = False
-                popup.destroy()
-
-        def _pick(sep_name: str):
+        def _pick_item(item):
             if _alive[0]:
                 _alive[0] = False
                 popup.destroy()
                 if parent_dismiss:
                     parent_dismiss()
-                self._move_to_separator(mod_idx, sep_name)
+                on_pick(item)
 
-        # Build display names
-        displays = [
-            name[:-len("_separator")] if name.endswith("_separator") else name
-            for name in sep_names
-        ]
+        ROW_H    = scaled(30)
+        MAX_ROWS = 20
+        FONT     = ("Segoe UI", 11)
+        PAD_X    = scaled(24)
 
-        ROW_H      = scaled(30)   # px per item
-        MAX_ROWS   = 20   # cap before scrollbar kicks in
-        FONT       = ("Segoe UI", 11)
-        PAD_X      = scaled(24)   # left+right padding around text
-
-        # Measure width needed for the longest name
-        tmp = tk.Label(popup, font=FONT, text="")
-        tmp.update_idletasks()
-        import tkinter.font as tkfont
         fnt = tkfont.Font(font=FONT)
         max_text_w = max((fnt.measure(d) for d in displays), default=100)
-        tmp.destroy()
         popup_w = max_text_w + PAD_X * 2
 
-        needs_scroll = len(sep_names) > MAX_ROWS
-        visible_rows = min(len(sep_names), MAX_ROWS)
-        popup_h      = visible_rows * ROW_H
-
-        # Outer border frame
-        outer = tk.Frame(popup, bg=BORDER, bd=0)
-        outer.pack(padx=1, pady=1)
-
-        if needs_scroll:
-            # Canvas + scrollbar for long lists (match modlist scrollbar style)
-            canvas = tk.Canvas(outer, bg=BG_PANEL, bd=0, highlightthickness=0,
-                               width=popup_w, height=popup_h)
-            vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview,
-                               bg=BG_SEP, troughcolor=BG_DEEP, activebackground=ACCENT,
-                               highlightthickness=0, bd=0)
-            canvas.configure(yscrollcommand=vsb.set)
-            canvas.pack(side="left", fill="both", expand=True)
-            vsb.pack(side="right", fill="y")
-            inner = tk.Frame(canvas, bg=BG_PANEL, bd=0)
-            canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-            def _on_inner_resize(e):
-                canvas.configure(scrollregion=canvas.bbox("all"))
-                canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
-            inner.bind("<Configure>", _on_inner_resize)
-
-            def _on_wheel(evt):
-                if getattr(evt, "delta", 0) > 0:
-                    canvas.yview_scroll(-3, "units")
-                else:
-                    canvas.yview_scroll(3, "units")
-
-            def _bind_scroll(widget):
-                widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-                widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
-                widget.bind("<MouseWheel>", _on_wheel)
-
-            for w in (canvas, vsb, inner, outer, popup):
-                _bind_scroll(w)
-        else:
-            inner = tk.Frame(outer, bg=BG_PANEL, bd=0, width=popup_w)
-            inner.pack(fill="both", expand=True)
-
-        for name, display in zip(sep_names, displays):
-            btn = tk.Label(
-                inner, text=display, anchor="w",
-                bg=BG_PANEL, fg=TEXT_MAIN,
-                font=FONT,
-                padx=12, pady=5, cursor="hand2",
-                width=0,
-            )
-            btn.pack(fill="x")
-            btn.bind("<ButtonRelease-1>", lambda _e, n=name: _pick(n))
-            btn.bind("<Enter>", lambda _e, b=btn: b.configure(bg=BG_SELECT))
-            btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=BG_PANEL))
-            if needs_scroll:
-                _bind_scroll(btn)
-
-        popup.update_idletasks()
-        pw = popup.winfo_reqwidth()
-        ph = popup.winfo_reqheight()
-        _app_tl = self.winfo_toplevel()
-        app_right  = _app_tl.winfo_rootx() + _app_tl.winfo_width()
-        app_bottom = _app_tl.winfo_rooty() + _app_tl.winfo_height()
-        if parent_popup is not None:
-            # Position to the right of the parent menu
-            px = parent_popup.winfo_rootx() + parent_popup.winfo_width()
-            py = cy - ph // 2  # vertically centre on the cursor
-        else:
-            px = cx
-            py = cy
-        # Clamp to app window bounds
-        px = min(px, app_right - pw)
-        py = min(py, app_bottom - ph)
-        px = max(px, 0)
-        py = max(py, 0)
-        popup.wm_geometry(f"+{px}+{py}")
-        popup.wm_deiconify()
-
-        return popup
-
-    def _show_separator_picker_multi(self, indices: list[int], sep_names: list[str],
-                                     parent_dismiss=None,
-                                     parent_popup=None) -> tk.Toplevel:
-        """Like _show_separator_picker but moves all mods at `indices` to the chosen separator."""
-        popup = tk.Toplevel(self._canvas)
-        popup.wm_withdraw()
-        popup.wm_overrideredirect(True)
-        popup.configure(bg=BORDER)
-        cx, cy = popup.winfo_pointerxy()
-
-        _alive = [True]
-
-        def _dismiss(_event=None):
-            if _alive[0]:
-                _alive[0] = False
-                popup.destroy()
-
-        def _pick(sep_name: str):
-            if _alive[0]:
-                _alive[0] = False
-                popup.destroy()
-                if parent_dismiss:
-                    parent_dismiss()
-                self._move_selected_to_separator(indices, sep_name)
-
-        displays = [
-            name[:-len("_separator")] if name.endswith("_separator") else name
-            for name in sep_names
-        ]
-
-        ROW_H      = 30
-        MAX_ROWS   = 20
-        FONT       = ("Segoe UI", 11)
-        PAD_X      = 24
-
-        tmp = tk.Label(popup, font=FONT, text="")
-        tmp.update_idletasks()
-        import tkinter.font as tkfont
-        fnt = tkfont.Font(font=FONT)
-        max_text_w = max((fnt.measure(d) for d in displays), default=100)
-        tmp.destroy()
-        popup_w = max_text_w + PAD_X * 2
-
-        needs_scroll = len(sep_names) > MAX_ROWS
-        visible_rows = min(len(sep_names), MAX_ROWS)
+        needs_scroll = len(items) > MAX_ROWS
+        visible_rows = min(len(items), MAX_ROWS)
         popup_h      = visible_rows * ROW_H
 
         outer = tk.Frame(popup, bg=BORDER, bd=0)
@@ -3842,8 +3640,9 @@ class ModListPanel(ctk.CTkFrame):
         else:
             inner = tk.Frame(outer, bg=BG_PANEL, bd=0, width=popup_w)
             inner.pack(fill="both", expand=True)
+            _bind_scroll = None
 
-        for name, display in zip(sep_names, displays):
+        for item, display in zip(items, displays):
             btn = tk.Label(
                 inner, text=display, anchor="w",
                 bg=BG_PANEL, fg=TEXT_MAIN,
@@ -3852,10 +3651,10 @@ class ModListPanel(ctk.CTkFrame):
                 width=0,
             )
             btn.pack(fill="x")
-            btn.bind("<ButtonRelease-1>", lambda _e, n=name: _pick(n))
+            btn.bind("<ButtonRelease-1>", lambda _e, it=item: _pick_item(it))
             btn.bind("<Enter>", lambda _e, b=btn: b.configure(bg=BG_SELECT))
             btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=BG_PANEL))
-            if needs_scroll:
+            if _bind_scroll:
                 _bind_scroll(btn)
 
         popup.update_idletasks()
@@ -3879,6 +3678,34 @@ class ModListPanel(ctk.CTkFrame):
 
         return popup
 
+    def _show_separator_picker(self, mod_idx: int, sep_names: list[str],
+                               parent_dismiss=None,
+                               parent_popup=None) -> tk.Toplevel:
+        """Show a popup listing all separators; clicking one moves the mod below it."""
+        displays = [
+            name[:-len("_separator")] if name.endswith("_separator") else name
+            for name in sep_names
+        ]
+        return self._show_picker_popup(
+            sep_names, displays,
+            on_pick=lambda sep_name: self._move_to_separator(mod_idx, sep_name),
+            parent_dismiss=parent_dismiss, parent_popup=parent_popup,
+        )
+
+    def _show_separator_picker_multi(self, indices: list[int], sep_names: list[str],
+                                     parent_dismiss=None,
+                                     parent_popup=None) -> tk.Toplevel:
+        """Like _show_separator_picker but moves all mods at `indices` to the chosen separator."""
+        displays = [
+            name[:-len("_separator")] if name.endswith("_separator") else name
+            for name in sep_names
+        ]
+        return self._show_picker_popup(
+            sep_names, displays,
+            on_pick=lambda sep_name: self._move_selected_to_separator(indices, sep_name),
+            parent_dismiss=parent_dismiss, parent_popup=parent_popup,
+        )
+
     def _open_nexus_pages(self, urls: list[str]) -> None:
         """Open multiple Nexus Mods pages, one tab per mod."""
         for url in urls:
@@ -3888,8 +3715,8 @@ class ModListPanel(ctk.CTkFrame):
         """Open the Disable Plugins panel/dialog for a mod and save results."""
         if self._modlist_path is None:
             return
-        disabled_path = self._modlist_path.parent / "disabled_plugins.json"
-        all_disabled = read_disabled_plugins(disabled_path)
+        profile_dir = self._modlist_path.parent
+        all_disabled = read_disabled_plugins(profile_dir, self.__profile_state)
         currently_disabled = set(all_disabled.get(mod_name, []))
 
         app = self.winfo_toplevel()
@@ -3899,7 +3726,7 @@ class ModListPanel(ctk.CTkFrame):
                 if panel.result is None:
                     return
                 self._finish_disable_plugins(mod_name, panel.result, currently_disabled,
-                                             disabled_path, all_disabled)
+                                             profile_dir, all_disabled)
             show_fn(mod_name, plugin_files, currently_disabled, _on_panel_done)
         else:
             dlg = _DisablePluginsDialog(
@@ -3912,10 +3739,10 @@ class ModListPanel(ctk.CTkFrame):
             if dlg.result is None:
                 return
             self._finish_disable_plugins(mod_name, dlg.result, currently_disabled,
-                                         disabled_path, all_disabled)
+                                         profile_dir, all_disabled)
 
     def _finish_disable_plugins(self, mod_name, result, currently_disabled,
-                                disabled_path, all_disabled):
+                                profile_dir, all_disabled):
         """Persist disable-plugins result and update plugins.txt immediately."""
         if result:
             all_disabled[mod_name] = sorted(result)
@@ -3926,8 +3753,10 @@ class ModListPanel(ctk.CTkFrame):
         newly_disabled = result - currently_disabled
         newly_enabled  = currently_disabled - result
 
-        write_disabled_plugins(disabled_path, all_disabled)
+        write_disabled_plugins(profile_dir, all_disabled)
         self._disabled_plugins_map = all_disabled
+        # Keep snapshot in sync so reads that use __profile_state see all mods' disables
+        self.__profile_state = read_profile_state(profile_dir)
 
         # Immediately update plugins.txt and refresh the panel without waiting
         # for the async filemap rebuild to complete.
@@ -3980,121 +3809,13 @@ class ModListPanel(ctk.CTkFrame):
     def _show_ini_picker(self, ini_files: list[Path],
                          parent_dismiss=None,
                          parent_popup=None) -> tk.Toplevel:
-        """Show a submenu listing all INI files; clicking one opens it.
-        Returns the popup widget so the caller can manage its lifecycle."""
-        popup = tk.Toplevel(self._canvas)
-        popup.wm_withdraw()
-        popup.wm_overrideredirect(True)
-        popup.configure(bg=BORDER)
-        cx, cy = popup.winfo_pointerxy()
-
-        _alive = [True]
-
-        def _dismiss(_event=None):
-            if _alive[0]:
-                _alive[0] = False
-                popup.destroy()
-
-        def _pick(ini_path: Path):
-            if _alive[0]:
-                _alive[0] = False
-                popup.destroy()
-                if parent_dismiss:
-                    parent_dismiss()
-                self._open_ini(ini_path)
-
+        """Show a submenu listing all INI files; clicking one opens it."""
         displays = [f"Open {p.name}" for p in ini_files]
-
-        ROW_H    = scaled(30)
-        MAX_ROWS = 20
-        FONT     = ("Segoe UI", 11)
-        PAD_X    = scaled(24)
-
-        tmp = tk.Label(popup, font=FONT, text="")
-        tmp.update_idletasks()
-        import tkinter.font as tkfont
-        fnt = tkfont.Font(font=FONT)
-        max_text_w = max((fnt.measure(d) for d in displays), default=100)
-        tmp.destroy()
-        popup_w = max_text_w + PAD_X * 2
-
-        needs_scroll = len(ini_files) > MAX_ROWS
-        visible_rows = min(len(ini_files), MAX_ROWS)
-        popup_h      = visible_rows * ROW_H
-
-        outer = tk.Frame(popup, bg=BORDER, bd=0)
-        outer.pack(padx=1, pady=1)
-
-        if needs_scroll:
-            canvas = tk.Canvas(outer, bg=BG_PANEL, bd=0, highlightthickness=0,
-                               width=popup_w, height=popup_h)
-            vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview,
-                              bg=BG_SEP, troughcolor=BG_DEEP, activebackground=ACCENT,
-                              highlightthickness=0, bd=0)
-            canvas.configure(yscrollcommand=vsb.set)
-            canvas.pack(side="left", fill="both", expand=True)
-            vsb.pack(side="right", fill="y")
-            inner = tk.Frame(canvas, bg=BG_PANEL, bd=0)
-            canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-            def _on_inner_resize(e):
-                canvas.configure(scrollregion=canvas.bbox("all"))
-                canvas.itemconfigure(canvas_window, width=canvas.winfo_width())
-            inner.bind("<Configure>", _on_inner_resize)
-
-            def _on_wheel(evt):
-                if getattr(evt, "delta", 0) > 0:
-                    canvas.yview_scroll(-3, "units")
-                else:
-                    canvas.yview_scroll(3, "units")
-
-            def _bind_scroll(widget):
-                widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-                widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
-                widget.bind("<MouseWheel>", _on_wheel)
-
-            for w in (canvas, vsb, inner, outer, popup):
-                _bind_scroll(w)
-        else:
-            inner = tk.Frame(outer, bg=BG_PANEL, bd=0, width=popup_w)
-            inner.pack(fill="both", expand=True)
-
-        for ini_path, display in zip(ini_files, displays):
-            btn = tk.Label(
-                inner, text=display, anchor="w",
-                bg=BG_PANEL, fg=TEXT_MAIN,
-                font=FONT,
-                padx=12, pady=5, cursor="hand2",
-                width=0,
-            )
-            btn.pack(fill="x")
-            btn.bind("<ButtonRelease-1>", lambda _e, p=ini_path: _pick(p))
-            btn.bind("<Enter>", lambda _e, b=btn: b.configure(bg=BG_SELECT))
-            btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=BG_PANEL))
-            if needs_scroll:
-                _bind_scroll(btn)
-
-        popup.update_idletasks()
-        pw = popup.winfo_reqwidth()
-        ph = popup.winfo_reqheight()
-        _app_tl = self.winfo_toplevel()
-        app_right  = _app_tl.winfo_rootx() + _app_tl.winfo_width()
-        app_bottom = _app_tl.winfo_rooty() + _app_tl.winfo_height()
-        if parent_popup is not None:
-            px = parent_popup.winfo_rootx() + parent_popup.winfo_width()
-            py = cy - ph // 2
-        else:
-            px = cx
-            py = cy
-        # Clamp to app window bounds
-        px = min(px, app_right - pw)
-        py = min(py, app_bottom - ph)
-        px = max(px, 0)
-        py = max(py, 0)
-        popup.wm_geometry(f"+{px}+{py}")
-        popup.wm_deiconify()
-
-        return popup
+        return self._show_picker_popup(
+            ini_files, displays,
+            on_pick=lambda ini_path: self._open_ini(ini_path),
+            parent_dismiss=parent_dismiss, parent_popup=parent_popup,
+        )
 
     def _show_mod_strip_dialog(self, mod_name: str, mod_folder: Path) -> None:
         """Open a dialog to set which folders (at any depth) to ignore during deployment.
@@ -4135,10 +3856,7 @@ class ModListPanel(ctk.CTkFrame):
         )
         msg.pack(anchor="w", padx=12, pady=(12, 8))
 
-        self._load_mod_strip_prefixes()
-        current = self._mod_strip_prefixes.get(mod_name, [])
-        # Support both formats: full paths (e.g. "Tree", "Meshes/Architecture") and legacy segment names only
-        use_path_format = any("/" in p for p in current)
+        # current and use_path_format already loaded by the caller above
         current_set = {p.lower() for p in current} if use_path_format else {s.lower() for s in current}
         vars_map: dict[str, tk.BooleanVar] = {}  # rel_path -> var
         scroll_h = 320
@@ -4330,7 +4048,6 @@ class ModListPanel(ctk.CTkFrame):
 
         # Pull the mod out
         entry = self._entries.pop(mod_idx)
-        self._check_buttons.pop(mod_idx)
         var   = self._check_vars.pop(mod_idx)
 
         # Recalculate sep_idx after removal
@@ -4340,7 +4057,6 @@ class ModListPanel(ctk.CTkFrame):
         # Insert directly below the separator
         dest = sep_idx + 1
         self._entries.insert(dest, entry)
-        self._check_buttons.insert(dest, None)
         self._check_vars.insert(dest, var)
 
         self._sel_idx = dest
@@ -4369,7 +4085,6 @@ class ModListPanel(ctk.CTkFrame):
         for i in sorted(indices, reverse=True):
             if 0 <= i < len(self._entries):
                 self._entries.pop(i)
-                self._check_buttons.pop(i)
                 self._check_vars.pop(i)
 
         # Find separator after removals
@@ -4382,7 +4097,6 @@ class ModListPanel(ctk.CTkFrame):
             # Separator was removed (shouldn't happen), put items back at end
             for entry, var in to_move:
                 self._entries.append(entry)
-                self._check_buttons.append(None)
                 self._check_vars.append(var)
             self._invalidate_derived_caches()
             self._save_modlist()
@@ -4395,7 +4109,6 @@ class ModListPanel(ctk.CTkFrame):
         dest = sep_idx + 1
         for j, (entry, var) in enumerate(to_move):
             self._entries.insert(dest + j, entry)
-            self._check_buttons.insert(dest + j, None)
             self._check_vars.insert(dest + j, var)
 
         # Update selection to the moved block
@@ -4605,7 +4318,7 @@ class ModListPanel(ctk.CTkFrame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _update_nexus_mod(self, mod_name: str) -> None:
-        """Download the latest version of a mod from Nexus and install it."""
+        """Show the mod files overlay so the user can pick which file to install."""
         app = self.winfo_toplevel()
         if getattr(app, "_nexus_api", None) is None:
             self._log("Nexus: Set your API key first (Nexus button).")
@@ -4629,17 +4342,84 @@ class ModListPanel(ctk.CTkFrame):
             return
         game_domain = game.nexus_game_domain or meta.game_domain
 
-        self._log(f"Nexus: Updating {mod_name}...")
-        cancel_event = self.get_download_cancel_event()
-        self.show_download_progress(f"Updating: {mod_name}", cancel=cancel_event)
+        if not meta.mod_id:
+            self._log(f"Nexus: No mod ID in metadata for {mod_name}.")
+            return
+
+        api = app._nexus_api
+        mod_panel = self
+        log_fn = self._log
+
+        def _fetch_files():
+            files_resp = api.get_mod_files(game_domain, meta.mod_id)
+            return files_resp.files
+
+        def _on_install(file_id: int, file_name: str):
+            self._download_and_install_nexus_file(
+                mod_name=mod_name,
+                game_domain=game_domain,
+                meta=meta,
+                meta_path=meta_path,
+                game=game,
+                file_id=file_id,
+            )
+
+        def _on_ignore(state: bool):
+            try:
+                m = read_meta(meta_path)
+                m.ignore_update = state
+                if state:
+                    m.has_update = False
+                write_meta(meta_path, m)
+            except Exception as exc:
+                log_fn(f"Nexus: Could not save ignore flag — {exc}")
+            app.after(0, mod_panel._scan_update_flags)
+            app.after(0, mod_panel._redraw)
+
+        self._close_mod_files_overlay()
+        panel = ModFilesOverlay(
+            parent=self,
+            mod_name=mod_name,
+            game_domain=game_domain,
+            mod_id=meta.mod_id,
+            installed_file_id=meta.file_id,
+            ignore_update=meta.ignore_update,
+            on_install=_on_install,
+            on_ignore=_on_ignore,
+            on_close=self._close_mod_files_overlay,
+            fetch_files_fn=_fetch_files,
+        )
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._mod_files_panel = panel
+
+    def _close_mod_files_overlay(self):
+        panel = getattr(self, "_mod_files_panel", None)
+        if panel is not None:
+            panel.cleanup()
+            panel.place_forget()
+            panel.destroy()
+            self._mod_files_panel = None
+
+    def _download_and_install_nexus_file(
+        self,
+        mod_name: str,
+        game_domain: str,
+        meta,
+        meta_path: Path,
+        game,
+        file_id: int,
+    ) -> None:
+        """Download a specific Nexus file and install it."""
+        app = self.winfo_toplevel()
         log_fn = self._log
         mod_panel = self
+        cancel_event = self.get_download_cancel_event()
+        self.show_download_progress(f"Updating: {mod_name}", cancel=cancel_event)
 
         def _worker():
             api = app._nexus_api
             downloader = app._nexus_downloader
 
-            # Check if the user is premium
             is_premium = False
             try:
                 user = api.validate()
@@ -4648,54 +4428,33 @@ class ModListPanel(ctk.CTkFrame):
                 pass
 
             if not is_premium:
-                # Free user — open the mod's files page in the browser
                 files_url = f"https://www.nexusmods.com/{game_domain}/mods/{meta.mod_id}?tab=files"
                 def _fallback():
                     mod_panel.hide_download_progress(cancel=cancel_event)
                     open_url(files_url)
-                    log_fn(f"Nexus: Premium required for direct download.")
-                    log_fn(f"Nexus: Opened files page — click \"Download with Mod Manager\" there.")
+                    log_fn("Nexus: Premium required for direct download.")
+                    log_fn("Nexus: Opened files page — click \"Download with Mod Manager\" there.")
                 app.after(0, _fallback)
-                return
-
-            # Premium user — direct download
-            if not meta.mod_id:
-                app.after(0, lambda: log_fn(f"Nexus: No mod ID in metadata for {mod_name}."))
-                app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
                 return
 
             mod_info = None
             file_info = None
-            latest_file_id = meta.latest_file_id
             try:
                 mod_info = api.get_mod(game_domain, meta.mod_id)
                 files_resp = api.get_mod_files(game_domain, meta.mod_id)
-                if latest_file_id <= 0:
-                    # No cached update info — pick the newest main/update file
-                    candidates = [f for f in files_resp.files if (f.category_name or "").upper() in ("MAIN", "UPDATE")] or files_resp.files
-                    if candidates:
-                        best = max(candidates, key=lambda f: f.uploaded_timestamp)
-                        latest_file_id = best.file_id
-                        file_info = best
-                else:
-                    for f in files_resp.files:
-                        if f.file_id == latest_file_id:
-                            file_info = f
-                            break
+                for f in files_resp.files:
+                    if f.file_id == file_id:
+                        file_info = f
+                        break
             except Exception as exc:
-                app.after(0, lambda: log_fn(f"Nexus: Could not fetch mod files — {exc}"))
-                app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
-                return
-
-            if latest_file_id <= 0:
-                app.after(0, lambda: log_fn(f"Nexus: No files found for {mod_name} on Nexus."))
+                app.after(0, lambda: log_fn(f"Nexus: Could not fetch mod info — {exc}"))
                 app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
                 return
 
             result = downloader.download_file(
                 game_domain=game_domain,
                 mod_id=meta.mod_id,
-                file_id=latest_file_id,
+                file_id=file_id,
                 progress_cb=lambda cur, total: app.after(
                     0, lambda c=cur, t=total: mod_panel.update_download_progress(c, t, cancel=cancel_event)
                 ),
@@ -4722,12 +4481,11 @@ class ModListPanel(ctk.CTkFrame):
                     finally:
                         if status_bar is not None:
                             app.after(0, status_bar.clear_progress)
-                    # Update metadata
                     try:
                         new_meta = build_meta_from_download(
                             game_domain=game_domain,
                             mod_id=meta.mod_id,
-                            file_id=latest_file_id,
+                            file_id=file_id,
                             archive_name=result.file_name,
                             mod_info=mod_info,
                             file_info=file_info,
@@ -4741,9 +4499,6 @@ class ModListPanel(ctk.CTkFrame):
                     log_fn(f"Nexus: {mod_name} updated successfully.")
 
                 def _install():
-                    # Defer if a modal dialog (e.g. FOMOD wizard) currently has
-                    # the input grab — spawning a thread inside wait_window's event
-                    # loop could cause deadlocks on the _interactive_dialog_lock.
                     try:
                         if app.grab_current() is not None:
                             app.after(500, _install)
@@ -4793,117 +4548,126 @@ class ModListPanel(ctk.CTkFrame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _show_overwrites_dialog(self, mod_name: str) -> None:
-        """Open the conflict detail dialog for a mod."""
+        """Open the conflict detail dialog for a mod (I/O runs in a background thread)."""
         if self._modlist_path is None:
             return
+        # Snapshot state needed by the worker
         filemap_path = self._filemap_path
         staging_root = self._staging_root
-
-        # Build winner map: lowercase_rel -> (original_rel, winning_mod)
-        winning_map: dict[str, tuple[str, str]] = {}
-        if filemap_path.is_file():
-            with filemap_path.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.rstrip("\n")
-                    if "\t" not in line:
-                        continue
-                    rel_path, winner = line.split("\t", 1)
-                    winning_map[rel_path.lower()] = (rel_path, winner)
-
-        # Walk this mod's staging folder to get its file set
-        my_staging = staging_root / mod_name
         profile_dir = self._modlist_path.parent
-        per_mod = load_per_mod_strip_prefixes(profile_dir)
-        strip_lower = {s.lower() for s in self._strip_prefixes}
+        strip_prefixes = set(self._strip_prefixes)
+        beaten_mods = set(self._overrides.get(mod_name, set()))
+        call_threadsafe = self._call_threadsafe
 
-        def _strip_for(name: str, rel: str) -> str:
-            """Strip prefixes the same way filemap.py does for a given mod."""
-            # Per-mod path prefixes (contain "/") — strip longest match first
-            mod_paths = sorted(
-                (p for p in per_mod.get(name, []) if "/" in p),
-                key=lambda p: -len(p),
-            )
-            if mod_paths:
-                rel_lower = rel.lower()
-                for p in mod_paths:
-                    p_lower = p.lower()
-                    if rel_lower.startswith(p_lower + "/"):
-                        rel = rel[len(p) + 1:]
-                        break
-                    elif rel_lower == p_lower:
-                        rel = ""
-                        break
-            # Per-mod segment names (no "/") merged with game-level strip_prefixes
-            mod_segs = strip_lower | {s.lower() for s in per_mod.get(name, []) if "/" not in s}
-            while "/" in rel and rel.split("/", 1)[0].lower() in mod_segs:
-                rel = rel.split("/", 1)[1]
-            return rel
+        def _worker():
+            per_mod = load_per_mod_strip_prefixes(profile_dir)
+            strip_lower = {s.lower() for s in strip_prefixes}
 
-        my_files: dict[str, str] = {}   # lowercase_rel -> original_rel (after strip)
-        if my_staging.is_dir():
-            for dirpath, _, fnames in os.walk(my_staging):
-                for fname in fnames:
-                    if fname.lower() == "meta.ini":
-                        continue
-                    full = os.path.join(dirpath, fname)
-                    rel = os.path.relpath(full, my_staging).replace("\\", "/")
-                    rel = _strip_for(mod_name, rel)
-                    if rel:
-                        my_files[rel.lower()] = rel
+            def _strip_for(name: str, rel: str) -> str:
+                """Strip prefixes the same way filemap.py does for a given mod."""
+                mod_paths = sorted(
+                    (p for p in per_mod.get(name, []) if "/" in p),
+                    key=lambda p: -len(p),
+                )
+                if mod_paths:
+                    rl = rel.lower()
+                    for p in mod_paths:
+                        pl = p.lower()
+                        if rl.startswith(pl + "/"):
+                            rel = rel[len(p) + 1:]
+                            break
+                        elif rl == pl:
+                            rel = ""
+                            break
+                mod_segs = strip_lower | {s.lower() for s in per_mod.get(name, []) if "/" not in s}
+                while "/" in rel and rel.split("/", 1)[0].lower() in mod_segs:
+                    rel = rel.split("/", 1)[1]
+                return rel
 
-        # Classify each file
-        files_i_win:  list[tuple[str, str]] = []   # (path, beaten mods str)
-        files_i_lose: list[tuple[str, str]] = []   # (path, winner mod)
+            # Build winner map from filemap.txt
+            winning_map: dict[str, tuple[str, str]] = {}
+            if filemap_path.is_file():
+                with filemap_path.open(encoding="utf-8") as f:
+                    for line in f:
+                        line = line.rstrip("\n")
+                        if "\t" not in line:
+                            continue
+                        rel_path, winner = line.split("\t", 1)
+                        winning_map[rel_path.lower()] = (rel_path, winner)
 
-        for rel_lower, orig_rel in sorted(my_files.items()):
-            if rel_lower in winning_map:
-                orig, winner = winning_map[rel_lower]
-                if winner == mod_name:
-                    files_i_win.append((orig, ""))
+            # Walk this mod's staging folder
+            my_staging = staging_root / mod_name
+            my_files: dict[str, str] = {}
+            if my_staging.is_dir():
+                for dirpath, _, fnames in os.walk(my_staging):
+                    for fname in fnames:
+                        if fname.lower() == "meta.ini":
+                            continue
+                        full = os.path.join(dirpath, fname)
+                        rel = os.path.relpath(full, my_staging).replace("\\", "/")
+                        rel = _strip_for(mod_name, rel)
+                        if rel:
+                            my_files[rel.lower()] = rel
+
+            # Classify each file
+            files_i_win: list[tuple[str, str]] = []
+            files_i_lose: list[tuple[str, str]] = []
+            for rel_lower, orig_rel in sorted(my_files.items()):
+                if rel_lower in winning_map:
+                    orig, winner = winning_map[rel_lower]
+                    if winner == mod_name:
+                        files_i_win.append((orig, ""))
+                    else:
+                        files_i_lose.append((orig, winner))
                 else:
-                    files_i_lose.append((orig, winner))
+                    files_i_lose.append((orig_rel, "(no winner — disabled?)"))
+
+            # Annotate wins: walk beaten mods to find which files they share
+            rel_to_losers: dict[str, list[str]] = {}
+            for loser_mod in beaten_mods:
+                loser_staging = staging_root / loser_mod
+                if not loser_staging.is_dir():
+                    continue
+                for dirpath, _, fnames in os.walk(loser_staging):
+                    for fname in fnames:
+                        if fname.lower() == "meta.ini":
+                            continue
+                        full = os.path.join(dirpath, fname)
+                        rel = _strip_for(loser_mod, os.path.relpath(full, loser_staging).replace("\\", "/")).lower()
+                        if rel and rel in my_files:
+                            rel_to_losers.setdefault(rel, []).append(loser_mod)
+
+            files_i_win_final: list[tuple[str, str]] = [
+                (orig, beaten_str)
+                for orig, _ in files_i_win
+                if (beaten_str := ", ".join(rel_to_losers.get(orig.lower(), [])))
+            ]
+            files_no_conflict: list[str] = [
+                orig
+                for orig, _ in files_i_win
+                if not rel_to_losers.get(orig.lower())
+            ]
+
+            # Dispatch results back to the main thread
+            def _show():
+                app = self.winfo_toplevel()
+                show_fn = getattr(app, "show_conflicts_panel", None)
+                if show_fn:
+                    show_fn(mod_name, files_i_win_final, files_i_lose, files_no_conflict)
+                else:
+                    _OverwritesDialog(
+                        app,
+                        mod_name=mod_name,
+                        files_win=files_i_win_final,
+                        files_lose=files_i_lose,
+                    )
+
+            if call_threadsafe:
+                call_threadsafe(_show)
             else:
-                files_i_lose.append((orig_rel, "(no winner — disabled?)"))
+                self.after(0, _show)
 
-        # Annotate wins: find which specific mods are beaten per file
-        beaten_mods = self._overrides.get(mod_name, set())
-        rel_to_losers: dict[str, list[str]] = {}
-        for loser_mod in beaten_mods:
-            loser_staging = staging_root / loser_mod
-            if not loser_staging.is_dir():
-                continue
-            for dirpath, _, fnames in os.walk(loser_staging):
-                for fname in fnames:
-                    if fname.lower() == "meta.ini":
-                        continue
-                    full = os.path.join(dirpath, fname)
-                    rel = _strip_for(loser_mod, os.path.relpath(full, loser_staging).replace("\\", "/")).lower()
-                    if rel and rel in my_files:
-                        rel_to_losers.setdefault(rel, []).append(loser_mod)
-
-        files_i_win_final: list[tuple[str, str]] = [
-            (orig, beaten_str)
-            for orig, _ in files_i_win
-            if (beaten_str := ", ".join(rel_to_losers.get(orig.lower(), [])))
-        ]
-
-        files_no_conflict: list[str] = [
-            orig
-            for orig, _ in files_i_win
-            if not rel_to_losers.get(orig.lower())
-        ]
-
-        app = self.winfo_toplevel()
-        show_fn = getattr(app, "show_conflicts_panel", None)
-        if show_fn:
-            show_fn(mod_name, files_i_win_final, files_i_lose, files_no_conflict)
-        else:
-            _OverwritesDialog(
-                app,
-                mod_name=mod_name,
-                files_win=files_i_win_final,
-                files_lose=files_i_lose,
-            )
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _add_separator(self, ref_idx: int, above: bool):
         """Prompt for a separator name and insert it above or below ref_idx."""
@@ -4915,9 +4679,8 @@ class ModListPanel(ctk.CTkFrame):
         insert_at = ref_idx if above else ref_idx + 1
         entry = ModEntry(name=sep_name, enabled=True, locked=True, is_separator=True)
         self._entries.insert(insert_at, entry)
-        # Keep check_vars / check_buttons aligned (None for separators)
+        # Keep check_vars aligned (None for separators)
         self._check_vars.insert(insert_at, None)
-        self._check_buttons.insert(insert_at, None)
         if self._sel_idx >= insert_at:
             self._sel_idx += 1
         self._invalidate_derived_caches()
@@ -5069,7 +4832,6 @@ class ModListPanel(ctk.CTkFrame):
         # Create logical var for the new mod (visual rendering uses pool)
         var = tk.BooleanVar(value=True)
         self._check_vars.insert(insert_at, var)
-        self._check_buttons.insert(insert_at, None)
         if self._sel_idx >= insert_at:
             self._sel_idx += 1
         self._invalidate_derived_caches()
@@ -5317,8 +5079,7 @@ class ModListPanel(ctk.CTkFrame):
                             log_fn(f"  ⚠ {m.mod_name}: needs {names}{suffix}")
                     else:
                         log_fn("Nexus: All mod requirements satisfied.")
-                    self._scan_meta_flags()
-                    self._redraw()
+                    self._scan_meta_flags_async()
                 app.after(0, _done)
             except Exception as exc:
                 app.after(0, lambda: (
@@ -5421,7 +5182,6 @@ class ModListPanel(ctk.CTkFrame):
         for i in indices:
             self._entries[i], self._entries[i - 1] = self._entries[i - 1], self._entries[i]
             self._check_vars[i], self._check_vars[i - 1] = self._check_vars[i - 1], self._check_vars[i]
-            self._check_buttons[i], self._check_buttons[i - 1] = self._check_buttons[i - 1], self._check_buttons[i]
         self._sel_set = {i - 1 for i in indices}
         self._sel_idx = self._sel_idx - 1 if self._sel_idx >= 0 else -1
         self._invalidate_derived_caches()
@@ -5443,7 +5203,6 @@ class ModListPanel(ctk.CTkFrame):
         for i in indices:
             self._entries[i], self._entries[i + 1] = self._entries[i + 1], self._entries[i]
             self._check_vars[i], self._check_vars[i + 1] = self._check_vars[i + 1], self._check_vars[i]
-            self._check_buttons[i], self._check_buttons[i + 1] = self._check_buttons[i + 1], self._check_buttons[i]
         self._sel_set = {i + 1 for i in indices}
         self._sel_idx = self._sel_idx + 1 if self._sel_idx >= 0 else -1
         self._invalidate_derived_caches()
@@ -5500,11 +5259,9 @@ class ModListPanel(ctk.CTkFrame):
         to_idx = target_idx
 
         moved_entry = self._entries.pop(from_idx)
-        moved_cb = self._check_buttons.pop(from_idx)
         moved_var = self._check_vars.pop(from_idx)
 
         self._entries.insert(to_idx, moved_entry)
-        self._check_buttons.insert(to_idx, moved_cb)
         self._check_vars.insert(to_idx, moved_var)
 
         self._sel_idx = to_idx
@@ -5562,16 +5319,15 @@ class ModListPanel(ctk.CTkFrame):
         staging_requires_subdir = self._staging_requires_subdir
         normalize_folder_case   = self._normalize_folder_case
         self._filemap_rescan_index = False
-        disabled_plugins    = read_disabled_plugins(modlist_path.parent / "disabled_plugins.json")
+        disabled_plugins    = read_disabled_plugins(modlist_path.parent, None)  # fresh read for rebuild
         self._disabled_plugins_map = disabled_plugins
-        _exc_path           = modlist_path.parent / "excluded_mod_files.json"
-        _exc_raw            = read_excluded_mod_files(_exc_path)
+        _exc_raw            = read_excluded_mod_files(modlist_path.parent, None)
         excluded_mod_files  = {k: set(v) for k, v in _exc_raw.items()} if _exc_raw else None
         self._excluded_mod_files_map = _exc_raw or {}
         if excluded_mod_files:
             total_exc = sum(len(v) for v in excluded_mod_files.values())
-            self.after(0, lambda n=total_exc, p=_exc_path: self._log(
-                f"Filemap: excluding {n} file(s) from {p}"))
+            self.after(0, lambda n=total_exc: self._log(
+                f"Filemap: excluding {n} file(s) (profile_state excluded_mod_files)"))
 
         def _worker():
             nonlocal rescan_index

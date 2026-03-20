@@ -21,7 +21,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 from PIL import Image
 
-from gui.ctk_components import CTkAlert
+from gui.ctk_components import CTkAlert, CTkLoader
 from gui.dialogs import CollectionInstallModeDialog
 from gui.game_helpers import (
     _create_profile,
@@ -392,6 +392,7 @@ class CollectionCard:
             if self._tooltip_win is not None:
                 return
             tw = tk.Toplevel(widget)
+            tw.withdraw()
             tw.overrideredirect(True)
             tw.attributes("-alpha", 0.95)
             tw.configure(bg=BG_DEEP)
@@ -414,6 +415,7 @@ class CollectionCard:
             if y + tw.winfo_reqheight() > sh:
                 y = event.y_root - tw.winfo_reqheight() - scaled(4)
             tw.geometry(f"+{x}+{y}")
+            tw.deiconify()
             self._tooltip_win = tw
 
         def _leave(event):
@@ -960,7 +962,7 @@ class CollectionDetailDialog(tk.Frame):
                 return
 
             self._log(f"Collection install: created profile '{profile_name}' at {profile_dir}")
-            # Store collection URL in profile_settings.json for "Open Current" button
+            # Store collection URL in profile_state (profile_settings) for "Open Current" button
             game_domain = getattr(self._game, "nexus_game_domain", None) or self._game_domain
             collection_url = f"https://www.nexusmods.com/{game_domain}/collections/{self._collection.slug}"
             save_collection_url_to_profile(profile_dir, collection_url)
@@ -1819,6 +1821,7 @@ class CollectionsDialog(tk.Frame):
         self._img_cache: dict = {}
         self._img_loading: set = set()
         self._cols: int = _COLL_COLS
+        self._loader: CTkLoader | None = None
 
         self._build()
         self.after(50, self._load_page)
@@ -1960,7 +1963,7 @@ class CollectionsDialog(tk.Frame):
         ).pack(side="left", padx=(0, 8), pady=4)
 
         # Scrollable card canvas
-        canvas_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
+        self._canvas_frame = canvas_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
         canvas_frame.grid(row=2, column=0, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
@@ -2162,6 +2165,7 @@ class CollectionsDialog(tk.Frame):
             self._cards.append(card)
         self._regrid_cards()
         self._load_images()
+        self._hide_loader()
 
     def _open_detail(self, collection, profile_dir=None):
         self._close_detail()
@@ -2222,6 +2226,22 @@ class CollectionsDialog(tk.Frame):
             )
 
     # ------------------------------------------------------------------
+    # Loader overlay
+    # ------------------------------------------------------------------
+
+    def _show_loader(self):
+        if self._loader is None:
+            self._loader = CTkLoader(self._canvas_frame)
+
+    def _hide_loader(self):
+        if self._loader is not None:
+            try:
+                self._loader.stop_loader()
+            except Exception:
+                pass
+            self._loader = None
+
+    # ------------------------------------------------------------------
     # Pagination
     # ------------------------------------------------------------------
 
@@ -2247,6 +2267,7 @@ class CollectionsDialog(tk.Frame):
         self._next_btn.configure(state="disabled")
         page = self._page
         self._status_label.configure(text=f"Loading page {page + 1}…")
+        self._show_loader()
 
         def _worker():
             try:
@@ -2275,6 +2296,7 @@ class CollectionsDialog(tk.Frame):
         self._log(f"Collections: {label}.")
 
     def _on_error(self, exc: Exception):
+        self._hide_loader()
         self._loading = False
         self._prev_btn.configure(state="normal" if self._page > 0 else "disabled")
         self._next_btn.configure(state="normal")
@@ -2301,6 +2323,7 @@ class CollectionsDialog(tk.Frame):
         self._next_btn.configure(state="disabled")
         self._search_btn.configure(state="disabled")
         self._status_label.configure(text=f"Searching '{query_text}'…")
+        self._show_loader()
 
         def _worker():
             try:
@@ -2326,6 +2349,7 @@ class CollectionsDialog(tk.Frame):
         self._log(f"Collections: {label}.")
 
     def _on_search_error(self, exc: Exception):
+        self._hide_loader()
         self._loading = False
         self._search_btn.configure(state="normal")
         self._search_active = False

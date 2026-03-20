@@ -57,6 +57,7 @@ class NexusModMeta:
     latest_file_id: int = 0            # newest known file id (for update checking)
     latest_version: str = ""           # newest known version (for update checking)
     has_update: bool = False           # set by the update checker
+    ignore_update: bool = False        # user asked to ignore this update
     missing_requirements: str = ""     # semicolon-separated "modId:name" pairs
 
     @property
@@ -127,6 +128,7 @@ _KEY_MAP: dict[str, str] = {
     "latestFileId":      "latest_file_id",
     "latestVersion":     "latest_version",
     "hasUpdate":         "has_update",
+    "ignoreUpdate":      "ignore_update",
     "missingRequirements": "missing_requirements",
 }
 
@@ -134,7 +136,7 @@ _KEY_MAP: dict[str, str] = {
 _INT_FIELDS = {"mod_id", "file_id", "category_id", "latest_file_id"}
 
 # Attributes that are bools
-_BOOL_FIELDS = {"endorsed", "has_update"}
+_BOOL_FIELDS = {"endorsed", "has_update", "ignore_update"}
 
 
 def read_meta(meta_ini_path: Path) -> NexusModMeta:

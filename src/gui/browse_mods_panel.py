@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
-from gui.ctk_components import CTkPopupMenu
+from gui.ctk_components import CTkLoader, CTkPopupMenu
 from gui.mod_card import ModCard, CARD_W, CARD_PAD, CARD_COLS
 from gui.theme import (
     BG_DEEP,
@@ -112,6 +112,7 @@ class BrowseModsPanel:
         self._context_menu: CTkPopupMenu | None = None
         self._regrid_after_id = None
         self._cat_panel_open: bool = False
+        self._loader: CTkLoader | None = None
 
         self._build(parent_tab)
 
@@ -178,7 +179,7 @@ class BrowseModsPanel:
         self._status_label.pack(side="left", padx=4, fill="x", expand=True)
 
         # Scrollable card area using canvas + inner CTk frame
-        canvas_frame = tk.Frame(tab, bg=BG_DEEP, bd=0, highlightthickness=0)
+        self._canvas_frame = canvas_frame = tk.Frame(tab, bg=BG_DEEP, bd=0, highlightthickness=0)
         canvas_frame.grid(row=1, column=1, sticky="nsew")
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
@@ -548,6 +549,7 @@ class BrowseModsPanel:
             self._cards.append(self._make_card(entry, installed_ids))
         self._regrid_cards()
         self._load_images()
+        self._hide_loader()
 
     def _regrid_cards(self):
         """Place cards in a grid, recomputing column count from canvas width."""
@@ -606,6 +608,22 @@ class BrowseModsPanel:
         self._cat_filter_btn.configure(fg_color="#2d7a2d", text_color="white")
 
     # ------------------------------------------------------------------
+    # Loader overlay
+    # ------------------------------------------------------------------
+
+    def _show_loader(self):
+        if self._loader is None:
+            self._loader = CTkLoader(self._canvas_frame)
+
+    def _hide_loader(self):
+        if self._loader is not None:
+            try:
+                self._loader.stop_loader()
+            except Exception:
+                pass
+            self._loader = None
+
+    # ------------------------------------------------------------------
     # Refresh / Pagination
     # ------------------------------------------------------------------
 
@@ -647,6 +665,7 @@ class BrowseModsPanel:
         cat_label, cat_method = self._visible_categories[self._cat_idx]
         page = self._page
         self._status_label.configure(text=f"Loading {cat_label} (page {page + 1})…")
+        self._show_loader()
 
         def _worker():
             try:
@@ -672,6 +691,7 @@ class BrowseModsPanel:
 
             except Exception as exc:
                 def _err(exc=exc):
+                    self._hide_loader()
                     self._loading = False
                     self._refresh_btn.configure(state="normal")
                     self._prev_btn.configure(state="normal")
@@ -736,6 +756,7 @@ class BrowseModsPanel:
         self._next_btn.configure(state="disabled")
         self._search_btn.configure(state="disabled")
         self._status_label.configure(text=f"Searching '{query_text}'…")
+        self._show_loader()
 
         def _worker():
             try:
@@ -774,6 +795,7 @@ class BrowseModsPanel:
 
             except Exception as exc:
                 def _err(exc=exc):
+                    self._hide_loader()
                     self._loading = False
                     self._search_btn.configure(state="normal")
                     self._status_label.configure(text="Search error")

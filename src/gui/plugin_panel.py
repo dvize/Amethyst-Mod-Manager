@@ -47,6 +47,12 @@ from gui.download_locations_overlay import DownloadLocationsOverlay
 from gui.ctk_components import CTkTreeview
 
 from Utils.config_paths import get_exe_args_path, get_game_config_dir, get_game_config_path
+from Utils.profile_state import (
+    read_plugin_locks,
+    write_plugin_locks,
+    read_excluded_mod_files,
+    write_excluded_mod_files,
+)
 from Utils.filemap import OVERWRITE_NAME as _OVERWRITE_NAME, build_filemap
 from Utils.xdg import xdg_open, open_url
 from Utils.plugins import (
@@ -58,12 +64,10 @@ from Utils.plugins import (
     write_loadorder,
     sync_plugins_from_filemap,
     prune_plugins_from_filemap,
-    read_excluded_mod_files,
-    write_excluded_mod_files,
 )
 from Utils.plugin_parser import check_missing_masters, check_late_masters
 from LOOT.loot_sorter import sort_plugins as loot_sort, is_available as loot_available
-from Nexus.nexus_meta import write_meta, read_meta
+from Nexus.nexus_meta import write_meta, read_meta, scan_installed_mods
 
 
 def _read_prefix_runner(compat_data: Path) -> str:
@@ -203,7 +207,7 @@ class PluginPanel(ctk.CTkFrame):
         # Mod Files tab state
         self._mod_files_mod_name: str | None = None   # currently displayed mod
         self._mod_files_index_path: Path | None = None  # modindex.bin path
-        self._mod_files_excluded_path: Path | None = None  # excluded_mod_files.json path
+        self._mod_files_profile_dir: Path | None = None  # profile dir for excluded_mod_files in profile_state.json
         self._mod_files_excluded: dict[str, set[str]] = {}  # mod_name → set of excluded rel_keys
         self._mod_files_on_change: callable | None = None  # called when exclusions change
 
@@ -1061,7 +1065,7 @@ class PluginPanel(ctk.CTkFrame):
                 filemap_out = profile_root / "filemap.txt"
                 if modlist_path.is_file():
                     try:
-                        _exc_raw = read_excluded_mod_files(modlist_path.parent / "excluded_mod_files.json")
+                        _exc_raw = read_excluded_mod_files(modlist_path.parent, None)
                         _exc = {k: set(v) for k, v in _exc_raw.items()} if _exc_raw else None
                         build_filemap(
                             modlist_path, staging, filemap_out,
@@ -1933,22 +1937,26 @@ class PluginPanel(ctk.CTkFrame):
 
     def _mf_save_and_rebuild(self):
         """Persist current exclusions for the displayed mod and trigger filemap rebuild."""
-        if self._mod_files_mod_name is None or self._mod_files_excluded_path is None:
+        if self._mod_files_mod_name is None or self._mod_files_profile_dir is None:
             return
         mod_name = self._mod_files_mod_name
+        profile_dir = self._mod_files_profile_dir
         excluded_keys = [
             self._mf_iid_to_key[iid]
             for iid, checked in self._mf_checked.items()
             if not checked and self._mf_iid_to_key.get(iid) is not None
         ]
-        all_excluded = read_excluded_mod_files(self._mod_files_excluded_path)
+        all_excluded = read_excluded_mod_files(profile_dir, None)
         if excluded_keys:
             all_excluded[mod_name] = sorted(excluded_keys)
         else:
             all_excluded.pop(mod_name, None)
-        write_excluded_mod_files(self._mod_files_excluded_path, all_excluded)
+        write_excluded_mod_files(profile_dir, all_excluded)
         self._mod_files_excluded = {k: set(v) for k, v in all_excluded.items()}
-        self._log(f"Mod Files: saved {len(excluded_keys)} exclusion(s) for '{mod_name}' → {self._mod_files_excluded_path}")
+        self._log(
+            f"Mod Files: saved {len(excluded_keys)} exclusion(s) for '{mod_name}' "
+            f"(profile_state excluded_mod_files)"
+        )
         if self._mod_files_on_change is not None:
             self._mod_files_on_change()
 
@@ -1969,7 +1977,7 @@ class PluginPanel(ctk.CTkFrame):
 
         # Load current exclusions for this mod
         excluded_keys: set[str] = set()
-        if self._mod_files_excluded_path is not None:
+        if self._mod_files_profile_dir is not None:
             excluded_keys = self._mod_files_excluded.get(mod_name, set())
 
         # Load file list from mod index
@@ -2214,11 +2222,28 @@ class PluginPanel(ctk.CTkFrame):
 
     def _build_downloads_tab(self):
         tab = self._tabs.tab("Downloads")
+
+        def _get_installed_filenames() -> set:
+            try:
+                app = self.winfo_toplevel()
+                topbar = app._topbar
+                game = _GAMES.get(topbar._game_var.get())
+                if game is None or not game.is_configured():
+                    return set()
+                staging = game.get_effective_mod_staging_path()
+                if not staging or not Path(staging).is_dir():
+                    return set()
+                mods = scan_installed_mods(Path(staging))
+                return {m.installation_file for m in mods if m.installation_file}
+            except Exception:
+                return set()
+
         self._downloads_panel = DownloadsPanel(
             tab,
             log_fn=self._log,
             install_fn=self._install_from_downloads,
             on_open_locations=self._on_open_download_locations,
+            get_installed_filenames=_get_installed_filenames,
         )
 
     def _on_open_download_locations(self):
@@ -2620,26 +2645,16 @@ class PluginPanel(ctk.CTkFrame):
     # Plugin lock persistence
     # ------------------------------------------------------------------
 
-    def _plugin_locks_path(self) -> Path | None:
-        if self._plugins_path is None:
-            return None
-        return self._plugins_path.parent / "plugin_locks.json"
-
     def _load_plugin_locks(self) -> None:
-        path = self._plugin_locks_path()
-        if path and path.is_file():
-            try:
-                self._plugin_locks = json.loads(path.read_text(encoding="utf-8"))
-                return
-            except Exception:
-                pass
-        self._plugin_locks = {}
+        if self._plugins_path is None:
+            self._plugin_locks = {}
+            return
+        self._plugin_locks = read_plugin_locks(self._plugins_path.parent)
 
     def _save_plugin_locks(self) -> None:
-        path = self._plugin_locks_path()
-        if path is None:
+        if self._plugins_path is None:
             return
-        path.write_text(json.dumps(self._plugin_locks, indent=2), encoding="utf-8")
+        write_plugin_locks(self._plugins_path.parent, self._plugin_locks)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -3099,6 +3114,7 @@ class PluginPanel(ctk.CTkFrame):
         """Show a tooltip window near the given screen coordinates."""
         self._hide_tooltip()
         tw = tk.Toplevel(self)
+        tw.withdraw()
         tw.wm_overrideredirect(True)
         tw.configure(bg="#1a1a2e")
         lbl = tk.Label(
@@ -3113,6 +3129,7 @@ class PluginPanel(ctk.CTkFrame):
         # Always place to the left of the cursor (flags column is at the right edge)
         tip_x = x - tip_w - 4
         tw.wm_geometry(f"+{tip_x}+{y + 8}")
+        tw.deiconify()
         self._tooltip_win = tw
 
     def _hide_tooltip(self) -> None:

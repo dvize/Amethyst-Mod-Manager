@@ -6,6 +6,14 @@
 - py7zr was skipping files over 1gb to avoid out of memory issues. It now checks available memory and only skips if there is not enough.
 - Added a checkbox to the add game menu that shows only installed games
 - Added an auto deploy option to the Configure game window, When a mod is enabled/disabled/moved the modlist will autodeploy when enabled
+- Tooltips no longer appear in the top left of the screen before moving into place.
+- Replaced the Update mod button with a Change version button, Here all versions of the mod can be viewed and updates can be ignored (removing the flag)
+- Fix for Nexus api related functions not working on steam deck and steam deck gaming mode as well as users who do not have a keyring backend set up
+- Added a loading screen for panels containing mod cards.
+- Added a tooltip to the update available flag
+- The install button in the downloads tab now changes to a reinstall button if the mod is already installed.
+- Profiles now use 1 json file for its settings instead of many. Old json files will be merged and removed.
+- Fixed missing loot library
 
 - v1.0.6
 - Logging into nexus now updates the api key on successful login instead of having to close the nexus settings window first
@@ -15,7 +23,6 @@
 - Frameworks from the wizards can now optionally be installed to the root_folder in the profiles staging folder instead of the games root folder.
 - Added a property for games that use alternative exe locations when not installed on steam
 - Added buttons to quickly access the managers github page, endorse the manager on nexus and view changelogs
-
 
 - v1.0.5
 - Added Resident Evil 2 , 3 , 4 (Remakes) , 7 and Village. These handlers modify the games .pak files to allow the game to load modded files from the natives folder

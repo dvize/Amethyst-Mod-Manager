@@ -80,10 +80,10 @@ from Utils.plugins import (
     prune_plugins_from_filemap,
     sync_plugins_from_filemap,
     sync_plugins_from_overwrite_dir,
-    read_disabled_plugins,
     read_plugins,
     write_plugins,
 )
+from Utils.profile_state import read_disabled_plugins
 from Nexus.nexus_api import NexusAPI, load_api_key, clear_api_key
 from Nexus.nexus_oauth import load_oauth_tokens
 from Nexus.nexus_download import NexusDownloader, delete_archive_and_sidecar
@@ -859,11 +859,11 @@ class App(ctk.CTk):
                 if removed:
                     self._status.log(f"plugins.txt: removed {removed} plugin(s).")
                 # Read per-mod disabled plugin list and prune any already-synced disabled plugins
-                disabled_path = (
-                    self._mod_panel._modlist_path.parent / "disabled_plugins.json"
+                profile_dir = (
+                    self._mod_panel._modlist_path.parent
                     if self._mod_panel._modlist_path else None
                 )
-                disabled_map = read_disabled_plugins(disabled_path) if disabled_path else {}
+                disabled_map = read_disabled_plugins(profile_dir, None) if profile_dir else {}
                 if disabled_map and self._plugin_panel._plugins_path is not None:
                     existing = read_plugins(self._plugin_panel._plugins_path)
                     all_disabled_lower = {
@@ -964,9 +964,9 @@ class App(ctk.CTk):
                 # Mod Files tab paths
                 _profile_dir = initial_game.get_profile_root() / "profiles" / profile
                 self._plugin_panel._mod_files_index_path = _staging.parent / "modindex.bin"
-                self._plugin_panel._mod_files_excluded_path = _profile_dir / "excluded_mod_files.json"
-                from Utils.plugins import read_excluded_mod_files as _ref
-                _exc_raw = _ref(self._plugin_panel._mod_files_excluded_path)
+                self._plugin_panel._mod_files_profile_dir = _profile_dir
+                from Utils.profile_state import read_excluded_mod_files as _read_exc
+                _exc_raw = _read_exc(_profile_dir, None)
                 self._plugin_panel._mod_files_excluded = {k: set(v) for k, v in _exc_raw.items()}
                 self._plugin_panel._mod_files_on_change = self._mod_panel._rebuild_filemap
                 self._mod_panel.load_game(initial_game, profile)

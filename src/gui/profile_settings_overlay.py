@@ -27,6 +27,7 @@ from gui.theme import (
 )
 from gui import game_helpers as _gh
 from gui.game_helpers import _profiles_for_game
+from Utils.profile_state import merge_profile_settings, read_profile_settings
 from gui.ctk_components import CTkAlert
 
 
@@ -362,23 +363,15 @@ class ProfileSettingsOverlay(tk.Frame):
         return self._is_original_default_dir(self._get_profile_dir(profile))
 
     def _is_original_default_dir(self, profile_dir: Path) -> bool:
-        import json
-        settings = profile_dir / "profile_settings.json"
         try:
-            return json.loads(settings.read_text(encoding="utf-8")).get("original_default", False)
+            return bool(read_profile_settings(profile_dir, None).get("original_default", False))
         except Exception:
             return False
 
     def _mark_original_default(self, profile_dir: Path):
-        import json
-        settings = profile_dir / "profile_settings.json"
         try:
-            data = json.loads(settings.read_text(encoding="utf-8")) if settings.is_file() else {}
-        except Exception:
-            data = {}
-        data["original_default"] = True
-        try:
-            settings.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            merge_profile_settings(profile_dir, {"original_default": True})
         except Exception:
             pass
 

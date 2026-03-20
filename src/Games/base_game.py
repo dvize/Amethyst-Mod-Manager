@@ -614,8 +614,8 @@ class BaseGame(ABC):
     def get_effective_mod_staging_path(self) -> Path:
         """Return the mods staging path that should be used for the active profile.
 
-        If the active profile has the ``profile_specific_mods`` flag set in its
-        ``profile_settings.json``, returns ``<profile_dir>/mods/`` so that all
+        If the active profile has the ``profile_specific_mods`` flag set in
+        ``profile_state.json`` (profile_settings), returns ``<profile_dir>/mods/`` so that all
         mod files are kept inside the profile folder itself.
 
         Otherwise falls back to the standard :meth:`get_mod_staging_path`

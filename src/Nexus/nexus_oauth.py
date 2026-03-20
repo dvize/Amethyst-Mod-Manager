@@ -49,7 +49,121 @@ import keyring
 import requests
 
 from Utils.app_log import app_log
+
+from Utils.config_paths import get_config_dir
 from version import __version__
+
+# ---------------------------------------------------------------------------
+# Keyring availability check — fall back to file storage when DBus is slow
+# or the keyring service is missing (common after SteamOS updates).
+# ---------------------------------------------------------------------------
+_keyring_available: bool = False
+
+def _probe_keyring() -> bool:
+    """Return True if the system keyring is usable."""
+    try:
+        import subprocess
+        # Check if the DBus Secret Service is reachable.
+        # org.freedesktop.secrets is the standard interface; if nothing owns it, keyring won't work.
+        result = subprocess.run(
+            ["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.DBus",
+             "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner",
+             "string:org.freedesktop.secrets"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if "boolean true" not in result.stdout:
+            return False
+        # Service exists on DBus — verify we can actually list collections
+        # (catches broken secretstorage / assertion errors).
+        import secretstorage
+        conn = secretstorage.dbus_init()
+        list(secretstorage.get_all_collections(conn))
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+def _check_keyring() -> None:
+    """Probe keyring availability; set _keyring_available accordingly."""
+    global _keyring_available
+    if _probe_keyring():
+        _keyring_available = True
+        app_log("OAuth: keyring backend available")
+    else:
+        _keyring_available = False
+        app_log("OAuth: no keyring backend available — using file-based token storage")
+
+_check_keyring()
+
+# ---------------------------------------------------------------------------
+# Encrypted file-based fallback token storage
+# ---------------------------------------------------------------------------
+_TOKEN_FILE = "nexus_oauth_tokens.bin"
+
+def _derive_key() -> bytes:
+    """Derive a Fernet key from the machine ID so tokens are only usable on this device."""
+    import base64
+    machine_id = ""
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            with open(p) as f:
+                machine_id = f.read().strip()
+            if machine_id:
+                break
+        except OSError:
+            continue
+    if not machine_id:
+        machine_id = "fallback-no-machine-id"
+    dk = hashlib.pbkdf2_hmac("sha256", machine_id.encode(), b"AmethystModManager", 100_000)
+    return base64.urlsafe_b64encode(dk)
+
+def _token_file_path() -> os.PathLike:
+    return get_config_dir() / _TOKEN_FILE
+
+def _load_tokens_file() -> Optional[OAuthTokens]:
+    p = _token_file_path()
+    try:
+        if not os.path.isfile(p):
+            return None
+        from cryptography.fernet import Fernet, InvalidToken
+        cipher = Fernet(_derive_key())
+        with open(p, "rb") as f:
+            data = json.loads(cipher.decrypt(f.read()))
+        access = data.get("access_token", "")
+        refresh = data.get("refresh_token", "")
+        expires = data.get("expires_at", 0.0)
+        if not access or not refresh:
+            return None
+        return OAuthTokens(access_token=access, refresh_token=refresh, expires_at=float(expires))
+    except Exception as exc:
+        app_log(f"OAuth: failed to load tokens from file: {exc}")
+        return None
+
+def _save_tokens_file(tokens: OAuthTokens) -> None:
+    p = _token_file_path()
+    try:
+        from cryptography.fernet import Fernet
+        cipher = Fernet(_derive_key())
+        payload = json.dumps({
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_at": tokens.expires_at,
+        }).encode()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(cipher.encrypt(payload))
+        os.chmod(p, 0o600)
+    except Exception as exc:
+        app_log(f"OAuth: failed to save tokens to file: {exc}")
+        raise RuntimeError(f"Cannot save OAuth tokens: {exc}") from exc
+
+def _clear_tokens_file() -> None:
+    p = _token_file_path()
+    try:
+        if os.path.isfile(p):
+            os.remove(p)
+    except Exception as exc:
+        app_log(f"OAuth: failed to clear token file: {exc}")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -96,7 +210,9 @@ class OAuthTokens:
 # ---------------------------------------------------------------------------
 
 def load_oauth_tokens() -> Optional[OAuthTokens]:
-    """Load OAuth tokens from the system keyring. Returns None if absent."""
+    """Load OAuth tokens from the system keyring, or file fallback."""
+    if not _keyring_available:
+        return _load_tokens_file()
     try:
         access  = keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCESS_KEY)
         refresh = keyring.get_password(_KEYRING_SERVICE, _KEYRING_REFRESH_KEY)
@@ -110,22 +226,28 @@ def load_oauth_tokens() -> Optional[OAuthTokens]:
         )
     except Exception as exc:
         app_log(f"OAuth: failed to load tokens from keyring: {exc}")
-        return None
+        return _load_tokens_file()
 
 
 def save_oauth_tokens(tokens: OAuthTokens) -> None:
-    """Persist OAuth tokens to the system keyring."""
+    """Persist OAuth tokens to the system keyring, or file fallback."""
+    if not _keyring_available:
+        _save_tokens_file(tokens)
+        return
     try:
         keyring.set_password(_KEYRING_SERVICE, _KEYRING_ACCESS_KEY,  tokens.access_token)
         keyring.set_password(_KEYRING_SERVICE, _KEYRING_REFRESH_KEY, tokens.refresh_token)
         keyring.set_password(_KEYRING_SERVICE, _KEYRING_EXPIRES_KEY, str(tokens.expires_at))
     except Exception as exc:
-        app_log(f"OAuth: failed to save tokens to keyring: {exc}")
-        raise RuntimeError(f"Cannot save OAuth tokens: {exc}") from exc
+        app_log(f"OAuth: keyring save failed, falling back to file: {exc}")
+        _save_tokens_file(tokens)
 
 
 def clear_oauth_tokens() -> None:
-    """Delete all stored OAuth tokens from the keyring."""
+    """Delete all stored OAuth tokens from keyring and file."""
+    _clear_tokens_file()
+    if not _keyring_available:
+        return
     for key in (_KEYRING_ACCESS_KEY, _KEYRING_REFRESH_KEY, _KEYRING_EXPIRES_KEY):
         try:
             keyring.delete_password(_KEYRING_SERVICE, key)

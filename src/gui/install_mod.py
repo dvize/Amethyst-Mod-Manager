@@ -97,11 +97,22 @@ def _show_fomod_dialog_on_main(parent_window, config, mod_root,
 
 
 def _show_mod_notification(parent_window, message: str, state: str = "success") -> None:
-    """Show a notification at bottom-right, auto-dismiss after 4 s."""
+    """Show a notification at bottom-right, auto-dismiss after 4 s.
+
+    Always schedules on the main Tk thread: install_mod_from_archive is often
+    invoked from a worker thread; creating CTkToplevel off-thread breaks
+    geometry (e.g. square instead of the intended bar shape).
+    """
+    def _show():
+        try:
+            root = parent_window.winfo_toplevel()
+            notif = CTkNotification(root, state=state, message=message)
+            root.after(4000, notif.destroy)
+        except Exception:
+            pass
+
     try:
-        root = parent_window.winfo_toplevel()
-        notif = CTkNotification(root, state=state, message=message)
-        root.after(4000, notif.destroy)
+        parent_window.after(0, _show)
     except Exception:
         pass
 

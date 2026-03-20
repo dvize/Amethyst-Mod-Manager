@@ -139,6 +139,14 @@ fi
 echo "=== Removing bundled X11 libraries ==="
 rm -f "$APPDIR"/usr/lib/libX*.so* "$APPDIR"/usr/lib/libxcb*.so*
 
+# ── Step 6c: Remove bundled ncurses/tinfo ─────────────────────────────
+# python-appimage ships libncursesw; AppRun puts usr/lib first on LD_LIBRARY_PATH.
+# Host libreadline.so then loads that ncurses instead of the system's and the
+# dynamic linker warns: "no version information available (required by libreadline)".
+# Dropping the bundle matches host readline ↔ host ncurses (same as X11 fix above).
+echo "=== Removing bundled ncurses/tinfo (readline uses host libs) ==="
+rm -f "$APPDIR"/usr/lib/libncurses*.so* "$APPDIR"/usr/lib/libtinfo*.so* 2>/dev/null || true
+
 # ── Step 7: Desktop integration ──────────────────────────────────────
 echo "=== Setting up desktop integration ==="
 

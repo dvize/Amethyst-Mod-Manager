@@ -204,6 +204,7 @@ class ModCard:
             if self._tooltip_win is not None:
                 return
             tw = tk.Toplevel(self.card)
+            tw.withdraw()
             tw.overrideredirect(True)
             tw.attributes("-alpha", 0.95)
             tw.configure(bg=BG_DEEP)
@@ -224,6 +225,7 @@ class ModCard:
             if y + tw.winfo_reqheight() > sh:
                 y = event.y_root - tw.winfo_reqheight() - scaled(4)
             tw.geometry(f"+{x}+{y}")
+            tw.deiconify()
             self._tooltip_win = tw
 
         def _leave(event):

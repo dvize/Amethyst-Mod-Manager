@@ -7,7 +7,8 @@ command: amethyst-mod-manager
 
 # Sandbox permissions
 # - network: Nexus API send/receive, version checks, downloads
-# - x11/wayland: GUI display
+# - x11 (+ wayland socket): Tkinter uses X11 only; on Wayland it needs XWayland, so we use
+#   socket=x11 (not fallback-x11 — fallback withholds X11 when Wayland is the session).
 # - dri: GPU rendering
 # - home: mod staging (user-configurable path, e.g. anywhere in ~/), game paths, Steam libraries, config (~/.config/AmethystModManager)
 # - run/media, media, mnt: Steam libraries on SD cards and removable drives (Steam Deck, etc.)
@@ -16,7 +17,7 @@ command: amethyst-mod-manager
 # - talk-name=org.freedesktop.secrets: keyring (Nexus API key storage and retrieval)
 finish-args:
   - --share=network
-  - --socket=fallback-x11
+  - --socket=x11
   - --socket=wayland
   - --device=dri
   - --share=ipc
