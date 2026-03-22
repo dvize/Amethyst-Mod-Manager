@@ -277,17 +277,37 @@ class PluginPanel(ctk.CTkFrame):
             segmented_button_unselected_color=BG_HEADER,
             segmented_button_unselected_hover_color=BG_HOVER,
             text_color=TEXT_MAIN,
+            command=self._on_tab_changed,
         )
         self._tabs.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
         for name in ("Plugins", "Mod Files", "Ini Files", "Data", "Downloads"):
             self._tabs.add(name)
 
+        # Lazy-refresh flags: these tabs are expensive to rebuild on every
+        # filemap change, so they are only rebuilt when their tab is selected.
+        self._data_tab_dirty: bool = False
+        self._ini_files_tab_dirty: bool = False
+
         self._build_plugins_tab()
         self._build_mod_files_tab()
         self._build_ini_files_tab()
         self._build_data_tab()
         self._build_downloads_tab()
+
+    # ------------------------------------------------------------------
+    # Tab change handler — lazy refresh for expensive tabs
+    # ------------------------------------------------------------------
+
+    def _on_tab_changed(self):
+        """Called when the user switches tabs.  Rebuilds dirty tabs on demand."""
+        current = self._tabs.get()
+        if current == "Data" and self._data_tab_dirty:
+            self._data_tab_dirty = False
+            self._refresh_data_tab()
+        elif current == "Ini Files" and self._ini_files_tab_dirty:
+            self._ini_files_tab_dirty = False
+            self._refresh_ini_files_tab()
 
     # ------------------------------------------------------------------
     # Executable toolbar — scan / run
@@ -1729,7 +1749,17 @@ class PluginPanel(ctk.CTkFrame):
         return current
 
     def _refresh_ini_files_tab(self):
-        """Populate Ini Files tab from filemap.txt, filtering to .ini and .json."""
+        """Populate Ini Files tab from filemap.txt, filtering to .ini and .json.
+
+        Deferred when the Ini Files tab is not visible — rebuilt on tab switch.
+        """
+        try:
+            if self._tabs.get() != "Ini Files":
+                self._ini_files_tab_dirty = True
+                return
+        except Exception:
+            pass
+        self._ini_files_tab_dirty = False
         self._ini_files_entries.clear()
 
         filemap_path_str = self._get_filemap_path()
@@ -2090,7 +2120,18 @@ class PluginPanel(ctk.CTkFrame):
         self._data_tree.treeview.bind("<<TreeviewSelect>>", self._on_data_file_selected)
 
     def _refresh_data_tab(self):
-        """Reload the Data tab tree from filemap.txt."""
+        """Reload the Data tab tree from filemap.txt.
+
+        If the Data tab is not currently visible, just mark it dirty and defer
+        the expensive tree rebuild until the user switches to it.
+        """
+        try:
+            if self._tabs.get() != "Data":
+                self._data_tab_dirty = True
+                return
+        except Exception:
+            pass
+        self._data_tab_dirty = False
         self._data_tree.delete(*self._data_tree.get_children())
         self._data_filemap_entries = []
         filemap_path_str = self._get_filemap_path()
@@ -2108,25 +2149,62 @@ class PluginPanel(ctk.CTkFrame):
         self._build_data_tree_from_entries(self._data_filemap_entries)
 
     def _resolve_data_entries(self, entries):
-        """For UE5 games, prefix each entry's path with its resolved deploy destination
-        so the Data tab shows where files will actually land in the game."""
+        """Prefix each entry's path with its resolved deploy destination so the
+        Data tab shows where files will actually land in the game.
+
+        UE5 games use their own _match_rule/_apply_strip logic.
+        Other games with custom_routing_rules use the same folder-match logic
+        as deploy_custom_rules() (first matching rule wins, full path preserved
+        under dest).
+        """
         from Games.ue5_game import UE5Game
         game = self._game
-        if not isinstance(game, UE5Game):
+        if isinstance(game, UE5Game):
+            resolved = []
+            for rel_path, mod_name in entries:
+                rule = game._match_rule(rel_path)
+                if rule is not None:
+                    dest = rule.dest
+                    final_rel = game._apply_strip(rel_path, rule.strip)
+                else:
+                    dest = game.ue5_default_dest
+                    final_rel = rel_path.replace("\\", "/")
+                if dest:
+                    full_path = dest + "/" + final_rel
+                else:
+                    full_path = final_rel
+                resolved.append((full_path, mod_name))
+            return resolved
+
+        rules = getattr(game, "custom_routing_rules", None)
+        if not rules:
             return entries
+
+        # Pre-process rules (mirrors deploy_custom_rules logic)
+        _rules = [(r, {f.lower() for f in r.folders}, {e.lower() for e in r.extensions})
+                  for r in rules]
+
+        def _match(rel_lower: str):
+            import os
+            first_seg = rel_lower.split("/")[0]
+            ext = os.path.splitext(rel_lower)[1]
+            for rule, folders, exts in _rules:
+                if folders and first_seg in folders and (not exts or ext in exts):
+                    return rule
+                if exts and ext in exts and not folders:
+                    return rule
+            return None
+
         resolved = []
         for rel_path, mod_name in entries:
-            rule = game._match_rule(rel_path)
+            rel_norm = rel_path.replace("\\", "/")
+            rule = _match(rel_norm.lower())
             if rule is not None:
                 dest = rule.dest
-                final_rel = game._apply_strip(rel_path, rule.strip)
+                final_rel = rel_norm
+                full_path = dest + "/" + final_rel if dest else final_rel
             else:
-                dest = game.ue5_default_dest
-                final_rel = rel_path.replace("\\", "/")
-            if dest:
-                full_path = dest + "/" + final_rel
-            else:
-                full_path = final_rel
+                full_path = rel_norm
             resolved.append((full_path, mod_name))
         return resolved
 
@@ -2699,23 +2777,30 @@ class PluginPanel(ctk.CTkFrame):
     _FW_RED_TEXT   = "#ffc8c8"
 
     def _refresh_framework_banners(self) -> None:
-        """Rebuild the framework status banners at the top of the Plugins tab."""
-        # Destroy old banners and hide the container until we know there's content
-        for widget in self._framework_banner_widgets:
-            widget.destroy()
-        self._framework_banner_widgets.clear()
-        self._framework_banners_frame.grid_remove()
+        """Rebuild the framework status banners at the top of the Plugins tab.
 
+        Reuses existing banner widgets when the framework list hasn't changed,
+        only reconfiguring colours and text — avoids the visible destroy/create
+        flicker on every filemap rebuild.
+        """
         if self._game is None:
+            for widget in self._framework_banner_widgets:
+                widget.destroy()
+            self._framework_banner_widgets.clear()
+            self._framework_banners_frame.grid_remove()
             return
 
         frameworks: dict[str, str] = {}
         try:
             frameworks = self._game.frameworks
         except Exception:
-            return
+            pass
 
         if not frameworks:
+            for widget in self._framework_banner_widgets:
+                widget.destroy()
+            self._framework_banner_widgets.clear()
+            self._framework_banners_frame.grid_remove()
             return
 
         game_root: "Path | None" = None
@@ -2733,46 +2818,66 @@ class PluginPanel(ctk.CTkFrame):
         # Show the container now that we know there's at least one banner to display
         self._framework_banners_frame.grid(row=1, column=0, sticky="ew")
 
-        for idx, (label, exe) in enumerate(frameworks.items()):
+        # Build the desired banner states
+        banner_data: list[tuple[str, str, str]] = []  # (msg, bg, fg)
+        for label, exe in frameworks.items():
             exe_path = Path(exe)
             present = False
-            # Check game root directory
             if game_root is not None:
                 if (game_root / exe_path).is_file():
                     present = True
-            # Check profile Root_Folder staging directory
             if not present and root_folder is not None:
                 if (root_folder / exe_path).is_file():
                     present = True
 
             if present:
-                bg    = self._FW_GREEN_BG
-                fg    = self._FW_GREEN_TEXT
-                msg   = f"✔  {label} Installed"
+                banner_data.append((
+                    f"✔  {label} Installed",
+                    self._FW_GREEN_BG,
+                    self._FW_GREEN_TEXT,
+                ))
             else:
-                bg    = self._FW_RED_BG
-                fg    = self._FW_RED_TEXT
-                msg   = f"✘  {label} Not Present"
+                banner_data.append((
+                    f"✘  {label} Not Present",
+                    self._FW_RED_BG,
+                    self._FW_RED_TEXT,
+                ))
 
-            row_frame = ctk.CTkFrame(
-                self._framework_banners_frame,
-                fg_color=bg,
-                corner_radius=0,
-                height=22,
-            )
-            row_frame.grid(row=idx, column=0, sticky="ew", padx=0, pady=(1, 0))
-            row_frame.grid_propagate(False)
+        # Reuse existing widgets where possible; only create/destroy on count change.
+        existing = self._framework_banner_widgets
+        for idx, (msg, bg, fg) in enumerate(banner_data):
+            if idx < len(existing):
+                # Reconfigure in place — no destroy/create
+                row_frame = existing[idx]
+                row_frame.configure(fg_color=bg)
+                children = row_frame.winfo_children()
+                if children:
+                    children[0].configure(text=msg, text_color=fg)
+            else:
+                # Need a new widget
+                row_frame = ctk.CTkFrame(
+                    self._framework_banners_frame,
+                    fg_color=bg,
+                    corner_radius=0,
+                    height=22,
+                )
+                row_frame.grid(row=idx, column=0, sticky="ew", padx=0, pady=(1, 0))
+                row_frame.grid_propagate(False)
 
-            ctk.CTkLabel(
-                row_frame,
-                text=msg,
-                font=_theme.FONT_SMALL,
-                text_color=fg,
-                fg_color="transparent",
-                anchor="w",
-            ).pack(side="left", padx=10, fill="y", expand=False)
+                ctk.CTkLabel(
+                    row_frame,
+                    text=msg,
+                    font=_theme.FONT_SMALL,
+                    text_color=fg,
+                    fg_color="transparent",
+                    anchor="w",
+                ).pack(side="left", padx=10, fill="y", expand=False)
 
-            self._framework_banner_widgets.append(row_frame)
+                existing.append(row_frame)
+
+        # Remove excess widgets if framework count decreased
+        while len(existing) > len(banner_data):
+            existing.pop().destroy()
 
     def _refresh_plugins_tab(self) -> None:
         """Reload plugin entries from plugins.txt and redraw."""

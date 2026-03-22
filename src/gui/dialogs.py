@@ -889,6 +889,12 @@ class GamePickerPanel(tk.Frame):
             pass
 
     def _on_remote_handlers_loaded(self, handlers: list):
+        try:
+            self._inner.winfo_exists()
+        except Exception:
+            return
+        if not self._inner.winfo_exists():
+            return
         self._remote_handlers = handlers
         for h in handlers:
             self._build_remote_card(h)

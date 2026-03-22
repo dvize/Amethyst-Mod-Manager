@@ -1219,16 +1219,21 @@ class ModListPanel(ctk.CTkFrame):
         self._apply_meta_results(results)
 
     def _scan_meta_flags_async(self):
-        """Run meta scan in background so the window appears sooner; apply results when done."""
-        self._update_mods.clear()
-        self._missing_reqs.clear()
-        self._missing_reqs_detail.clear()
-        self._endorsed_mods.clear()
-        self._install_dates.clear()
-        self._install_datetimes.clear()
-        self._category_names.clear()
-        self._vis_dirty = True
+        """Run meta scan in background so the window appears sooner; apply results when done.
+
+        Note: we no longer clear the dictionaries up-front.  The previous scan's
+        data stays visible until the new results arrive, avoiding a flash where
+        Category / Flags / Installed columns go blank during the async gap.
+        """
         if self._modlist_path is None or not self._staging_root.is_dir():
+            self._update_mods.clear()
+            self._missing_reqs.clear()
+            self._missing_reqs_detail.clear()
+            self._endorsed_mods.clear()
+            self._install_dates.clear()
+            self._install_datetimes.clear()
+            self._category_names.clear()
+            self._vis_dirty = True
             return
         if not self._call_threadsafe:
             self._scan_meta_flags()  # Fallback: sync if no thread-safe callback
@@ -5381,8 +5386,13 @@ class ModListPanel(ctk.CTkFrame):
                 self._log(f"Filemap updated: {count} file(s).")
             self._vis_dirty = True  # conflict filters depend on conflict_map
             self._redraw()
+            # Defer _on_filemap_rebuilt to the next event-loop iteration so
+            # the current _redraw geometry is fully settled before the plugin
+            # panel destroys/creates widgets (framework banners, data tree),
+            # which can trigger cascading resize events that cause column
+            # items to momentarily disappear.
             if self._on_filemap_rebuilt:
-                self._on_filemap_rebuilt()
+                self.after_idle(self._on_filemap_rebuilt)
             # If something changed while we were running, rebuild again.
             if self._filemap_dirty:
                 self._rebuild_filemap()

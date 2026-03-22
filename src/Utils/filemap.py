@@ -21,7 +21,7 @@ or removed (or when the user hits the Refresh button).
 
 Index format — msgpack binary, v3:
     {"v": 3, "mods": [[mod_name, [[rel_key, rel_str, kind], ...]], ...]}
-where <kind> is "n" (normal) or "r" (root-deploy).
+where <kind> is "n" (normal) or "r" (unused legacy, kept for format compatibility).
 Paths stored in the index are already folder-case-normalized across all mods
 so build_filemap() can skip the normalize step entirely.
 """
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -67,18 +68,24 @@ _IndexCache = dict[str, tuple[dict[str, str], dict[str, str]]]
 _index_cache: tuple[str, float, _IndexCache] | None = None  # (path, mtime, data)
 _index_cache_lock = threading.Lock()
 
+# Per-output-path cache of the last filemap_winner dict.
+# If the new winner dict is identical, we skip the file write entirely.
+# Maps output_path_str → frozenset of (rel_key, mod_name) pairs.
+_filemap_winner_cache: dict[str, frozenset] = {}
+_filemap_winner_cache_lock = threading.Lock()
+
 
 def _scan_dir(
     source_name: str,
     source_dir: str,
     strip_prefixes: frozenset[str] = frozenset(),
     allowed_extensions: frozenset[str] = frozenset(),
-    root_deploy_folders: frozenset[str] = frozenset(),
+    _unused_root_deploy_folders: frozenset[str] = frozenset(),
     strip_path_prefixes: list[str] | None = None,
 ) -> tuple[str, dict[str, str], dict[str, str]]:
     """Walk source_dir with os.scandir (fast, no Pathlib overhead).
 
-    Returns (source_name, normal_files, root_files) where each dict is
+    Returns (source_name, normal_files, {}) where normal_files is
     {rel_key_lower: rel_str_original}.
     Pure function — no shared state, safe to call from any thread.
 
@@ -95,13 +102,11 @@ def _scan_dir(
     (including the leading dot) appears in this set are included.  e.g.
     allowed_extensions={".pak"} drops all non-.pak files from the result.
 
-    root_deploy_folders — lowercase top-level folder names (checked after
-    strip-prefix processing) whose files should be deployed to the game root
-    instead of the mod data path.  These files bypass the allowed_extensions
-    filter and are returned in the separate root_files dict.
+    _unused_root_deploy_folders — retained for call-site compatibility only;
+    the root-deploy routing has been removed in favour of custom_routing_rules.
     """
     result: dict[str, str] = {}
-    root_result: dict[str, str] = {}
+    root_result: dict[str, str] = {}  # always empty; kept for tuple compat
     # Pre-sort once (longest match first) so we don't re-sort inside the per-file loop.
     # Each entry is (lowercase_prefix, len_of_original_prefix) for O(1) strip-by-length.
     sorted_path_prefixes: list[tuple[str, int]] = (
@@ -142,19 +147,6 @@ def _scan_dir(
                                     rel_str = remainder
                                 else:
                                     break
-                        # Route files under root_deploy_folders to the root dict
-                        # (bypasses the extension filter).
-                        if root_deploy_folders and "/" in rel_str:
-                            top_seg = rel_str.split("/", 1)[0]
-                            if top_seg.lower() in root_deploy_folders:
-                                rkey = rel_str.lower()
-                                if rkey in root_result:
-                                    ex = root_result[rkey]
-                                    if _upper_count("/".join(rel_str.split("/")[:-1])) > _upper_count("/".join(ex.split("/")[:-1])):
-                                        root_result[rkey] = rel_str
-                                else:
-                                    root_result[rkey] = rel_str
-                                continue
                         # Extension filter — drop files not in the allowed set
                         if allowed_extensions:
                             ext = os.path.splitext(entry.name)[1].lower()
@@ -339,6 +331,16 @@ def read_mod_index(
     return index
 
 
+def invalidate_filemap_cache(output_path: Path) -> None:
+    """Discard the skip-if-unchanged snapshot for output_path.
+
+    Call this whenever the mod index changes (install, remove, rebuild) so the
+    next build_filemap() always writes a fresh filemap.txt rather than skipping.
+    """
+    with _filemap_winner_cache_lock:
+        _filemap_winner_cache.pop(str(output_path), None)
+
+
 def _write_mod_index(
     index_path: Path,
     index: dict[str, tuple[dict[str, str], dict[str, str]]],
@@ -369,13 +371,20 @@ def _write_mod_index(
         except OSError:
             pass
         raise
-    # Update the in-memory cache to match what was just written.
+    # Update the in-memory index cache to match what was just written.
     with _index_cache_lock:
         try:
             mtime = index_path.stat().st_mtime
             _index_cache = (str(index_path), mtime, index)
         except OSError:
             _index_cache = None
+    # Invalidate the filemap skip-cache: the index changed so the next
+    # build_filemap() must write a fresh filemap.txt regardless.
+    profile_dir = str(index_path.parent)
+    with _filemap_winner_cache_lock:
+        for key in list(_filemap_winner_cache):
+            if key.startswith(profile_dir):
+                del _filemap_winner_cache[key]
 
 
 def update_mod_index(
@@ -425,7 +434,7 @@ def rebuild_mod_index(
     strip_prefixes: set[str] | None = None,
     per_mod_strip_prefixes: dict[str, list[str]] | None = None,
     allowed_extensions: set[str] | None = None,
-    root_deploy_folders: set[str] | None = None,
+    root_deploy_folders: set[str] | None = None,  # unused, kept for call-site compat
     normalize_folder_case: bool = True,
 ) -> None:
     """Scan every mod folder under staging_root and rewrite the full index.
@@ -438,7 +447,7 @@ def rebuild_mod_index(
     _strip = frozenset(s.lower() for s in strip_prefixes) if strip_prefixes else frozenset()
     _per_mod = per_mod_strip_prefixes or {}
     _exts  = frozenset(e.lower() for e in allowed_extensions) if allowed_extensions else frozenset()
-    _root  = frozenset(s.lower() for s in root_deploy_folders) if root_deploy_folders else frozenset()
+    _root  = frozenset()  # root_deploy_folders routing removed; param kept for compat
 
     staging_str   = str(staging_root)
     overwrite_str = str(staging_root.parent / "overwrite")
@@ -494,7 +503,7 @@ def build_filemap(
     strip_prefixes: set[str] | None = None,
     per_mod_strip_prefixes: dict[str, list[str]] | None = None,
     allowed_extensions: set[str] | None = None,
-    root_deploy_folders: set[str] | None = None,
+    root_deploy_folders: set[str] | None = None,  # unused, kept for call-site compat
     disabled_plugins: dict[str, list[str]] | None = None,
     conflict_ignore_filenames: set[str] | None = None,
     excluded_mod_files: dict[str, set[str]] | None = None,
@@ -515,10 +524,9 @@ def build_filemap(
     extension (e.g. {".pak"}) are included in the filemap.  Pass None or an
     empty set to include all files (default behaviour).
 
-    root_deploy_folders — top-level folder names whose files should be
-    deployed to the game root instead of the mod data path.  These are
-    written to a sibling ``filemap_root.txt`` and bypass the extension
-    filter.  Pass None or an empty set to disable (default).
+    root_deploy_folders — no longer used; kept for call-site compatibility.
+    Previously wrote a ``filemap_root.txt``; routing is now done via
+    ``custom_routing_rules`` at deploy time.
 
     conflict_ignore_filenames — lowercase filenames (not paths) excluded from
     conflict tracking.  Files still appear in the filemap but do not count
@@ -553,98 +561,67 @@ def build_filemap(
             strip_prefixes=strip_prefixes,
             per_mod_strip_prefixes=per_mod_strip_prefixes,
             allowed_extensions=allowed_extensions,
-            root_deploy_folders=root_deploy_folders,
             normalize_folder_case=normalize_folder_case,
         )
         index = read_mod_index(index_path) or {}
 
-    # Build raw / raw_root from the index for the mods we care about.
-    raw:      dict[str, dict[str, str]] = {}
-    raw_root: dict[str, dict[str, str]] = {}
-    for name in priority_order:
-        entry = index.get(name)
-        if entry is None:
-            continue
-        normal, root = entry
-        if normal:
-            raw[name] = dict(normal)
-        if root:
-            raw_root[name] = dict(root)
+    # Pre-compile ignore patterns once into a single regex for O(1) matching.
+    _ignore_re: re.Pattern[str] | None = None
+    if conflict_ignore_filenames:
+        parts = [fnmatch.translate(p.lower()) for p in conflict_ignore_filenames]
+        _ignore_re = re.compile("|".join(parts))
 
-    # filemap: lowercase_rel_path → (winning_mod_name,)
-    filemap_winner: dict[str, str] = {}
-    mod_files: dict[str, set[str]] = {}
-    # Track how many filemap slots each mod wins (for CONFLICT_FULL check below)
-    win_count: dict[str, int] = {}
+    def _is_ignored(rel_key: str) -> bool:
+        if _ignore_re is None:
+            return False
+        return bool(_ignore_re.match(rel_key.rsplit("/", 1)[-1]))
 
     # Build per-mod excluded-file sets for fast lookup (lowercase rel_keys)
     _excluded: dict[str, set[str]] = excluded_mod_files or {}
 
-    # Merge in priority order so higher-priority mods overwrite lower ones
+    # Single-pass merge: priority order (low→high) so later mods overwrite earlier ones.
+    # Simultaneously builds filemap_winner, filemap, overrides/overridden_by, win_count.
+    filemap_winner: dict[str, str] = {}
+    filemap: dict[str, tuple[str, str]] = {}
+    overrides:     dict[str, set[str]] = {s: set() for s in priority_order}
+    overridden_by: dict[str, set[str]] = {s: set() for s in priority_order}
+    win_count: dict[str, int] = {}
+    # Track which mods had at least one active file (for conflict status "no files" check).
+    mods_with_files: set[str] = set()
+
     for name in priority_order:
-        files = raw.get(name)
-        if not files:
+        entry = index.get(name)
+        if not entry:
+            continue
+        normal, _ = entry
+        if not normal:
             continue
         exc = _excluded.get(name)
-        active_keys = set(files.keys()) if not exc else {k for k in files if k not in exc}
-        mod_files[name] = active_keys
-        for rel_key in active_keys:
+        had_file = False
+        for rel_key, rel_str in normal.items():
+            if exc and rel_key in exc:
+                continue
+            if _is_ignored(rel_key):
+                continue
+            had_file = True
             prev = filemap_winner.get(rel_key)
             if prev is not None:
                 win_count[prev] = win_count.get(prev, 0) - 1
+                # conflict tracking
+                overrides[name].add(prev)
+                overridden_by[prev].add(name)
             filemap_winner[rel_key] = name
+            filemap[rel_key] = (rel_str, name)
             win_count[name] = win_count.get(name, 0) + 1
-
-    # Rebuild filemap using the normalised (canonical) rel_str for the destination
-    # path so that all mods writing to the same logical folder produce files under
-    # one consistent directory name (e.g. always "Scripts/", never "scripts/").
-    filemap: dict[str, tuple[str, str]] = {}
-    for rel_key, winner in filemap_winner.items():
-        rel_str = raw[winner].get(rel_key, rel_key)
-        filemap[rel_key] = (rel_str, winner)
-
-    # Build overrides / overridden_by
-    overrides:     dict[str, set[str]] = {s: set() for s in priority_order}
-    overridden_by: dict[str, set[str]] = {s: set() for s in priority_order}
-
-    _ignore_patterns = [f.lower() for f in conflict_ignore_filenames] if conflict_ignore_filenames else []
-
-    def _is_ignored(rel_key: str) -> bool:
-        if not _ignore_patterns:
-            return False
-        fname = rel_key.rsplit("/", 1)[-1]
-        return any(fnmatch.fnmatch(fname, p) for p in _ignore_patterns)
-
-    # Remove ignored files from filemap_winner and filemap so they are never
-    # deployed or shown in the Data tab.
-    if _ignore_patterns:
-        for key in list(filemap_winner.keys()):
-            if _is_ignored(key):
-                del filemap_winner[key]
-        for key in list(filemap.keys()):
-            if _is_ignored(key):
-                del filemap[key]
-        for name in mod_files:
-            mod_files[name] = {k for k in mod_files[name] if not _is_ignored(k)}
-
-    current_holder: dict[str, str] = {}
-    for name in priority_order:
-        for key in mod_files.get(name, ()):
-            if _is_ignored(key):
-                continue
-            if key in current_holder:
-                loser = current_holder[key]
-                overrides[name].add(loser)
-                overridden_by[loser].add(name)
-            current_holder[key] = name
+        if had_file:
+            mods_with_files.add(name)
 
     # Compute per-source conflict status
     conflict_map: dict[str, int] = {}
     for name in priority_order:
-        keys = mod_files.get(name)
         has_wins  = bool(overrides[name])
         has_loses = bool(overridden_by[name])
-        if not keys or (not has_wins and not has_loses):
+        if name not in mods_with_files or (not has_wins and not has_loses):
             conflict_map[name] = CONFLICT_NONE
         elif has_loses and win_count.get(name, 0) <= 0:
             conflict_map[name] = CONFLICT_FULL
@@ -661,42 +638,43 @@ def build_filemap(
         for _mod, _names in disabled_plugins.items():
             _disabled_lower[_mod] = {n.lower() for n in _names}
 
-    # Write sorted output — build lines and write in one pass to avoid 80k+ write() calls
+    # Skip-if-unchanged: fingerprint the winner map + disabled state.
+    # If identical to the last write for this output path, skip the expensive
+    # sort + string build + disk write (and post_build_filemap re-read).
+    # disabled_plugins is rare but must be included since it affects written lines.
+    _disabled_frozen = (
+        frozenset((m, frozenset(ns)) for m, ns in _disabled_lower.items())
+        if _disabled_lower else frozenset()
+    )
+    _winner_snapshot = (frozenset(filemap_winner.items()), _disabled_frozen)
+    _output_key = str(output_path)
+    with _filemap_winner_cache_lock:
+        _unchanged = _filemap_winner_cache.get(_output_key) == _winner_snapshot
+    if _unchanged and output_path.is_file():
+        # Conflict data is still valid; file on disk is already correct.
+        count = sum(1 for _ in filemap_winner)  # approx — disabled_plugins may trim a few
+        return count, conflict_map, overrides, overridden_by
+
+    # Write sorted output — sort keys once, build one big string, write in a single call.
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sorted_keys = sorted(filemap)
-    lines: list[str] = []
+    parts: list[str] = []
     for rel_key in sorted_keys:
         rel_str, mod_name = filemap[rel_key]
         # Skip root-level files that the user has disabled for this mod
         if _disabled_lower and "/" not in rel_key and mod_name in _disabled_lower:
             if rel_key in _disabled_lower[mod_name]:
                 continue
-        lines.append(f"{rel_str}\t{mod_name}\n")
+        parts.append(rel_str)
+        parts.append("\t")
+        parts.append(mod_name)
+        parts.append("\n")
+    output = "".join(parts)
     with output_path.open("w", encoding="utf-8") as f:
-        f.write("".join(lines))
-    count = len(lines)
+        f.write(output)
+    count = output.count("\n")
 
-    # Write root-deploy filemap if any root files were found.
-    root_output = output_path.parent / "filemap_root.txt"
-    if raw_root:
-        root_winner: dict[str, str] = {}
-        for name in priority_order:
-            rfiles = raw_root.get(name)
-            if not rfiles:
-                continue
-            for rel_key in rfiles:
-                root_winner[rel_key] = name
-        root_filemap: dict[str, tuple[str, str]] = {}
-        for rel_key, winner in root_winner.items():
-            rel_str = raw_root[winner].get(rel_key, rel_key)
-            root_filemap[rel_key] = (rel_str, winner)
-        sorted_root = sorted(root_filemap)
-        with root_output.open("w", encoding="utf-8") as f:
-            for rel_key in sorted_root:
-                rel_str, mod_name = root_filemap[rel_key]
-                f.write(f"{rel_str}\t{mod_name}\n")
-        count += len(sorted_root)
-    elif root_output.is_file():
-        root_output.unlink()
+    with _filemap_winner_cache_lock:
+        _filemap_winner_cache[_output_key] = _winner_snapshot
 
     return count, conflict_map, overrides, overridden_by

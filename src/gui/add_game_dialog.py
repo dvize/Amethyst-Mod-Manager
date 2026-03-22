@@ -30,6 +30,7 @@ from Utils.steam_finder import (
 )
 from Utils.config_paths import get_game_config_path
 from Utils.heroic_finder import find_heroic_game, find_heroic_prefix, find_heroic_app_name_by_exe, find_heroic_game_info_by_exe
+from Utils.app_log import app_log
 
 from gui.theme import (
     BG_DEEP,
@@ -416,33 +417,63 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         discovered_app_name: Optional[str] = None
         found_prefix: Optional[Path] = None
 
+        game_name = getattr(self._game, "name", repr(self._game))
+        app_log(f"[Add Game] Auto-detecting: {game_name}")
+
         # Heroic first: exe -> installed.json -> appname + path -> GamesConfig/<appname>.json -> prefix
         # Ensures we get both path and prefix when the game is installed via Heroic.
         exe_names = [getattr(self._game, "exe_name", None)]
         exe_names += getattr(self._game, "exe_name_alts", [])
         exe_names = [e for e in exe_names if e]
+        app_log(f"[Add Game] Checking Heroic (exe names: {exe_names})")
         for exe_name in exe_names:
             info = find_heroic_game_info_by_exe(exe_name)
             if info:
                 found, found_prefix, discovered_app_name = info
                 source = "heroic"
+                app_log(f"[Add Game] Found via Heroic exe scan ({exe_name}): {found}")
                 break
+        else:
+            app_log(f"[Add Game] Not found via Heroic exe scan")
 
         if not found and _get_heroic_app_names(self._game):
-            found = find_heroic_game(_get_heroic_app_names(self._game))
+            heroic_names = _get_heroic_app_names(self._game)
+            app_log(f"[Add Game] Checking Heroic app names: {heroic_names}")
+            found = find_heroic_game(heroic_names)
             if found:
                 source = "heroic"
+                app_log(f"[Add Game] Found via Heroic app name: {found}")
+            else:
+                app_log(f"[Add Game] Not found via Heroic app names")
 
         if not found:
             libraries = find_steam_libraries()
+            app_log(f"[Add Game] Steam libraries found: {libraries if libraries else 'none'}")
             steam_id = getattr(self._game, "steam_id", None)
             if steam_id:
+                app_log(f"[Add Game] Checking Steam manifest (app ID: {steam_id}, exe: {self._game.exe_name})")
                 found = find_game_by_steam_id(libraries, steam_id, self._game.exe_name)
+                if found:
+                    app_log(f"[Add Game] Found via Steam app manifest: {found}")
+                else:
+                    app_log(
+                        f"[Add Game] Not found via Steam app manifest — "
+                        f"checked {len(libraries)} library/libraries for appmanifest_{steam_id}.acf"
+                    )
+            else:
+                app_log(f"[Add Game] No Steam app ID configured for this game")
             if not found:
+                app_log(f"[Add Game] Falling back to exe scan across Steam libraries")
                 for exe_name in exe_names:
                     found = find_game_in_libraries(libraries, exe_name)
                     if found:
+                        app_log(f"[Add Game] Found via Steam exe scan ({exe_name}): {found}")
                         break
+                else:
+                    app_log(f"[Add Game] Not found via Steam exe scan (tried: {exe_names})")
+
+        if not found:
+            app_log(f"[Add Game] Game location not auto-detected for: {game_name}")
 
         try:
             if self.winfo_exists():
@@ -486,7 +517,22 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         threading.Thread(target=self._prefix_scan_worker, daemon=True).start()
 
     def _prefix_scan_worker(self):
-        found = find_prefix(self._game.steam_id)
+        steam_id = self._game.steam_id
+        game_name = getattr(self._game, "name", repr(self._game))
+        app_log(f"[Add Game] Scanning for Proton prefix (app ID: {steam_id})")
+        found = find_prefix(steam_id)
+        if found:
+            app_log(f"[Add Game] Proton prefix found: {found}")
+        else:
+            from Utils.steam_finder import _STEAM_CANDIDATES
+            checked = [
+                str(root / "steamapps" / "compatdata" / steam_id / "pfx")
+                for root in _STEAM_CANDIDATES
+            ]
+            app_log(
+                f"[Add Game] Proton prefix not found for {game_name} (app ID: {steam_id}). "
+                f"Checked: {checked}"
+            )
         try:
             if self.winfo_exists():
                 self.after(0, lambda: self._on_prefix_scan_complete(found))

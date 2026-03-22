@@ -25,9 +25,10 @@ from pathlib import Path
 
 from Games.base_game import BaseGame
 from Utils.deploy import (
-    LinkMode, deploy_filemap, deploy_core, move_to_core, restore_data_core,
-    deploy_filemap_to_root, load_per_mod_strip_prefixes, load_separator_deploy_paths,
-    expand_separator_deploy_paths, cleanup_custom_deploy_dirs, restore_filemap_from_root,
+    CustomRule, LinkMode, deploy_filemap, deploy_core, move_to_core, restore_data_core,
+    deploy_custom_rules, load_per_mod_strip_prefixes,
+    load_separator_deploy_paths, expand_separator_deploy_paths,
+    cleanup_custom_deploy_dirs, restore_custom_rules,
 )
 from Utils.modlist import read_modlist
 from Utils.config_paths import get_profiles_dir
@@ -80,38 +81,41 @@ class BaldursGate3(BaseGame):
     @property
     def nexus_game_domain(self) -> str:
         return "baldursgate3"
+    
+    @property
+    def mod_required_top_level_folders(self) -> set[str]:
+        return {"data","bin","generated","public","video","mods"}
+    
+    @property
+    def mod_required_file_types(self) -> set[str]:
+        return {".pak"}
+    
+    @property
+    def mod_auto_strip_until_required(self) -> bool:
+        return True
+    
+    @property
+    def mod_install_as_is_if_no_match(self) -> bool:
+        return True
 
     @property
-    def mod_folder_strip_prefixes(self) -> set[str]:
-        return {"mods"}
-
-    @property
-    def mod_root_deploy_folders(self) -> set[str]:
-        return {"bin"}
-
-    @property
-    def mod_install_extensions(self) -> set[str]:
-        return {".pak",".json",".lsx"}
-
+    def custom_routing_rules(self) -> list:
+        return [
+            CustomRule(dest="Data", folders=["generated"]),
+            CustomRule(dest="Data", folders=["public"]),
+            CustomRule(dest="Data", folders=["video"]),
+            CustomRule(dest="Data", folders=["mods"]),
+            CustomRule(dest="", folders=["bin"]),
+            CustomRule(dest="", folders=["data"]),
+        ]
+    
     @property
     def plugin_extensions(self) -> list[str]:
         return []
     
     @property
     def conflict_ignore_filenames(self) -> set[str]:
-        return {"info.json"}
-
-    @property
-    def loot_sort_enabled(self) -> bool:
-        return False
-
-    @property
-    def loot_game_type(self) -> str:
-        return ""
-
-    @property
-    def loot_masterlist_url(self) -> str:
-        return ""
+        return {"info.json","*.txt"}
 
     # -----------------------------------------------------------------------
     # Paths
@@ -243,6 +247,19 @@ class BaldursGate3(BaseGame):
                 "Run 'Build Filemap' before deploying."
             )
 
+        custom_rules = self.custom_routing_rules
+        custom_exclude: set[str] = set()
+        if custom_rules and self._game_path:
+            _log("Step 1a: Routing bin/ and generated/ files via custom rules ...")
+            custom_exclude = deploy_custom_rules(
+                filemap, self._game_path, staging,
+                rules=custom_rules,
+                mode=mode,
+                strip_prefixes=self.mod_folder_strip_prefixes,
+                log_fn=_log,
+            )
+            _log(f"  Routed {len(custom_exclude)} file(s) to Data/.")
+
         _log("Step 1: Moving Mods/ → Mods_Core/ ...")
         moved = move_to_core(mods_dir, log_fn=_log)
         _log(f"  Moved {moved} file(s) to Mods_Core/.")
@@ -259,27 +276,15 @@ class BaldursGate3(BaseGame):
                                             per_mod_strip_prefixes=per_mod_strip,
                                             per_mod_deploy_dirs=per_mod_deploy,
                                             log_fn=_log,
-                                            progress_fn=progress_fn)
+                                            progress_fn=progress_fn,
+                                            exclude=custom_exclude or None)
         _log(f"  Transferred {linked_mod} mod file(s).")
 
         _log("Step 3: Filling gaps with vanilla files from Mods_Core/ ...")
         linked_core = deploy_core(mods_dir, placed, mode=mode, log_fn=_log)
         _log(f"  Transferred {linked_core} vanilla file(s).")
 
-        # Step 4 (optional): deploy root-targeted files (e.g. bin/) to game root
-        linked_root = 0
-        filemap_root = self.get_effective_mod_staging_path().parent / "filemap_root.txt"
-        if filemap_root.is_file() and self._game_path:
-            _log("Step 4: Deploying root-targeted files (bin/, …) to game root ...")
-            linked_root, _ = deploy_filemap_to_root(
-                filemap_root, self._game_path, staging,
-                mode=mode, strip_prefixes=self.mod_folder_strip_prefixes,
-                per_mod_strip_prefixes=per_mod_strip,
-                log_fn=_log, progress_fn=progress_fn,
-            )
-            _log(f"  Transferred {linked_root} file(s) to game root.")
-
-        _log("Step 5: Generating modsettings.lsx ...")
+        _log("Step 4: Generating modsettings.lsx ...")
         modsettings = self._prefix_path / _MODSETTINGS_SUBPATH
         game_data = self._game_path / "Data" if self._game_path else None
         mod_count = write_modsettings(modsettings, modlist, staging,
@@ -290,7 +295,6 @@ class BaldursGate3(BaseGame):
             f"Deploy complete. "
             f"{linked_mod} mod + {linked_core} vanilla "
             f"= {linked_mod + linked_core} total file(s) in Mods/. "
-            f"{linked_root} file(s) deployed to game root. "
             f"modsettings.lsx written with {mod_count} mod(s)."
         )
 
@@ -303,14 +307,17 @@ class BaldursGate3(BaseGame):
 
         mods_dir = self._prefix_path / _MODS_SUBPATH
 
-        # Undo root-targeted files (bin/, …) placed into game root
-        filemap_root = self.get_effective_mod_staging_path().parent / "filemap_root.txt"
+        # Undo custom-routed files (bin/ and generated/ → game root / Data/)
         if self._game_path:
-            removed_root = restore_filemap_from_root(
-                filemap_root, self._game_path, log_fn=_log,
-            )
-            if removed_root:
-                _log(f"  Removed {removed_root} root-deployed file(s).")
+            custom_rules = self.custom_routing_rules
+            if custom_rules:
+                _log("Restore: removing custom-routed files (bin/, generated/) ...")
+                restore_custom_rules(
+                    self.get_effective_filemap_path(),
+                    self._game_path,
+                    rules=custom_rules,
+                    log_fn=_log,
+                )
 
         _profile_dir = self._active_profile_dir
         _entries = read_modlist(_profile_dir / "modlist.txt") if _profile_dir else []
