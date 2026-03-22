@@ -1653,7 +1653,7 @@ class ProtonToolsPanel(ctk.CTkFrame):
 
         steam_id = getattr(self._game, "steam_id", "")
         proton_script = find_proton_for_game(steam_id) if steam_id else None
-        compat_data = prefix_path.parent
+        compat_data = prefix_path.parent if prefix_path.name == "pfx" else prefix_path
 
         if proton_script is None:
             from gui.plugin_panel import _read_prefix_runner

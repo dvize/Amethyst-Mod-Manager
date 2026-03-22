@@ -710,33 +710,53 @@ class Ue5CustomGame(UE5Game):
         return _defn_to_custom_rules(self._defn)
 
     # ------------------------------------------------------------------
-    # UE5 routing — Hogwarts Legacy rules (pak → Content/Paks/~mods,
+    # UE5 routing — generic UE5 rules (pak → Content/Paks/~mods,
     # ue4ss → Binaries/Win64/ue4ss, lua → Binaries/Win64/Mods, etc.)
     # ------------------------------------------------------------------
 
     @property
     def ue5_routing_rules(self) -> list[UE5Rule]:
-        return [
+        rules = [
+            # Pak / streaming files → Content/Paks/~mods/  (checked before the
+            # generic folder="content" catch-all so mods shipped as
+            # Content/Paks/… are routed here rather than to the game root as-is)
+            UE5Rule(
+                dest="Content/Paks/~mods",
+                extensions=[".pak", ".utoc", ".ucas"],
+                strip=["Content/Paks/~mods", "Content/Paks/~Mods", "Content/Paks", "Paks", "Content", "~mods", "~Mods"],
+            ),
+            # Files already inside Content/Paks/~Mods (any casing) → normalise
+            # to lowercase ~mods dest so only one folder is created on disk.
+            UE5Rule(
+                dest="Content/Paks/~mods",
+                prefix="Content/Paks/~Mods",
+                strip=["Content/Paks/~Mods", "Content/Paks/~mods"],
+            ),
+            # Mods shipping Binaries/Win64/UE4SS/… → normalise to lowercase
+            # ue4ss dest so only one folder is ever created on disk.
+            UE5Rule(
+                dest="Binaries/Win64/ue4ss",
+                prefix="Binaries/Win64/UE4SS",
+                strip=["Binaries/Win64/UE4SS", "Binaries/Win64/ue4ss"],
+            ),
+            # ue4ss/ or UE4SS/ top-level folder → Binaries/Win64/ue4ss/
+            # (catches loose ue4ss files like UE4SS-settings.ini before the
+            # extension rules can misroute them)
+            UE5Rule(
+                dest="Binaries/Win64/ue4ss",
+                folder="ue4ss",
+                strip=["ue4ss", "UE4SS"],
+            ),
             # Paths already starting with Binaries/ or Content/ → game root,
             # path preserved as-is.
             UE5Rule(dest="", folder="binaries"),
             UE5Rule(dest="", folder="content"),
-            # ue4ss/ folder → Binaries/Win64/ue4ss/
-            UE5Rule(
-                dest="Binaries/Win64/ue4ss",
-                folder="ue4ss",
-                strip=["ue4ss"],
-            ),
-            # Pak / streaming files and companion txt → Content/Paks/~mods/
-            UE5Rule(
-                dest="Content/Paks/~mods",
-                extensions=[".pak", ".utoc", ".ucas", ".txt"],
-                strip=["Content/Paks/~mods", "Content/Paks", "Paks", "~mods"],
-            ),
-            # Lua UE4SS scripts → Binaries/Win64/Mods/
+            # Lua UE4SS scripts and companion files (config.ini, data .json)
+            # → Binaries/Win64/Mods/
             UE5Rule(
                 dest="Binaries/Win64/Mods",
-                extensions=[".lua"],
+                extensions=[".lua", ".ini", ".json"],
+                filenames=["enabled.txt"],
                 strip=[
                     "Binaries/Win64/Mods",
                     "Binaries/Win64/ue4ss/Mods",
@@ -745,6 +765,7 @@ class Ue5CustomGame(UE5Game):
                     "UE4SS/Mods",
                     "UE4SS",
                     "ue4ss",
+                    "Mods",
                 ],
             ),
             # Loose UE4SS proxy/runtime files (dwmapi.dll, UE4SS.dll, etc.) → Binaries/Win64/
@@ -759,6 +780,23 @@ class Ue5CustomGame(UE5Game):
                 strip=["Content/Movies"],
             ),
         ]
+        # Append user-defined custom routing rules (from the UI / JSON definition).
+        # Each CustomRule may have multiple folders, so expand into one UE5Rule per
+        # folder.  Extension-only rules produce a single UE5Rule with no folder.
+        for cr in self.custom_routing_rules:
+            if cr.folders:
+                for folder in cr.folders:
+                    rules.append(UE5Rule(
+                        dest=cr.dest,
+                        extensions=list(cr.extensions),
+                        folder=folder,
+                    ))
+            else:
+                rules.append(UE5Rule(
+                    dest=cr.dest,
+                    extensions=list(cr.extensions),
+                ))
+        return rules
 
     @property
     def ue5_default_dest(self) -> str:

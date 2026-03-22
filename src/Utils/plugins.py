@@ -21,11 +21,15 @@ class PluginEntry:
     enabled: bool
 
 
-def read_plugins(path: Path) -> list[PluginEntry]:
+def read_plugins(path: Path, star_prefix: bool = True) -> list[PluginEntry]:
     """
     Parse plugins.txt and return entries in file order (index 0 = first loaded).
     Lines that are blank or start with '#' are skipped.
-    '*Name' = enabled; bare 'Name' = disabled.
+
+    When star_prefix is True (default, MO2-style):
+      '*Name' = enabled; bare 'Name' = disabled.
+    When star_prefix is False (e.g. Oblivion Remastered):
+      All listed plugins are enabled; no '*' prefix is used.
     """
     entries: list[PluginEntry] = []
     if not path.is_file():
@@ -34,22 +38,29 @@ def read_plugins(path: Path) -> list[PluginEntry]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("*"):
-            entries.append(PluginEntry(name=line[1:], enabled=True))
+        if star_prefix:
+            if line.startswith("*"):
+                entries.append(PluginEntry(name=line[1:], enabled=True))
+            else:
+                entries.append(PluginEntry(name=line, enabled=False))
         else:
-            entries.append(PluginEntry(name=line, enabled=False))
+            entries.append(PluginEntry(name=line, enabled=True))
     return entries
 
 
-def write_plugins(path: Path, entries: list[PluginEntry]) -> None:
+def write_plugins(path: Path, entries: list[PluginEntry], star_prefix: bool = True) -> None:
     """
     Write entries back to plugins.txt.
     Creates parent directories if needed.
-    Enabled entries are written as '*Name', disabled as bare 'Name'.
+
+    When star_prefix is True (default, MO2-style):
+      Enabled entries are written as '*Name', disabled as bare 'Name'.
+    When star_prefix is False (e.g. Oblivion Remastered):
+      All entries are written as bare 'Name' (the game has no '*' syntax).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        f"*{e.name}" if e.enabled else e.name
+        (f"*{e.name}" if e.enabled else e.name) if star_prefix else e.name
         for e in entries
     ]
     path.write_text(
@@ -84,19 +95,20 @@ def write_loadorder(path: Path, entries: list[PluginEntry]) -> None:
     )
 
 
-def append_plugin(path: Path, plugin_name: str, enabled: bool = True) -> None:
+def append_plugin(path: Path, plugin_name: str, enabled: bool = True,
+                  star_prefix: bool = True) -> None:
     """
     Append a plugin to the bottom of plugins.txt if not already present.
     The check is case-insensitive so 'Plugin.esp' and 'plugin.esp' are treated
     as the same plugin.
     Does nothing if the plugin already exists in the file.
     """
-    entries = read_plugins(path)
+    entries = read_plugins(path, star_prefix=star_prefix)
     existing_lower = {e.name.lower() for e in entries}
     if plugin_name.lower() in existing_lower:
         return
     entries.append(PluginEntry(name=plugin_name, enabled=enabled))
-    write_plugins(path, entries)
+    write_plugins(path, entries, star_prefix=star_prefix)
 
 
 def prune_plugins_from_filemap(
@@ -104,6 +116,7 @@ def prune_plugins_from_filemap(
     plugins_path: Path,
     plugin_extensions: list[str],
     data_dir: Path | None = None,
+    star_prefix: bool = True,
 ) -> int:
     """
     Remove entries from plugins.txt whose plugin file no longer appears in
@@ -148,11 +161,11 @@ def prune_plugins_from_filemap(
                 in_data_dir.add(entry.name.lower())
 
     keep = in_filemap | in_data_dir
-    existing = read_plugins(plugins_path)
+    existing = read_plugins(plugins_path, star_prefix=star_prefix)
     kept = [e for e in existing if e.name.lower() in keep]
     removed = len(existing) - len(kept)
     if removed:
-        write_plugins(plugins_path, kept)
+        write_plugins(plugins_path, kept, star_prefix=star_prefix)
     return removed
 
 
@@ -160,6 +173,7 @@ def sync_plugins_from_data_dir(
     data_dir: Path,
     plugins_path: Path,
     plugin_extensions: list[str],
+    star_prefix: bool = True,
 ) -> int:
     """
     Scan the game's Data directory for root-level plugin files and append any
@@ -170,7 +184,7 @@ def sync_plugins_from_data_dir(
         return 0
 
     exts_lower = {ext.lower() for ext in plugin_extensions}
-    existing = read_plugins(plugins_path)
+    existing = read_plugins(plugins_path, star_prefix=star_prefix)
     existing_lower = {e.name.lower() for e in existing}
 
     new_entries: list[PluginEntry] = []
@@ -181,7 +195,7 @@ def sync_plugins_from_data_dir(
                 existing_lower.add(entry.name.lower())
 
     if new_entries:
-        write_plugins(plugins_path, existing + new_entries)
+        write_plugins(plugins_path, existing + new_entries, star_prefix=star_prefix)
 
     return len(new_entries)
 
@@ -190,6 +204,7 @@ def sync_plugins_from_overwrite_dir(
     overwrite_dir: Path,
     plugins_path: Path,
     plugin_extensions: list[str],
+    star_prefix: bool = True,
 ) -> int:
     """
     Scan the overwrite folder for root-level plugin files and append any
@@ -210,7 +225,7 @@ def sync_plugins_from_overwrite_dir(
         return 0
 
     exts_lower = {ext.lower() for ext in plugin_extensions}
-    existing = read_plugins(plugins_path)
+    existing = read_plugins(plugins_path, star_prefix=star_prefix)
     existing_lower = {e.name.lower() for e in existing}
 
     def scan_directory(directory: Path) -> list[PluginEntry]:
@@ -229,7 +244,7 @@ def sync_plugins_from_overwrite_dir(
     new_entries.extend(scan_directory(overwrite_dir / "Data"))
 
     if new_entries:
-        write_plugins(plugins_path, existing + new_entries)
+        write_plugins(plugins_path, existing + new_entries, star_prefix=star_prefix)
         # Update loadorder.txt so the plugins panel shows them
         loadorder_path = plugins_path.parent / "loadorder.txt"
         saved_order = read_loadorder(loadorder_path)
@@ -249,6 +264,7 @@ def sync_plugins_from_filemap(
     plugins_path: Path,
     plugin_extensions: list[str],
     disabled_plugins: dict[str, list[str]] | None = None,
+    star_prefix: bool = True,
 ) -> int:
     """
     Scan filemap.txt for files matching plugin_extensions and append any
@@ -265,7 +281,7 @@ def sync_plugins_from_filemap(
 
     exts_lower = {ext.lower() for ext in plugin_extensions}
 
-    existing = read_plugins(plugins_path)
+    existing = read_plugins(plugins_path, star_prefix=star_prefix)
     existing_lower = {e.name.lower() for e in existing}
 
     new_entries: list[PluginEntry] = []
@@ -291,7 +307,7 @@ def sync_plugins_from_filemap(
                 existing_lower.add(filename.lower())
 
     if new_entries:
-        write_plugins(plugins_path, existing + new_entries)
+        write_plugins(plugins_path, existing + new_entries, star_prefix=star_prefix)
 
     return len(new_entries)
 

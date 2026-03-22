@@ -185,7 +185,7 @@ class BaseGame(ABC):
         return set()
 
     @property
-    def mod_root_deploy_folders(self) -> set[str]:
+    def mod_root_deploy_folders(self) -> set[str]: # Legacy, Use custom routing rules instead
         """
         Lowercase top-level folder names inside a mod that should be deployed
         to the game's root directory instead of the normal mod data path.
@@ -389,6 +389,25 @@ class BaseGame(ABC):
         return {}
 
     @property
+    def preferred_launch_exe(self) -> str:
+        """
+        Optional game-root-relative path to an alternative executable that
+        should be shown first in the exe dropdown and treated as the launch
+        exe (green Play button), but ONLY when the file is present on disk.
+
+        Use this for games where a script extender or mod loader must be
+        launched instead of the normal game executable, but where replacing
+        the original exe on disk would cause errors (e.g. Oblivion Remastered
+        with obse64_loader.exe).
+
+        When the file at this path does not exist, the normal ``exe_name``
+        is used as the launch exe instead.
+
+        Return an empty string (the default) to always use ``exe_name``.
+        """
+        return ""
+
+    @property
     def steam_id(self) -> str:
         """
         Steam App ID for this game, e.g. '377160' for Fallout 4.
@@ -408,7 +427,7 @@ class BaseGame(ABC):
         return []
 
     @property
-    def heroic_app_names(self) -> list[str]:
+    def heroic_app_names(self) -> list[str]: # Legacy, App names are now detected automatically
         """
         Heroic Games Launcher app identifiers for this game.
 
@@ -449,6 +468,23 @@ class BaseGame(ABC):
         Subclasses override this to enable plugin panel functionality.
         """
         return []
+
+    @property
+    def plugins_use_star_prefix(self) -> bool:
+        """
+        Whether plugins.txt uses the MO2-style '*Name' prefix for enabled plugins.
+        Most Bethesda games use True. Oblivion Remastered uses False (bare names only).
+        """
+        return True
+
+    @property
+    def plugins_include_vanilla(self) -> bool:
+        """
+        Whether vanilla (base-game) plugins should be written into plugins.txt.
+        Standard Bethesda games exclude them (the engine handles them separately).
+        Oblivion Remastered requires all plugins, including vanilla, to be listed.
+        """
+        return False
 
     @property
     def loot_sort_enabled(self) -> bool:
@@ -576,6 +612,17 @@ class BaseGame(ABC):
         e.g. for Skyrim SE: <game_path>/Data
         Returns None if game_path is not configured.
         """
+
+    def get_vanilla_plugins_path(self) -> Path | None:
+        """
+        Return the directory that contains the game's own (vanilla) plugin files.
+        Used to detect which .esp/.esm files belong to the base game so they can
+        be shown as non-disableable entries in the plugins panel.
+
+        Defaults to get_mod_data_path(). Override for games whose vanilla plugins
+        live in a different subdirectory (e.g. Oblivion Remastered).
+        """
+        return self.get_mod_data_path()
 
     @abstractmethod
     def get_mod_staging_path(self) -> Path:

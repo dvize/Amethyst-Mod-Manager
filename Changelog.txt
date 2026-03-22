@@ -1,3 +1,10 @@
+- v1.0.10
+- Fix for users whose prefix does not create a pfx folder and uses drive_c at the prefixes root
+- Using set deployment paths now updates the mod files tab to reflect the change
+- Fixed Ue5 game exe's not showing up in the run exe section
+- Tweaked Ue5 game handlers, Some files were not moving to the correct location.
+- Fixed Oblivion remastered plugins.txt formatting to the correct version.
+
 - v1.0.9
 - The data tab and ini files tab now only update when the tabs are open and visible. This greatly speeds up filemap generation and stops large modlists feeling sluggish when enabling/disabling/moving mods. 
 - Fixed some flickering widgets when enabling and disabling mods

@@ -174,6 +174,7 @@ def sort_plugins(
     game_type_attr: str = "",
     game_id: str = "",
     masterlist_url: str = "",
+    game_data_dir: Path | None = None,
 ) -> SortResult:
     """
     Sort plugins using libloot's masterlist rules.
@@ -262,7 +263,7 @@ def sort_plugins(
         warnings.append("Prelude file not found — sorting may be less accurate.")
 
     # Find plugin files on disk — check game Data dir AND staging mods
-    data_dir = game_path / "Data"
+    data_dir = game_data_dir if game_data_dir is not None else game_path / "Data"
     plugin_paths, missing = _find_plugin_paths(
         plugin_names, data_dir, staging_root,
     )

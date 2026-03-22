@@ -1306,12 +1306,13 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         if plugin_exts and mod_panel is not None and mod_panel._modlist_path is not None:
             plugins_path = mod_panel._modlist_path.parent / "plugins.txt"
             loadorder_path = mod_panel._modlist_path.parent / "loadorder.txt"
+            _sp = getattr(game, "plugins_use_star_prefix", True)
             exts_lower = {ext.lower() for ext in plugin_exts}
             new_plugins: list[str] = []
             if dest_root.is_dir():
                 for entry in dest_root.iterdir():
                     if entry.is_file() and entry.suffix.lower() in exts_lower:
-                        append_plugin(plugins_path, entry.name, enabled=True)
+                        append_plugin(plugins_path, entry.name, enabled=True, star_prefix=_sp)
                         new_plugins.append(entry.name)
             if new_plugins:
                 existing_lo = read_loadorder(loadorder_path)

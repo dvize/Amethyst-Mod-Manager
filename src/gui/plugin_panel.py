@@ -406,6 +406,16 @@ class PluginPanel(ctk.CTkFrame):
         "papyruscompiler.exe",
     })
 
+    @property
+    def _plugins_star_prefix(self) -> bool:
+        """Return whether plugins.txt for the current game uses '*' prefixes."""
+        return getattr(self._game, "plugins_use_star_prefix", True)
+
+    @property
+    def _plugins_include_vanilla(self) -> bool:
+        """Return whether vanilla plugins should be written into plugins.txt."""
+        return getattr(self._game, "plugins_include_vanilla", False)
+
     def refresh_exe_list(self, _select_after=None):
         """Scan for .exe and .bat files in a background thread, then populate the dropdown.
 
@@ -426,6 +436,30 @@ class PluginPanel(ctk.CTkFrame):
                     if candidate.is_file():
                         game_exe_path = candidate
                         exes.append(candidate)
+                    else:
+                        # Fallback: search recursively for the bare exe name
+                        # (needed for UE5 games where the exe lives in Binaries/Win64/)
+                        bare = Path(exe_name).name
+                        try:
+                            for found in game_path.rglob(bare):
+                                if found.is_file():
+                                    game_exe_path = found
+                                    exes.append(found)
+                                    break
+                        except OSError:
+                            pass
+
+                # 0b. Check for a preferred launch exe (e.g. a script extender
+                #     that must be launched instead of, but cannot replace, the
+                #     normal game exe).  If present on disk it becomes the
+                #     game_exe_path so it sorts first and gets the Play button.
+                preferred_rel = getattr(game, "preferred_launch_exe", "")
+                if preferred_rel and game_path:
+                    preferred_candidate = game_path / preferred_rel
+                    if preferred_candidate.is_file():
+                        if preferred_candidate not in exes:
+                            exes.insert(0, preferred_candidate)
+                        game_exe_path = preferred_candidate
 
                 staging = (
                     game.get_effective_mod_staging_path()
@@ -719,13 +753,18 @@ class PluginPanel(ctk.CTkFrame):
         p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _is_game_exe(self, exe_path: "Path") -> bool:
-        """Return True if exe_path is this game's own launcher exe."""
+        """Return True if exe_path is this game's own launcher exe (or preferred launch exe)."""
         if self._game is None:
             return False
         game_exe_name = getattr(self._game, "exe_name", None)
         if not game_exe_name:
             return False
-        return exe_path.name.lower() == Path(game_exe_name).name.lower()
+        if exe_path.name.lower() == Path(game_exe_name).name.lower():
+            return True
+        preferred_rel = getattr(self._game, "preferred_launch_exe", "")
+        if preferred_rel and exe_path.name.lower() == Path(preferred_rel).name.lower():
+            return True
+        return False
 
     def _open_applications_folder(self) -> None:
         """Open the Profiles/<game>/Applications folder in the file manager."""
@@ -2162,17 +2201,8 @@ class PluginPanel(ctk.CTkFrame):
         if isinstance(game, UE5Game):
             resolved = []
             for rel_path, mod_name in entries:
-                rule = game._match_rule(rel_path)
-                if rule is not None:
-                    dest = rule.dest
-                    final_rel = game._apply_strip(rel_path, rule.strip)
-                else:
-                    dest = game.ue5_default_dest
-                    final_rel = rel_path.replace("\\", "/")
-                if dest:
-                    full_path = dest + "/" + final_rel
-                else:
-                    full_path = final_rel
+                dest, final_rel = game._resolve_entry(rel_path)
+                full_path = dest + "/" + final_rel if dest else final_rel
                 resolved.append((full_path, mod_name))
             return resolved
 
@@ -2631,6 +2661,7 @@ class PluginPanel(ctk.CTkFrame):
                 game_type_attr=game.loot_game_type,
                 game_id=game.game_id,
                 masterlist_url=game.loot_masterlist_url,
+                game_data_dir=game.get_vanilla_plugins_path() if hasattr(game, "get_vanilla_plugins_path") else None,
             )
         except RuntimeError as e:
             self._log(f"LOOT sort failed: {e}")
@@ -2660,10 +2691,11 @@ class PluginPanel(ctk.CTkFrame):
 
         self._plugin_entries = new_entries
         # Write mod plugins to plugins.txt, full order to loadorder.txt
+        _include_vanilla = self._plugins_include_vanilla
         write_plugins(self._plugins_path, [
             e for e in new_entries
-            if e.name.lower() not in self._vanilla_plugins
-        ])
+            if _include_vanilla or e.name.lower() not in self._vanilla_plugins
+        ], star_prefix=self._plugins_star_prefix)
         write_loadorder(
             self._plugins_path.parent / "loadorder.txt", new_entries,
         )
@@ -2897,7 +2929,7 @@ class PluginPanel(ctk.CTkFrame):
             return
 
         self._load_plugin_locks()
-        mod_entries = read_plugins(self._plugins_path)
+        mod_entries = read_plugins(self._plugins_path, star_prefix=self._plugins_star_prefix)
         mod_map = {e.name.lower(): e for e in mod_entries}
 
         loadorder_path = self._plugins_path.parent / "loadorder.txt"
@@ -2906,31 +2938,61 @@ class PluginPanel(ctk.CTkFrame):
         if saved_order:
             ordered: list[PluginEntry] = []
             seen: set[str] = set()
-            for name in saved_order:
-                low = name.lower()
-                if low in seen:
-                    continue
-                seen.add(low)
-                if low in mod_map:
-                    ordered.append(mod_map[low])
-                elif low in self._vanilla_plugins:
-                    ordered.append(PluginEntry(
-                        name=self._vanilla_plugins[low], enabled=True,
-                    ))
-
-            for e in mod_entries:
-                if e.name.lower() not in seen:
-                    ordered.append(e)
-                    seen.add(e.name.lower())
-
             _ext_order = {".esm": 0, ".esp": 1, ".esl": 2}
-            for low, orig in sorted(
-                self._vanilla_plugins.items(),
-                key=lambda kv: (_ext_order.get(Path(kv[0]).suffix, 9), kv[0]),
-            ):
-                if low not in seen:
-                    ordered.append(PluginEntry(name=orig, enabled=True))
+
+            if self._plugins_include_vanilla:
+                # Vanilla plugins must load first. Build vanilla bucket first
+                # (preserving saved_order within vanilla, with unseen ones sorted
+                # at the end of the vanilla block), then append mods.
+                vanilla_ordered: list[PluginEntry] = []
+                mod_ordered: list[PluginEntry] = []
+                for name in saved_order:
+                    low = name.lower()
+                    if low in seen:
+                        continue
                     seen.add(low)
+                    if low in self._vanilla_plugins:
+                        vanilla_ordered.append(PluginEntry(
+                            name=self._vanilla_plugins[low], enabled=True,
+                        ))
+                    elif low in mod_map:
+                        mod_ordered.append(mod_map[low])
+                for low, orig in sorted(
+                    self._vanilla_plugins.items(),
+                    key=lambda kv: (_ext_order.get(Path(kv[0]).suffix, 9), kv[0]),
+                ):
+                    if low not in seen:
+                        vanilla_ordered.append(PluginEntry(name=orig, enabled=True))
+                        seen.add(low)
+                for e in mod_entries:
+                    if e.name.lower() not in seen:
+                        mod_ordered.append(e)
+                        seen.add(e.name.lower())
+                ordered = vanilla_ordered + mod_ordered
+            else:
+                # Standard Bethesda: honour saved_order as-is (LOOT manages positions).
+                for name in saved_order:
+                    low = name.lower()
+                    if low in seen:
+                        continue
+                    seen.add(low)
+                    if low in mod_map:
+                        ordered.append(mod_map[low])
+                    elif low in self._vanilla_plugins:
+                        ordered.append(PluginEntry(
+                            name=self._vanilla_plugins[low], enabled=True,
+                        ))
+                for e in mod_entries:
+                    if e.name.lower() not in seen:
+                        ordered.append(e)
+                        seen.add(e.name.lower())
+                for low, orig in sorted(
+                    self._vanilla_plugins.items(),
+                    key=lambda kv: (_ext_order.get(Path(kv[0]).suffix, 9), kv[0]),
+                ):
+                    if low not in seen:
+                        ordered.append(PluginEntry(name=orig, enabled=True))
+                        seen.add(low)
 
             self._plugin_entries = ordered
         else:
@@ -2948,14 +3010,16 @@ class PluginPanel(ctk.CTkFrame):
 
         self._check_all_masters()
 
-        # Sync loadorder.txt: prune removed entries and append new ones
-        known_lower = {e.name.lower() for e in self._plugin_entries}
-        lo_lower = {n.lower() for n in saved_order}
-        pruned_lo = [n for n in saved_order if n.lower() in known_lower]
-        new_entries = [e.name for e in self._plugin_entries if e.name.lower() not in lo_lower]
-        final_lo = pruned_lo + new_entries
+        # Sync loadorder.txt: use _plugin_entries order as the source of truth,
+        # so any vanilla plugins prepended above are written at the top.
+        final_lo = [e.name for e in self._plugin_entries]
         if final_lo != saved_order:
             write_loadorder(loadorder_path, [PluginEntry(name=n, enabled=True) for n in final_lo])
+
+        # Sync plugins.txt so vanilla plugins are included/excluded and ordered
+        # correctly (e.g. Oblivion Remastered requires all plugins in plugins.txt).
+        if self._plugins_include_vanilla:
+            self._save_plugins()
 
         self._predraw()
 
@@ -2968,11 +3032,12 @@ class PluginPanel(ctk.CTkFrame):
         """
         if self._plugins_path is None:
             return
+        include_vanilla = self._plugins_include_vanilla
         mod_entries: list[PluginEntry] = []
         for entry in self._plugin_entries:
-            if entry.name.lower() not in self._vanilla_plugins:
+            if include_vanilla or entry.name.lower() not in self._vanilla_plugins:
                 mod_entries.append(entry)
-        write_plugins(self._plugins_path, mod_entries)
+        write_plugins(self._plugins_path, mod_entries, star_prefix=self._plugins_star_prefix)
         write_loadorder(self._plugins_path.parent / "loadorder.txt", self._plugin_entries)
 
     # ------------------------------------------------------------------

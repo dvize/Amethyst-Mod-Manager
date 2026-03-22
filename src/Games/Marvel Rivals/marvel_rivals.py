@@ -80,7 +80,7 @@ class MarvelRivals(UE5Game):
     
     @property
     def conflict_ignore_filenames(self) -> set[str]:
-        return {"READ THIS.txt"}
+        return {"*.txt","*.html","*.md","*.jpeg","*.png","*.jpg","*.rar"}
     
     @property
     def frameworks(self) -> dict[str, str]:
@@ -97,26 +97,46 @@ class MarvelRivals(UE5Game):
     @property
     def ue5_routing_rules(self) -> list[UE5Rule]:
         return [
+            # Pak / streaming files → Content/Paks/~mods/  (checked before the
+            # generic folder="content" catch-all so mods shipped as
+            # Content/Paks/… are routed here rather than to the game root as-is)
+            UE5Rule(
+                dest="Content/Paks/~mods",
+                extensions=[".pak", ".utoc", ".ucas"],
+                strip=["Content/Paks/~mods", "Content/Paks/~Mods", "Content/Paks", "Paks", "Content", "~mods", "~Mods"],
+            ),
+            # Files already inside Content/Paks/~Mods (any casing) → normalise
+            # to lowercase ~mods dest so only one folder is created on disk.
+            UE5Rule(
+                dest="Content/Paks/~mods",
+                prefix="Content/Paks/~Mods",
+                strip=["Content/Paks/~Mods", "Content/Paks/~mods"],
+            ),
+            # Mods shipping Binaries/Win64/UE4SS/… → normalise to lowercase
+            # ue4ss dest so only one folder is ever created on disk.
+            UE5Rule(
+                dest="Binaries/Win64/ue4ss",
+                prefix="Binaries/Win64/UE4SS",
+                strip=["Binaries/Win64/UE4SS", "Binaries/Win64/ue4ss"],
+            ),
+            # ue4ss/ or UE4SS/ top-level folder → Binaries/Win64/ue4ss/
+            # (catches loose ue4ss files like UE4SS-settings.ini before the
+            # extension rules can misroute them)
+            UE5Rule(
+                dest="Binaries/Win64/ue4ss",
+                folder="ue4ss",
+                strip=["ue4ss", "UE4SS"],
+            ),
             # Paths already starting with Binaries/ or Content/ → game root,
             # path preserved as-is.  These mods ship the full correct structure.
             UE5Rule(dest="", folder="binaries"),
             UE5Rule(dest="", folder="content"),
-            # ue4ss/ folder → Binaries/Win64/ue4ss/
-            UE5Rule(
-                dest="Binaries/Win64/ue4ss",
-                folder="ue4ss",
-                strip=["ue4ss"],
-            ),
-            # Pak / streaming files and their companion txt files → Content/Paks/~mods/
-            UE5Rule(
-                dest="Content/Paks/~mods",
-                extensions=[".pak", ".utoc", ".ucas", ".txt"],
-                strip=["Content/Paks/~mods", "Content/Paks", "Paks", "~mods"],
-            ),
-            # Lua UE4SS scripts → Binaries/Win64/ue4ss/Mods/
+            # Lua UE4SS scripts and companion files (config.ini, data .json,
+            # enabled.txt) → Binaries/Win64/ue4ss/Mods/
             UE5Rule(
                 dest="Binaries/Win64/ue4ss/Mods",
-                extensions=[".lua"],
+                extensions=[".lua", ".ini", ".json"],
+                filenames=["enabled.txt"],
                 strip=[
                     "Binaries/Win64/ue4ss/Mods",
                     "Binaries/Win64/ue4ss",
@@ -124,6 +144,7 @@ class MarvelRivals(UE5Game):
                     "UE4SS/Mods",
                     "UE4SS",
                     "ue4ss",
+                    "Mods",
                 ],
             ),
             # Loose UE4SS proxy/runtime files (dwmapi.dll, UE4SS.dll, etc.) → Binaries/Win64/
@@ -134,9 +155,8 @@ class MarvelRivals(UE5Game):
             UE5Rule(
                 dest="Binaries/Win64/plugins",
                 extensions=[".asi"],
-                strip=["plugins"]
+                strip=["plugins"],
             ),
-            
         ]
 
     @property

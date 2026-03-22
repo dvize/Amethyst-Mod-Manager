@@ -69,16 +69,47 @@ class OblivionRemastered(UE5Game):
         return [".esp", ".esm"]
 
     @property
+    def plugins_use_star_prefix(self) -> bool:
+        return False
+
+    @property
+    def plugins_include_vanilla(self) -> bool:
+        return True
+    
+    @property
+    def conflict_ignore_filenames(self) -> set[str]:
+        return {"*.html","*.md","*.jpeg","*.png","*.jpg","*.rar"}
+    
+    @property
+    def mod_required_file_types(self) -> set[str]:
+        return {".esp",".esm"}
+
+    @property
+    def mod_auto_strip_until_required(self) -> bool:
+        return True
+    
+    @property
+    def mod_install_as_is_if_no_match(self) -> bool:
+        return True
+    
+    @property
     def loot_sort_enabled(self) -> bool:
         return True
-
+    
     @property
     def loot_game_type(self) -> str:
         return "OblivionRemastered"
     
     @property
     def frameworks(self) -> dict[str, str]:
-        return {"Script Extender": "OblivionRemastered/Binaries/Win64/obse64_loader.exe"}
+        return {"Script Extender": "Binaries/Win64/obse64_loader.exe"}
+
+    @property
+    def preferred_launch_exe(self) -> str:
+        # obse64_loader.exe must be launched to play with mods active, but
+        # replacing OblivionRemastered.exe with it causes errors.  When OBSE
+        # is installed we show it first in the dropdown as the launch exe.
+        return "Binaries/Win64/obse64_loader.exe"
     
     @property
     def loot_masterlist_url(self) -> str:
@@ -95,27 +126,61 @@ class OblivionRemastered(UE5Game):
     @property
     def ue5_routing_rules(self) -> list[UE5Rule]:
         return [
+            # Pak / streaming files → Content/Paks/~mods  (checked before the
+            # generic folder="content" catch-all so mods shipped as
+            # Content/Paks/… are routed here rather than to the game root as-is)
+            UE5Rule(
+                dest="Content/Paks/~mods",
+                extensions=[".pak", ".utoc", ".ucas"],
+                strip=["Content/Paks/~mods", "Content/Paks/~Mods", "Content/Paks", "Paks", "Content", "~mods", "~Mods"],
+            ),
+            # Files already inside Content/Paks/~Mods (any casing) → normalise
+            # to lowercase ~mods dest so only one folder is created on disk.
+            UE5Rule(
+                dest="Content/Paks/~mods",
+                prefix="Content/Paks/~Mods",
+                strip=["Content/Paks/~Mods", "Content/Paks/~mods"],
+            ),
+            # Mods shipping Binaries/Win64/UE4SS/… → normalise to lowercase
+            # ue4ss dest so only one folder is created.
+            UE5Rule(
+                dest="Binaries/Win64/ue4ss",
+                prefix="Binaries/Win64/UE4SS",
+                strip=["Binaries/Win64/UE4SS", "Binaries/Win64/ue4ss"],
+            ),
+            # ue4ss/ or UE4SS/ top-level folder → Binaries/Win64/ue4ss/
+            # (catches loose ue4ss files like UE4SS-settings.ini before the
+            # extension rules can misroute them)
+            UE5Rule(
+                dest="Binaries/Win64/ue4ss",
+                folder="ue4ss",
+                strip=["ue4ss", "UE4SS"],
+            ),
+            # GameSettings/ folder → Binaries/Win64/ (UE4SS game setting overrides)
+            UE5Rule(
+                dest="Binaries/Win64",
+                folder="gamesettings",
+            ),
+            # Bink video replacers → Content/Movies/Modern/
+            # Must be before folder="content" so mods shipping the full
+            # Content/Movies/Modern/foo.bk2 path are routed here (and flattened)
+            # rather than passed through as-is.
+            # flatten=True so files nested inside any mod subfolder (e.g.
+            UE5Rule(
+                dest="Content/Movies/Modern",
+                extensions=[".bk2"],
+                strip=["Content/Movies/Modern", "Content/Movies"],
+                flatten=True,
+            ),
             # Paths already starting with Binaries/ or Content/ → game root,
             # path preserved as-is.  These mods ship the full correct structure.
             UE5Rule(dest="", folder="binaries"),
             UE5Rule(dest="", folder="content"),
-            # ue4ss/ folder → Binaries/Win64/ue4ss/
-            UE5Rule(
-                dest="Binaries/Win64/ue4ss",
-                folder="ue4ss",
-                strip=["ue4ss"],
-            ),
             # OBSE/ folder → Binaries/Win64/OBSE/
             UE5Rule(
                 dest="Binaries/Win64/OBSE",
                 folder="obse",
                 strip=["obse", "OBSE"],
-            ),
-            # Pak / streaming files → Content/Paks/
-            UE5Rule(
-                dest="Content/Paks",
-                extensions=[".pak", ".utoc", ".ucas"],
-                strip=["Content/Paks", "Paks"],
             ),
             # Data/ folder → Content/Dev/ObvData/Data/ (path preserved under Data/).
             # Covers mods shipped as Data/MyMod.esp, Data/SyncMap/MyMod.ini, etc.
@@ -124,16 +189,23 @@ class OblivionRemastered(UE5Game):
                 folder="data",
                 strip=["Content/Dev/ObvData/Data", "Data"],
             ),
+            # BashTags/ folder → Content/Dev/ObvData/Data/BashTags/ (alongside esp files)
+            UE5Rule(
+                dest="Content/Dev/ObvData/Data",
+                folder="bashtags",
+            ),
             # Loose esp/esm plugins (no Data/ wrapper) → Content/Dev/ObvData/Data/
             UE5Rule(
                 dest="Content/Dev/ObvData/Data",
                 extensions=[".esp", ".esm"],
                 strip=["Content/Dev/ObvData/Data", "Data"],
             ),
-            # Lua UE4SS scripts → Binaries/Win64/ue4ss/Mods/
+            # Lua UE4SS scripts and companion files (config.ini, data .json,
+            # enabled.txt) → Binaries/Win64/ue4ss/Mods/
             UE5Rule(
                 dest="Binaries/Win64/ue4ss/Mods",
-                extensions=[".lua"],
+                extensions=[".lua", ".ini", ".json"],
+                filenames=["enabled.txt"],
                 strip=[
                     "Binaries/Win64/ue4ss/Mods",
                     "Binaries/Win64/ue4ss",
@@ -141,18 +213,13 @@ class OblivionRemastered(UE5Game):
                     "UE4SS/Mods",
                     "UE4SS",
                     "ue4ss",
+                    "Mods",
                 ],
             ),
             # Loose UE4SS proxy/runtime files (dwmapi.dll, UE4SS.dll, UE4SS.pdb) → Binaries/Win64/
             UE5Rule(
                 dest="Binaries/Win64",
                 extensions=[".dll", ".pdb"],
-            ),
-            # Bink video replacers → Content/Movies/Modern/
-            UE5Rule(
-                dest="Content/Movies/Modern",
-                extensions=[".bk2"],
-                strip=["Content/Movies/Modern", "Content/Movies"],
             ),
         ]
 
@@ -170,12 +237,18 @@ class OblivionRemastered(UE5Game):
         # Some mod authors wrap their entire mod in a top-level folder that
         # mirrors the game's install root.  Strip it so the routing rules
         # see the correct first segment.
-        return {"oblivionremastered"}
+        return {"oblivionremastered", "oblivion remastered"}
 
 
     # -----------------------------------------------------------------------
     # Paths
     # -----------------------------------------------------------------------
+
+    def get_vanilla_plugins_path(self) -> Path | None:
+        game_path = self.get_game_path()
+        if game_path is None:
+            return None
+        return game_path / _PLUGINS_TXT_GAME_REL.parent
 
     def get_game_path(self) -> Path | None:
         """The actual game root is the OblivionRemastered/ subfolder inside

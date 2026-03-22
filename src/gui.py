@@ -854,16 +854,28 @@ class App(ctk.CTk):
                         self._mod_panel._modlist_path.parent.parent.parent / "mods"
                     )
                 data_dir = (
-                    game.get_mod_data_path()
+                    game.get_vanilla_plugins_path()
+                    if game and game.is_configured() and hasattr(game, 'get_vanilla_plugins_path')
+                    else game.get_mod_data_path()
                     if game and game.is_configured() and hasattr(game, 'get_mod_data_path')
                     else None
                 )
                 self._plugin_panel._data_dir = data_dir
+                # For games where vanilla plugins are included in plugins.txt
+                # (e.g. Oblivion Remastered), don't use the live Data dir to
+                # protect plugins from pruning — it may contain deployed mod
+                # files from a previous profile. Vanilla plugins are managed
+                # separately via _vanilla_plugins / _save_plugins.
+                prune_data_dir = (
+                    None if game and getattr(game, "plugins_include_vanilla", False)
+                    else data_dir
+                )
                 removed = prune_plugins_from_filemap(
                     Path(filemap_path_str),
                     self._plugin_panel._plugins_path,
                     self._plugin_panel._plugin_extensions,
-                    data_dir=data_dir,
+                    data_dir=prune_data_dir,
+                    star_prefix=self._plugin_panel._plugins_star_prefix,
                 )
                 if removed:
                     self._status.log(f"plugins.txt: removed {removed} plugin(s).")
@@ -874,13 +886,14 @@ class App(ctk.CTk):
                 )
                 disabled_map = read_disabled_plugins(profile_dir, None) if profile_dir else {}
                 if disabled_map and self._plugin_panel._plugins_path is not None:
-                    existing = read_plugins(self._plugin_panel._plugins_path)
+                    _sp = self._plugin_panel._plugins_star_prefix
+                    existing = read_plugins(self._plugin_panel._plugins_path, star_prefix=_sp)
                     all_disabled_lower = {
                         n.lower() for names in disabled_map.values() for n in names
                     }
                     kept = [e for e in existing if e.name.lower() not in all_disabled_lower]
                     if len(kept) < len(existing):
-                        write_plugins(self._plugin_panel._plugins_path, kept)
+                        write_plugins(self._plugin_panel._plugins_path, kept, star_prefix=_sp)
                         self._status.log(
                             f"plugins.txt: removed {len(existing) - len(kept)} disabled plugin(s)."
                         )
@@ -889,6 +902,7 @@ class App(ctk.CTk):
                     self._plugin_panel._plugins_path,
                     self._plugin_panel._plugin_extensions,
                     disabled_plugins=disabled_map,
+                    star_prefix=self._plugin_panel._plugins_star_prefix,
                 )
                 # Also sync from overwrite folder directly — filemap uses modindex.bin
                 # which only updates overwrite on Refresh; tools (xEdit, Bodyslide, etc.)
@@ -899,6 +913,7 @@ class App(ctk.CTk):
                         overwrite_dir,
                         self._plugin_panel._plugins_path,
                         self._plugin_panel._plugin_extensions,
+                        star_prefix=self._plugin_panel._plugins_star_prefix,
                     )
                     added += added_overwrite
                 if added:
@@ -967,7 +982,13 @@ class App(ctk.CTk):
                 self._plugin_panel._vanilla_plugins = _vanilla_plugins_for_game(initial_game)
                 _staging = initial_game.get_effective_mod_staging_path()
                 self._plugin_panel._staging_root = _staging
-                data_path = initial_game.get_mod_data_path() if hasattr(initial_game, 'get_mod_data_path') else None
+                data_path = (
+                    initial_game.get_vanilla_plugins_path()
+                    if hasattr(initial_game, 'get_vanilla_plugins_path')
+                    else initial_game.get_mod_data_path()
+                    if hasattr(initial_game, 'get_mod_data_path')
+                    else None
+                )
                 self._plugin_panel._data_dir = data_path
                 self._plugin_panel._game = initial_game
                 # Mod Files tab paths

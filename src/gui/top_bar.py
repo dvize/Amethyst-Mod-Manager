@@ -421,7 +421,13 @@ class TopBar(ctk.CTkFrame):
                 app._plugin_panel._vanilla_plugins = _vanilla_plugins_for_game(game)
                 _staging = game.get_effective_mod_staging_path()
                 app._plugin_panel._staging_root = _staging
-                data_path = game.get_mod_data_path() if hasattr(game, 'get_mod_data_path') else None
+                data_path = (
+                    game.get_vanilla_plugins_path()
+                    if hasattr(game, 'get_vanilla_plugins_path')
+                    else game.get_mod_data_path()
+                    if hasattr(game, 'get_mod_data_path')
+                    else None
+                )
                 app._plugin_panel._data_dir = data_path
                 app._plugin_panel._game = game
                 # Mod Files tab paths

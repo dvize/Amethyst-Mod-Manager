@@ -81,14 +81,26 @@ class UE5Rule:
         extensions: Match files with these lowercase extensions (e.g. ".pak").
         folder:     Match files whose first staged path segment equals this
                     value (case-insensitive), e.g. "ue4ss".
+        prefix:     Match files whose staged path starts with this multi-segment
+                    prefix (case-insensitive), e.g. "Binaries/Win64/ue4ss".
+                    More specific than ``folder`` — checked first.
+        filenames:  Match files whose basename (case-insensitive) is in this
+                    list, e.g. ["enabled.txt"].  Checked after prefix/folder.
         strip:      Path prefixes to strip from the staged relative path
                     before placing the file inside ``dest``.
                     Checked longest-first so more-specific prefixes win.
+    flatten:    When True, reduce the final path to just the filename,
+                    discarding all directory components.  Useful for files
+                    that must land flat in ``dest`` regardless of how they
+                    are packaged inside the mod folder (e.g. .bk2 movies).
     """
     dest: str
     extensions: list[str] = field(default_factory=list)
     folder: str = ""
+    prefix: str = ""
+    filenames: list[str] = field(default_factory=list)
     strip: list[str] = field(default_factory=list)
+    flatten: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +230,18 @@ class UE5Game(BaseGame):
 
     def _match_rule(self, rel_str: str) -> UE5Rule | None:
         """Return the first rule that matches rel_str, or None."""
-        parts = rel_str.replace("\\", "/").split("/")
+        norm = rel_str.replace("\\", "/")
+        parts = norm.split("/")
         first_seg = parts[0].lower() if parts else ""
         ext = Path(rel_str).suffix.lower()
 
+        basename = parts[-1].lower() if parts else ""
         for rule in self.ue5_routing_rules:
+            if rule.prefix and norm.lower().startswith(rule.prefix.lower() + "/"):
+                return rule
             if rule.folder and first_seg == rule.folder.lower():
+                return rule
+            if rule.filenames and basename in {f.lower() for f in rule.filenames}:
                 return rule
             if rule.extensions and ext in rule.extensions:
                 return rule
@@ -248,6 +266,8 @@ class UE5Game(BaseGame):
         if rule is not None:
             dest = rule.dest
             final_rel = self._apply_strip(rel_str, rule.strip)
+            if rule.flatten:
+                final_rel = Path(final_rel).name
         else:
             dest = self.ue5_default_dest
             final_rel = rel_str.replace("\\", "/")

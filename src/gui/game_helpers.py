@@ -20,27 +20,99 @@ from Utils.profile_state import (
 _GAMES: dict[str, BaseGame] = {}
 
 
+def _vanilla_plugins_cache_path(game) -> Path | None:
+    """Return the path to the vanilla plugins cache file for this game, or None."""
+    try:
+        config_dir = get_config_dir() / "games" / game.name
+        return config_dir / "vanilla_plugins.txt"
+    except Exception:
+        return None
+
+
 def _vanilla_plugins_for_game(game) -> dict[str, str]:
-    """Return vanilla plugin names from the game's data dir.
+    """Return vanilla plugin names from the game's vanilla plugins dir.
 
     Returns a dict mapping ``lowercase_name -> original_cased_name`` so
     that ``name.lower() in result`` works like the old set, but callers
     can also retrieve the original filename for display.
+
+    For games where plugins_include_vanilla=True (e.g. Oblivion Remastered),
+    mod plugins are deployed into the same Data directory as vanilla plugins.
+    To avoid misidentifying deployed mod plugins as vanilla, the vanilla list
+    is persisted to a cache file on first scan and always read from there.
     """
-    game_path = game.get_game_path()
-    if not game_path:
+    use_cache = getattr(game, "plugins_include_vanilla", False)
+
+    if use_cache:
+        cache_path = _vanilla_plugins_cache_path(game)
+        if cache_path and cache_path.is_file():
+            result: dict[str, str] = {}
+            for line in cache_path.read_text(encoding="utf-8").splitlines():
+                name = line.strip()
+                if name:
+                    result[name.lower()] = name
+            return result
+
+    if hasattr(game, "get_vanilla_plugins_path"):
+        data_dir = game.get_vanilla_plugins_path()
+    else:
+        game_path = game.get_game_path()
+        data_dir = (game_path / "Data") if game_path else None
+    if not data_dir:
         return {}
-    data_dir = game_path / "Data"
-    core_dir = game_path / "Data_Core"
+    # For standard Bethesda games, prefer Data_Core/ when present — after
+    # deployment Data/ contains hard-linked mod files, so Data_Core/ is the
+    # reliable source of truth for truly vanilla plugins.
+    core_dir = data_dir.parent / (data_dir.name + "_Core")
     scan_dir = core_dir if core_dir.is_dir() else data_dir
     if not scan_dir.is_dir():
         return {}
     exts = {e.lower() for e in game.plugin_extensions}
-    return {
+    all_plugins = {
         entry.name.lower(): entry.name
         for entry in scan_dir.iterdir()
         if entry.is_file() and entry.suffix.lower() in exts
     }
+
+    # For games where mod plugins land in the same dir as vanilla, we need to
+    # strip out any mod-provided plugins before caching.  The filemap lists
+    # every file provided by a mod, so subtract those to get only vanilla.
+    if use_cache and all_plugins:
+        # Collect all plugin filenames provided by mods across every profile.
+        mod_plugin_names: set[str] = set()
+        profiles_root = game.get_profile_root() / "profiles"
+        if profiles_root.is_dir():
+            for profile_dir in profiles_root.iterdir():
+                fm = profile_dir / "filemap.txt"
+                if not fm.is_file():
+                    continue
+                with fm.open(encoding="utf-8") as f:
+                    for line in f:
+                        line = line.rstrip("\n")
+                        if "\t" not in line:
+                            continue
+                        rel, _ = line.split("\t", 1)
+                        fname = rel.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                        if Path(fname).suffix.lower() in exts:
+                            mod_plugin_names.add(fname)
+        vanilla_only = {k: v for k, v in all_plugins.items() if k not in mod_plugin_names}
+        # Only write the cache if we ended up with a non-empty vanilla set.
+        # If mod_plugin_names is empty (nothing deployed yet) vanilla_only ==
+        # all_plugins which is also correct — nothing to subtract.
+        plugins_to_cache = vanilla_only if vanilla_only else all_plugins
+        cache_path = _vanilla_plugins_cache_path(game)
+        if cache_path:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(
+                    "\n".join(sorted(plugins_to_cache.values())) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+        return plugins_to_cache
+
+    return all_plugins
 
 
 def _load_games() -> list[str]:

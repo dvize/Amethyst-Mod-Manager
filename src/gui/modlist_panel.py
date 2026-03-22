@@ -1120,6 +1120,7 @@ class ModListPanel(ctk.CTkFrame):
         if self._modlist_path is None:
             return
         write_mod_strip_prefixes(self._modlist_path.parent, self._mod_strip_prefixes)
+        self.__profile_state.pop("mod_strip_prefixes", None)
 
     def _load_root_folder_state(self) -> None:
         if self._modlist_path is None:
@@ -3164,10 +3165,10 @@ class ModListPanel(ctk.CTkFrame):
                         to_remove.add(f.name.lower())
         if not to_remove:
             return
-        existing = read_plugins(pp._plugins_path)
+        existing = read_plugins(pp._plugins_path, star_prefix=pp._plugins_star_prefix)
         new_entries = [e for e in existing if e.name.lower() not in to_remove]
         if len(new_entries) < len(existing):
-            write_plugins(pp._plugins_path, new_entries)
+            write_plugins(pp._plugins_path, new_entries, star_prefix=pp._plugins_star_prefix)
         loadorder_path = pp._plugins_path.parent / "loadorder.txt"
         loadorder = read_loadorder(loadorder_path)
         new_lo = [n for n in loadorder if n.lower() not in to_remove]
@@ -3769,7 +3770,7 @@ class ModListPanel(ctk.CTkFrame):
             pp = app._plugin_panel
             if pp._plugins_path is not None:
                 changed = False
-                existing = read_plugins(pp._plugins_path)
+                existing = read_plugins(pp._plugins_path, star_prefix=pp._plugins_star_prefix)
 
                 loadorder_path = pp._plugins_path.parent / "loadorder.txt"
                 loadorder = read_loadorder(loadorder_path)
@@ -3805,7 +3806,7 @@ class ModListPanel(ctk.CTkFrame):
                     write_loadorder(loadorder_path, [PluginEntry(name=n, enabled=True) for n in loadorder])
 
                 if changed:
-                    write_plugins(pp._plugins_path, existing)
+                    write_plugins(pp._plugins_path, existing, star_prefix=pp._plugins_star_prefix)
                     pp._refresh_plugins_tab()
 
         self._rebuild_filemap()
@@ -3838,6 +3839,9 @@ class ModListPanel(ctk.CTkFrame):
                 self._mod_strip_prefixes[mod_name] = chosen
                 self._save_mod_strip_prefixes()
                 self._reload()
+                plugin_panel = getattr(app, "_plugin_panel", None)
+                if plugin_panel is not None:
+                    plugin_panel.show_mod_files(mod_name)
             show_fn(mod_name, mod_folder, current, use_path_format, _on_save)
             return
 
@@ -3986,6 +3990,9 @@ class ModListPanel(ctk.CTkFrame):
             self._save_mod_strip_prefixes()
             win.destroy()
             self._reload()
+            plugin_panel = getattr(app, "_plugin_panel", None)
+            if plugin_panel is not None:
+                plugin_panel.show_mod_files(mod_name)
 
         def _cancel():
             win.destroy()
@@ -4562,6 +4569,13 @@ class ModListPanel(ctk.CTkFrame):
         strip_prefixes = set(self._strip_prefixes)
         beaten_mods = set(self._overrides.get(mod_name, set()))
         call_threadsafe = self._call_threadsafe
+        from Games.ue5_game import UE5Game as _UE5Game
+        _captured_game = getattr(self, "_game", None)
+        _ckfn = None
+        if isinstance(_captured_game, _UE5Game):
+            def _ckfn(rel: str, _g=_captured_game) -> str:
+                dest, final = _g._resolve_entry(rel)
+                return ((dest + "/" + final) if dest else final).lower()
 
         def _worker():
             per_mod = load_per_mod_strip_prefixes(profile_dir)
@@ -4588,7 +4602,8 @@ class ModListPanel(ctk.CTkFrame):
                     rel = rel.split("/", 1)[1]
                 return rel
 
-            # Build winner map from filemap.txt
+            # Build winner map from filemap.txt, keyed by deploy path (or staged path).
+            # When _ckfn is set (UE5), remap via routing so cross-path conflicts are found.
             winning_map: dict[str, tuple[str, str]] = {}
             if filemap_path.is_file():
                 with filemap_path.open(encoding="utf-8") as f:
@@ -4597,10 +4612,12 @@ class ModListPanel(ctk.CTkFrame):
                         if "\t" not in line:
                             continue
                         rel_path, winner = line.split("\t", 1)
-                        winning_map[rel_path.lower()] = (rel_path, winner)
+                        key = _ckfn(rel_path) if _ckfn else rel_path.lower()
+                        winning_map[key] = (rel_path, winner)
 
             # Walk this mod's staging folder
             my_staging = staging_root / mod_name
+            # my_files: deploy_key → display_path
             my_files: dict[str, str] = {}
             if my_staging.is_dir():
                 for dirpath, _, fnames in os.walk(my_staging):
@@ -4611,20 +4628,21 @@ class ModListPanel(ctk.CTkFrame):
                         rel = os.path.relpath(full, my_staging).replace("\\", "/")
                         rel = _strip_for(mod_name, rel)
                         if rel:
-                            my_files[rel.lower()] = rel
+                            key = _ckfn(rel) if _ckfn else rel.lower()
+                            my_files[key] = rel
 
             # Classify each file
             files_i_win: list[tuple[str, str]] = []
             files_i_lose: list[tuple[str, str]] = []
-            for rel_lower, orig_rel in sorted(my_files.items()):
-                if rel_lower in winning_map:
-                    orig, winner = winning_map[rel_lower]
+            for deploy_key, orig_rel in sorted(my_files.items()):
+                if deploy_key in winning_map:
+                    orig, winner = winning_map[deploy_key]
                     if winner == mod_name:
-                        files_i_win.append((orig, ""))
+                        files_i_win.append((deploy_key, ""))
                     else:
-                        files_i_lose.append((orig, winner))
+                        files_i_lose.append((deploy_key, winner))
                 else:
-                    files_i_lose.append((orig_rel, "(no winner — disabled?)"))
+                    files_i_lose.append((deploy_key, "(no winner — disabled?)"))
 
             # Annotate wins: walk beaten mods to find which files they share
             rel_to_losers: dict[str, list[str]] = {}
@@ -4637,19 +4655,21 @@ class ModListPanel(ctk.CTkFrame):
                         if fname.lower() == "meta.ini":
                             continue
                         full = os.path.join(dirpath, fname)
-                        rel = _strip_for(loser_mod, os.path.relpath(full, loser_staging).replace("\\", "/")).lower()
-                        if rel and rel in my_files:
-                            rel_to_losers.setdefault(rel, []).append(loser_mod)
+                        rel = _strip_for(loser_mod, os.path.relpath(full, loser_staging).replace("\\", "/"))
+                        if rel:
+                            key = _ckfn(rel) if _ckfn else rel.lower()
+                            if key in my_files:
+                                rel_to_losers.setdefault(key, []).append(loser_mod)
 
             files_i_win_final: list[tuple[str, str]] = [
-                (orig, beaten_str)
-                for orig, _ in files_i_win
-                if (beaten_str := ", ".join(rel_to_losers.get(orig.lower(), [])))
+                (deploy_key, beaten_str)
+                for deploy_key, _ in files_i_win
+                if (beaten_str := ", ".join(rel_to_losers.get(deploy_key, [])))
             ]
             files_no_conflict: list[str] = [
-                orig
-                for orig, _ in files_i_win
-                if not rel_to_losers.get(orig.lower())
+                deploy_key
+                for deploy_key, _ in files_i_win
+                if not rel_to_losers.get(deploy_key)
             ]
 
             # Dispatch results back to the main thread
@@ -4902,13 +4922,13 @@ class ModListPanel(ctk.CTkFrame):
 
         if now_enabled:
             # Append to plugins.txt and loadorder.txt if not already present
-            existing = read_plugins(pp._plugins_path)
+            existing = read_plugins(pp._plugins_path, star_prefix=pp._plugins_star_prefix)
             existing_lower = {e.name.lower() for e in existing}
             added = [n for n in mod_plugins if n.lower() not in existing_lower]
             if added:
                 for name in added:
                     existing.append(PluginEntry(name=name, enabled=True))
-                write_plugins(pp._plugins_path, existing)
+                write_plugins(pp._plugins_path, existing, star_prefix=pp._plugins_star_prefix)
             loadorder = read_loadorder(loadorder_path)
             lo_lower = {n.lower() for n in loadorder}
             lo_added = [n for n in mod_plugins if n.lower() not in lo_lower]
@@ -4918,10 +4938,10 @@ class ModListPanel(ctk.CTkFrame):
         else:
             # Remove from plugins.txt and loadorder.txt
             remove_lower = {n.lower() for n in mod_plugins}
-            existing = read_plugins(pp._plugins_path)
+            existing = read_plugins(pp._plugins_path, star_prefix=pp._plugins_star_prefix)
             new_entries = [e for e in existing if e.name.lower() not in remove_lower]
             if len(new_entries) < len(existing):
-                write_plugins(pp._plugins_path, new_entries)
+                write_plugins(pp._plugins_path, new_entries, star_prefix=pp._plugins_star_prefix)
             loadorder = read_loadorder(loadorder_path)
             new_lo = [n for n in loadorder if n.lower() not in remove_lower]
             if len(new_lo) < len(loadorder):
@@ -5320,6 +5340,13 @@ class ModListPanel(ctk.CTkFrame):
         install_extensions  = self._install_extensions
         root_deploy_folders = self._root_deploy_folders
         rescan_index        = self._filemap_rescan_index
+        from Games.ue5_game import UE5Game as _UE5Game
+        _captured_game = getattr(self, "_game", None)
+        _conflict_key_fn = None
+        if isinstance(_captured_game, _UE5Game):
+            def _conflict_key_fn(rel_key: str, _g=_captured_game) -> str:
+                dest, final = _g._resolve_entry(rel_key)
+                return (dest + "/" + final) if dest else final
         staging_requires_subdir = self._staging_requires_subdir
         normalize_folder_case   = self._normalize_folder_case
         self._filemap_rescan_index = False
@@ -5364,6 +5391,7 @@ class ModListPanel(ctk.CTkFrame):
                     conflict_ignore_filenames=self._conflict_ignore_filenames or None,
                     excluded_mod_files=excluded_mod_files or None,
                     normalize_folder_case=normalize_folder_case,
+                    conflict_key_fn=_conflict_key_fn,
                 )
                 _game = getattr(self, "_game", None)
                 if _game is not None:

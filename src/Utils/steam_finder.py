@@ -237,11 +237,20 @@ def find_prefix(steam_id: str) -> Path | None:
     if not steam_id:
         return None
 
-    # Primary: check known Steam root candidates
-    for steam_root in _STEAM_CANDIDATES:
-        pfx = steam_root / "steamapps" / "compatdata" / steam_id / "pfx"
+    def _check_compatdata(compatdata: Path) -> Path | None:
+        """Return the prefix dir for a compatdata/<id> folder, or None."""
+        pfx = compatdata / "pfx"
         if pfx.is_dir():
             return pfx
+        if (compatdata / "drive_c").is_dir():
+            return compatdata
+        return None
+
+    # Primary: check known Steam root candidates
+    for steam_root in _STEAM_CANDIDATES:
+        result = _check_compatdata(steam_root / "steamapps" / "compatdata" / steam_id)
+        if result:
+            return result
 
     # Secondary: check extra library folders (SD card, secondary drives, etc.)
     # parse_vdf_libraries returns steamapps/common paths; parent is steamapps/
@@ -256,9 +265,9 @@ def find_prefix(steam_id: str) -> Path | None:
             if resolved in seen:
                 continue
             seen.add(resolved)
-            pfx = steamapps / "compatdata" / steam_id / "pfx"
-            if pfx.is_dir():
-                return pfx
+            result = _check_compatdata(steamapps / "compatdata" / steam_id)
+            if result:
+                return result
 
     return None
 
