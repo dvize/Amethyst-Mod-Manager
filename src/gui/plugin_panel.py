@@ -70,6 +70,30 @@ from LOOT.loot_sorter import sort_plugins as loot_sort, is_available as loot_ava
 from Nexus.nexus_meta import write_meta, read_meta, scan_installed_mods
 
 
+def _file_exists_ci(base: Path, rel: Path) -> bool:
+    """Case-insensitive file existence check.
+
+    Walks each component of *rel* under *base*, matching directory/file names
+    case-insensitively so that framework DLL paths like
+    ``red4ext/plugins/ArchiveXL/ArchiveXL.dll`` are found even when the actual
+    folders on a case-sensitive filesystem use different casing.
+    """
+    current = base
+    for part in rel.parts:
+        part_lower = part.lower()
+        try:
+            match = next(
+                (e for e in current.iterdir() if e.name.lower() == part_lower),
+                None,
+            )
+        except OSError:
+            return False
+        if match is None:
+            return False
+        current = match
+    return current.is_file()
+
+
 def _read_prefix_runner(compat_data: Path) -> str:
     """Read the Proton runner name from <compat_data>/config_info (first line).
     Returns an empty string if the file is absent or unreadable."""
@@ -1864,7 +1888,7 @@ class PluginPanel(ctk.CTkFrame):
             return
         for rel_path, mod_name, _ in self._ini_files_displayed:
             tags = ("mod_highlight",) if mod_name == self._highlighted_ini_mod else ()
-            self._ini_files_tree.insert("", "end", text=rel_path, values=(mod_name,), tags=tags)
+            self._ini_files_tree.insert("", "end", text=Path(rel_path).name, values=(mod_name,), tags=tags)
         self._draw_ini_marker_strip()
 
     def _on_ini_marker_strip_resize(self, _event=None):
@@ -2873,10 +2897,10 @@ class PluginPanel(ctk.CTkFrame):
             exe_path = Path(exe)
             present = False
             if game_root is not None:
-                if (game_root / exe_path).is_file():
+                if _file_exists_ci(game_root, exe_path):
                     present = True
             if not present and root_folder is not None:
-                if (root_folder / exe_path).is_file():
+                if _file_exists_ci(root_folder, exe_path):
                     present = True
 
             if present:

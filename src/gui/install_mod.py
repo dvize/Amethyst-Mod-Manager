@@ -822,6 +822,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             log_fn("Supported formats: .zip, .7z, .rar, .tar.gz")
             return None
 
+        is_fomod_install = False
         fomod_result = detect_fomod(extract_dir)
         if fomod_result:
             mod_root, config_path = fomod_result
@@ -923,6 +924,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 final_selections = dialog_result
 
             file_list = resolve_files(config, final_selections, installed_files)
+            is_fomod_install = True
             log_fn(f"FOMOD complete — {len(file_list)} file(s) to install.")
         elif getattr(game, "mod_supports_bundles", False) and detect_bundle(extract_dir):
             # --- Bundle install ---
@@ -1209,7 +1211,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         auto_strip = getattr(game, "mod_auto_strip_until_required", False)
         install_as_is = getattr(game, "mod_install_as_is_if_no_match", False)
         did_auto_strip = False
-        if required and not _check_mod_top_level(file_list, required):
+        if not is_fomod_install and required and not _check_mod_top_level(file_list, required):
             if auto_strip:
                 file_list, did_auto_strip = _try_auto_strip_top_level(file_list, required)
                 if did_auto_strip:
@@ -1252,7 +1254,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                         prefix = prefix.strip().strip("/").replace("\\", "/")
                         file_list = [(s, f"{prefix}/{d}", f) for s, d, f in file_list]
                         log_fn(f"Remapped mod files under '{prefix}/'.")
-        elif not required and required_file_types and not _check_mod_top_level_file_types(file_list, required_file_types):
+        elif not is_fomod_install and not required and required_file_types and not _check_mod_top_level_file_types(file_list, required_file_types):
             if auto_strip:
                 file_list, did_auto_strip = _try_auto_strip_for_file_types(file_list, required_file_types)
                 if did_auto_strip:

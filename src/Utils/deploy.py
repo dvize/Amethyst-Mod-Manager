@@ -432,6 +432,7 @@ def deploy_filemap(
     sorted_strip   = sorted(_strip) if _strip else []
     nocase_cache: dict[Path, dict[str, list[Path]]] = {}
     mod_index_cache: dict[Path, dict[str, Path]] = {}
+    dst_dir_cache: dict[Path, dict[str, str]] = {}
 
     # Single-pass: read file once, then process. Avoids second disk read.
     # Using os.path.isfile (one C-level stat) instead of Path.is_file()
@@ -499,7 +500,8 @@ def deploy_filemap(
             src_str = str(src)
 
         effective_dir = _per_deploy.get(mod_name, deploy_dir)
-        dst_str = str(effective_dir) + "/" + rel_str
+        dst_path = _resolve_root_path(effective_dir, Path(rel_str), dir_cache=dst_dir_cache)
+        dst_str = str(dst_path)
         use_symlink = symlink_exts is not None and os.path.splitext(src_str)[1].lower() in symlink_exts
         tasks.append((src_str, dst_str, rel_lower, effective_dir is not deploy_dir, use_symlink))
 
@@ -682,6 +684,47 @@ _ROOT_BACKUP_NAME = "Root_Backup"
 _ROOT_LOG_NAME    = "root_folder_deployed.txt"
 
 
+def _resolve_root_path(base: Path, rel: Path,
+                       dir_cache: "dict[Path, dict[str, str]] | None" = None) -> Path:
+    """Resolve *rel* under *base*, matching existing directory names
+    case-insensitively so that mod folders (e.g. ``R6/``) merge into whatever
+    casing the game already has on disk (e.g. ``r6/``).  Segments that don't
+    yet exist are lowercased to follow the game's convention.
+
+    Only directory segments are normalised; the final filename is kept as-is.
+    dir_cache maps parent Path → {lower_name: actual_name} to avoid repeated
+    iterdir() calls across many files with the same directory structure.
+    """
+    current = base
+    parts = rel.parts
+    for part in parts[:-1]:   # directory segments only
+        part_lower = part.lower()
+        # Check if a directory with this name (any case) already exists.
+        matched: str | None = None
+        if current.is_dir():
+            if dir_cache is not None:
+                if current not in dir_cache:
+                    try:
+                        dir_cache[current] = {
+                            e.name.lower(): e.name
+                            for e in current.iterdir()
+                            if e.is_dir()
+                        }
+                    except OSError:
+                        dir_cache[current] = {}
+                matched = dir_cache[current].get(part_lower)
+            else:
+                try:
+                    for entry in current.iterdir():
+                        if entry.is_dir() and entry.name.lower() == part_lower:
+                            matched = entry.name
+                            break
+                except OSError:
+                    pass
+        current = current / (matched if matched is not None else part_lower)
+    return current / parts[-1]
+
+
 def deploy_root_folder(
     root_folder_dir: Path,
     game_root: Path,
@@ -729,9 +772,10 @@ def deploy_root_folder(
     created_dirs: set[str] = set()
 
     for src, rel in sources:
-        dst = game_root / rel
+        dst = _resolve_root_path(game_root, rel)
         # Record the top-level directory we're about to create (if new).
-        top = rel.parts[0] if len(rel.parts) > 1 else None
+        # Use the resolved (possibly case-corrected) top-level name.
+        top = dst.relative_to(game_root).parts[0] if len(rel.parts) > 1 else None
         if top and not (game_root / top).exists():
             created_dirs.add(top)
 
@@ -1248,6 +1292,7 @@ def deploy_filemap_to_root(
     _isfile        = os.path.isfile
     sorted_strip   = sorted(_strip) if _strip else []
     nocase_cache: dict[Path, dict[str, list[Path]]] = {}
+    dst_dir_cache: dict[Path, dict[str, str]] = {}
 
     # Single-pass read: slurp all tab-containing lines at once.
     with filemap_path.open(encoding="utf-8") as f:
@@ -1316,8 +1361,9 @@ def deploy_filemap_to_root(
                 continue
             src_str = str(src)
 
-        dst_str = _game_root_str + "/" + dst_rel
-        tasks.append((src_str, dst_str, dst_rel.lower(), dst_rel))
+        dst_path = _resolve_root_path(game_root, Path(dst_rel), dir_cache=dst_dir_cache)
+        dst_str = str(dst_path)
+        tasks.append((src_str, dst_str, dst_rel.lower(), str(dst_path.relative_to(game_root))))
 
         if progress_fn is not None and line_idx % 500 == 0:
             progress_fn(line_idx, total_lines)

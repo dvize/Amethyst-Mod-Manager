@@ -1,3 +1,15 @@
+- v1.0.12
+- The priority column can now be sorted/reversed. Previously this was disabled due to it breaking the entire drag and drop system
+- For root deployed games, if a mod contains a folder that already exists in the game files, the mod folder casing gets adjusted to match the target directory.
+- Added a enable/disable all mods toggle button.
+- The ini files tab now only shows the name of the file instead of the full path.
+- Adult mods are hidden by default in the nexus window but can be toggled on
+- Fixed some auto fomod installs during collections install throwing false positive errors
+- Added an onboarding menu for first time installs
+- Moved the update available window to overlay the modlist panel instead
+- Pressing generate separators now moves unsorted mods to the correct separator
+
+
 - v1.0.11
 - Fixed files in custom deployment locations not getting backed up
 - Mods under custom deployment separators no longer show up in the data tab

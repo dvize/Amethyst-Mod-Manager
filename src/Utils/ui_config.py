@@ -179,3 +179,36 @@ def save_collection_settings(download_order: str, max_concurrent: int, install_o
     parser[_COLLECTIONS_SECTION]["install_order"] = install_order
     with path.open("w") as f:
         parser.write(f)
+
+
+# ---------------------------------------------------------------------------
+# Nexus browser settings
+# ---------------------------------------------------------------------------
+_NEXUS_SECTION = "nexus"
+
+
+def load_nexus_show_adult() -> bool:
+    """Return the persisted show_adult setting (default False)."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return False
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.getboolean(_NEXUS_SECTION, "show_adult", fallback=False)
+    except Exception:
+        return False
+
+
+def save_nexus_show_adult(value: bool) -> None:
+    """Persist the show_adult setting to amethyst.ini."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _NEXUS_SECTION not in parser:
+        parser[_NEXUS_SECTION] = {}
+    parser[_NEXUS_SECTION]["show_adult"] = "true" if value else "false"
+    with path.open("w") as f:
+        parser.write(f)

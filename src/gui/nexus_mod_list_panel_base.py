@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from collections import OrderedDict
 from typing import Callable, Optional
 
 import customtkinter as ctk
@@ -32,6 +33,25 @@ from gui.theme import (
     FONT_SMALL,
     scaled,
 )
+
+
+_IMG_CACHE_MAX = 60  # max images kept in memory per panel
+
+
+class _LRUImageCache(OrderedDict):
+    """OrderedDict-based LRU cache that evicts the oldest entry when full."""
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        if len(self) > _IMG_CACHE_MAX:
+            self.popitem(last=False)
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
 
 
 class _NexusModListPanel:
@@ -75,7 +95,7 @@ class _NexusModListPanel:
         self._entries: list = []
         self._cards: list[ModCard] = []
         self._loading: bool = False
-        self._img_cache: dict[str, ctk.CTkImage] = {}
+        self._img_cache: _LRUImageCache = _LRUImageCache()
         self._img_loading: set[str] = set()
         self._cols: int = CARD_COLS
         self._regrid_after_id = None

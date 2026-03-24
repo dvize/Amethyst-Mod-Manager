@@ -1423,6 +1423,7 @@ class NexusAPI:
                     endorsements
                     downloads
                     pictureUrl
+                    adultContent
                 }
             }
         }
@@ -1466,6 +1467,7 @@ class NexusAPI:
                     endorsement_count=n.get("endorsements", 0) or 0,
                     downloads_total=n.get("downloads", 0) or 0,
                     picture_url=n.get("pictureUrl", "") or "",
+                    contains_adult_content=bool(n.get("adultContent", False)),
                 ))
             return results
         except NexusAPIError:
@@ -1506,6 +1508,7 @@ class NexusAPI:
                     endorsements
                     downloads
                     pictureUrl
+                    adultContent
                 }
             }
         }
@@ -1548,6 +1551,7 @@ class NexusAPI:
                     endorsement_count=n.get("endorsements", 0) or 0,
                     downloads_total=n.get("downloads", 0) or 0,
                     picture_url=n.get("pictureUrl", "") or "",
+                    contains_adult_content=bool(n.get("adultContent", False)),
                 ))
             return results
         except NexusAPIError:

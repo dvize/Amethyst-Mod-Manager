@@ -650,6 +650,16 @@ class ModListPanel(ctk.CTkFrame):
         self._expand_collapse_all_btn.pack(side="left", padx=4, pady=5)
         self._update_expand_collapse_all_btn()
 
+        # Enable/Disable all mods toggle
+        self._enable_disable_all_btn = ctk.CTkButton(
+            bar, text="Enable all", width=90, height=26,
+            fg_color=BG_HEADER, hover_color=BG_HOVER,
+            text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
+            command=self._toggle_all_mods_enabled
+        )
+        self._enable_disable_all_btn.pack(side="left", padx=4, pady=5)
+        self._update_enable_disable_all_btn()
+
         # Check for Nexus mod updates button
         self._update_btn = ctk.CTkButton(
             bar, text="Check Updates", width=110, height=26,
@@ -1174,9 +1184,7 @@ class ModListPanel(ctk.CTkFrame):
         self._sel_idx = -1
         self._sel_set = set()
         self._drag_idx = -1
-        # Clear visual sort on reload so the list matches modlist.txt order
-        self._sort_column = None
-        self._sort_ascending = True
+        # Preserve the active column sort across reloads.
         # Remove stale lock canvas items before rebuilding
         c = getattr(self, "_canvas", None)
         if c is not None:
@@ -1218,6 +1226,7 @@ class ModListPanel(ctk.CTkFrame):
         self._load_sep_colors()
         self._load_collapsed()
         self._update_expand_collapse_all_btn()
+        self._update_enable_disable_all_btn()
         # Defer meta scan to background so the window appears sooner
         self._scan_meta_flags_async()
         self._rebuild_check_widgets()  # also calls _compute_bundle_groups()
@@ -1459,12 +1468,8 @@ class ModListPanel(ctk.CTkFrame):
         canvas_top = int(c.canvasy(0))
         canvas_h = c.winfo_height()
 
-        # Recompute visible indices only when something structural changed.
-        if self._vis_dirty:
-            self._visible_indices = self._compute_visible_indices()
-            self._vis_dirty = False
-
         # Recompute priorities cache only when _entries has changed.
+        # Must happen before _compute_visible_indices so priority-column sort works.
         if not self._priorities:
             mod_count = sum(1 for e in self._entries if not e.is_separator)
             p = mod_count - 1
@@ -1472,6 +1477,11 @@ class ModListPanel(ctk.CTkFrame):
                 if not entry.is_separator:
                     self._priorities[idx] = p
                     p -= 1
+
+        # Recompute visible indices only when something structural changed.
+        if self._vis_dirty:
+            self._visible_indices = self._compute_visible_indices()
+            self._vis_dirty = False
 
         priorities = self._priorities
 
@@ -2066,11 +2076,10 @@ class ModListPanel(ctk.CTkFrame):
             # Inserting after the last rendered row
             line_y = len(vis_without_drag) * gh
         else:
-            # Find the rendered row index of that entry in the full vis list
-            target_entry_idx = vis_without_drag[slot]
-            # Count how many vis entries come before it (some may be the drag entries)
-            line_row = sum(1 for v in vis if v < target_entry_idx and v not in drag_set)
-            line_y = line_row * gh
+            # slot is the position in vis_without_drag, which is also the rendered
+            # row index (the drag entries are hidden/ghosted, so non-drag rows are
+            # packed contiguously at 0..n-1). This is correct regardless of sort order.
+            line_y = slot * gh
 
         self._canvas.create_line(
             0, line_y, cw, line_y,
@@ -2297,6 +2306,27 @@ class ModListPanel(ctk.CTkFrame):
 
         # Build sort key function
         key_fn = self._sort_key_fn()
+
+        # For priority sort, also reverse the separator group order so that
+        # higher-priority groups (top of list) move to the bottom when ascending.
+        if self._sort_column == "priority" and self._sort_ascending:
+            # Ascending = low priority first. Root Folder (lowest) goes to top,
+            # Overwrite (highest) goes to bottom; real groups are reversed between them.
+            # Overwrite's group may contain ungrouped mods — split those out so
+            # they reverse with the other groups while OW stays pinned at bottom.
+            ow_group  = next(((s, m) for s, m in groups
+                              if s is not None and self._entries[s].name == OVERWRITE_NAME), None)
+            rf_group  = next(((s, m) for s, m in groups
+                              if s is not None and self._entries[s].name == ROOT_FOLDER_NAME), None)
+            middle = [(s, m) for s, m in groups if (s, m) != ow_group and (s, m) != rf_group]
+            if ow_group is not None and ow_group[1]:
+                # Ungrouped mods live in OW's group — promote them to a separator-less
+                # group so they participate in the reversal.
+                middle.append((None, ow_group[1]))
+                ow_group = (ow_group[0], [])
+            groups = (([rf_group] if rf_group else [])
+                      + list(reversed(middle))
+                      + ([ow_group] if ow_group else []))
 
         result: list[int] = []
         for sep_idx, mod_indices in groups:
@@ -2750,6 +2780,84 @@ class ModListPanel(ctk.CTkFrame):
                 drag_set = set(range(self._drag_idx, self._drag_idx + blk_size))
             vis_without_drag = [i for i in vis if i not in drag_set]
 
+            # Resolve the drop target entry object before modifying _entries,
+            # so we can find its new index via list.index() after removal.
+            # When the active sort displays entries in reverse _entries order
+            # (e.g. priority ascending reverses the list), inserting "before" the
+            # visual target means inserting *after* it in _entries — so we use the
+            # entry one slot higher in vis_without_drag as the anchor instead.
+            # Detect inversion by checking if the neighbour above the drop slot has
+            # a higher _entries index than the neighbour below (within the same group).
+            # Compute the insertion index directly from the visual neighbours,
+            # so it is correct regardless of sort direction.
+            # After the drag entries are removed, the desired position is between
+            # the two _entries indices that bound the drop slot visually.
+            # Detect if the list is visually inverted (reversed sort) by checking
+            # whether the first two non-separator visible entries are in descending
+            # _entries order.
+            _inverted = False
+            _non_sep = [i for i in vis_without_drag if not self._entries[i].is_separator]
+            if len(_non_sep) >= 2:
+                _inverted = _non_sep[0] > _non_sep[1]
+
+            def _entry_name(ei):
+                return self._entries[ei].name
+
+            # Boundary helpers: OW is always _entries[0], RF is always _entries[-1]
+            # (when present). Use their actual indices from vis_without_drag so the
+            # adjustment for removed drag entries works correctly.
+            _ow_ei = next((i for i in vis_without_drag if _entry_name(i) == OVERWRITE_NAME), None)
+            _rf_ei = next((i for i in vis_without_drag if _entry_name(i) == ROOT_FOLDER_NAME), None)
+
+            if slot == 0 and len(vis_without_drag) > 0:
+                if _inverted:
+                    # Reversed: visual top = lowest priority = just before RF in _entries.
+                    _pre_removal_insert = _rf_ei if _rf_ei is not None else len(self._entries)
+                else:
+                    _pre_removal_insert = vis_without_drag[0]
+            elif slot >= len(vis_without_drag):
+                if _inverted:
+                    # Reversed: visual bottom = highest priority = just after OW in _entries.
+                    _pre_removal_insert = (_ow_ei + 1) if _ow_ei is not None else 0
+                else:
+                    _pre_removal_insert = len(self._entries)
+            else:
+                above_ei = vis_without_drag[slot - 1]
+                below_ei = vis_without_drag[slot]
+                above_is_sep = self._entries[above_ei].is_separator
+                above_is_synthetic = _entry_name(above_ei) in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
+                below_is_sep = self._entries[below_ei].is_separator
+                if _inverted:
+                    # Reversed sort: higher _entries index = lower priority number =
+                    # appears higher visually. To land just below above_ei visually,
+                    # insert before above_ei (giving a lower index = higher priority
+                    # number = appears lower visually).
+                    if above_is_synthetic and _entry_name(above_ei) == ROOT_FOLDER_NAME:
+                        # Just below RF = lowest priority = before RF in _entries.
+                        _pre_removal_insert = above_ei
+                    elif above_is_sep and not above_is_synthetic:
+                        # Separator is upper visual neighbour — insert at end of its block.
+                        _pre_removal_insert = self._sep_block_range(above_ei).stop
+                    elif below_is_sep and not above_is_synthetic:
+                        # Separator is lower visual neighbour — insert before above_ei
+                        # (stays in above_ei's group, just below it visually).
+                        _pre_removal_insert = above_ei
+                    else:
+                        # Both neighbours are mods — insert before above_ei.
+                        _pre_removal_insert = above_ei
+                else:
+                    if below_is_sep:
+                        below_name = _entry_name(below_ei)
+                        if below_name == OVERWRITE_NAME:
+                            _pre_removal_insert = below_ei + 1
+                        else:
+                            _pre_removal_insert = below_ei
+                    else:
+                        # General case: insert before below_ei.
+                        _pre_removal_insert = below_ei
+            # Adjust for entries removed from _entries (they shift indices down).
+            _drop_insert_at = _pre_removal_insert - sum(1 for d in drag_set if d < _pre_removal_insert)
+
             if self._drag_is_block:
                 if self._drag_sel_indices:
                     # Sparse multi-select: remove entries at their actual indices
@@ -2762,12 +2870,7 @@ class ModListPanel(ctk.CTkFrame):
                     del self._entries[self._drag_idx:self._drag_idx + blk_size]
                     del self._check_vars[self._drag_idx:self._drag_idx + blk_size]
 
-                if slot >= len(vis_without_drag):
-                    insert_at = len(self._entries)
-                else:
-                    target_orig = vis_without_drag[slot]
-                    insert_at = target_orig - sum(1 for d in drag_set if d < target_orig)
-                insert_at = max(1, min(insert_at, len(self._entries)))
+                insert_at = max(1, min(_drop_insert_at, len(self._entries)))
                 if (self._entries and self._entries[-1].name == ROOT_FOLDER_NAME
                         and insert_at > len(self._entries) - 1):
                     insert_at = len(self._entries) - 1
@@ -2784,12 +2887,7 @@ class ModListPanel(ctk.CTkFrame):
                 entry = self._entries.pop(self._drag_idx)
                 var   = self._check_vars.pop(self._drag_idx)
 
-                if slot >= len(vis_without_drag):
-                    insert_at = len(self._entries)
-                else:
-                    target_orig = vis_without_drag[slot]
-                    insert_at = target_orig - (1 if self._drag_idx < target_orig else 0)
-                insert_at = max(0, min(insert_at, len(self._entries)))
+                insert_at = max(0, min(_drop_insert_at, len(self._entries)))
                 if (self._entries and self._entries[-1].name == ROOT_FOLDER_NAME
                         and insert_at > len(self._entries) - 1):
                     insert_at = len(self._entries) - 1
@@ -3159,6 +3257,48 @@ class ModListPanel(ctk.CTkFrame):
         self._update_expand_collapse_all_btn()
         self._invalidate_derived_caches()
         self._redraw()
+
+    def _update_enable_disable_all_btn(self) -> None:
+        if not getattr(self, "_enable_disable_all_btn", None):
+            return
+        mod_entries = [e for e in self._entries if not e.is_separator]
+        all_enabled = mod_entries and all(e.enabled for e in mod_entries)
+        self._enable_disable_all_btn.configure(
+            text="Disable all" if all_enabled else "Enable all"
+        )
+
+    def _toggle_all_mods_enabled(self) -> None:
+        mod_indices = [i for i, e in enumerate(self._entries) if not e.is_separator]
+        if not mod_indices:
+            return
+        all_enabled = all(self._entries[i].enabled for i in mod_indices)
+        any_enabled = any(self._entries[i].enabled for i in mod_indices)
+        mixed = any_enabled and not all_enabled
+        new_state = not all_enabled
+        if mixed:
+            action = "enable" if new_state else "disable"
+            alert = CTkAlert(
+                state="warning",
+                title="Mixed Mod States",
+                body_text=f"Some mods are enabled and some are disabled.\n\nDo you want to {action} all mods?",
+                btn1=action.capitalize() + " all",
+                btn2="Cancel",
+                parent=self.winfo_toplevel(),
+            )
+            if alert.get() != action.capitalize() + " all":
+                return
+        for i in mod_indices:
+            self._entries[i].enabled = new_state
+            if i < len(self._check_vars) and self._check_vars[i] is not None:
+                self._check_vars[i].set(new_state)
+            self._sync_plugins_for_toggle(self._entries[i].name, new_state)
+        self._vis_dirty = True
+        self._save_modlist()
+        self._rebuild_filemap()
+        self._scan_missing_reqs_flags()
+        self._update_enable_disable_all_btn()
+        self._redraw()
+        self._update_info()
 
     def _remove_plugins_for_mods(self, mod_names: list[str]) -> None:
         """Remove plugins belonging to the given mods from plugins.txt and loadorder.txt."""
@@ -4802,18 +4942,25 @@ class ModListPanel(ctk.CTkFrame):
 
         # Build the block to insert: category separators + mods, then conflict mods.
         to_insert: list[ModEntry] = []
-        existing_sep_names = {e.name for e in self._entries if e.is_separator}
+        existing_sep_names = {e.name for e in new_entries if e.is_separator}
         for cat, mods in sorted(cat_groups.items()):
             sep_name = cat + "_separator"
             if sep_name not in existing_sep_names:
                 sep_entry = ModEntry(name=sep_name, enabled=True, locked=True, is_separator=True)
                 to_insert.append(sep_entry)
                 existing_sep_names.add(sep_name)
+                to_insert.extend(mods)
             else:
-                # Separator already exists in new_entries — find it and append mods after its block.
-                # Skip adding the separator again; mods will go at end of the list before conflicts.
-                pass
-            to_insert.extend(mods)
+                # Separator already exists — find the end of its block and insert mods there.
+                sep_idx = next(i for i, e in enumerate(new_entries) if e.name == sep_name)
+                # Advance past all non-separator entries already in the block.
+                insert_after = sep_idx + 1
+                while insert_after < len(new_entries) and not new_entries[insert_after].is_separator:
+                    insert_after += 1
+                for offset, mod in enumerate(mods):
+                    new_entries.insert(insert_after + offset, mod)
+                # Update insert_base since new_entries grew.
+                insert_base += len(mods)
 
         if conflict_mods:
             conflicts_sep_name = "Conflicts_separator"
@@ -4909,6 +5056,7 @@ class ModListPanel(ctk.CTkFrame):
             self._save_modlist()
             self._rebuild_filemap()
             self._scan_missing_reqs_flags()
+            self._update_enable_disable_all_btn()
             self._redraw()
             self._update_info()
 

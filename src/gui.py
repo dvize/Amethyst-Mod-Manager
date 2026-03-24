@@ -156,168 +156,6 @@ def _run_installer():
         pass
 
 
-class _UpdateAvailableDialog(ctk.CTkToplevel):
-    """Modal dialog when a new app version is available. Offers update via installer or open releases page."""
-
-    def __init__(self, parent, current_version: str, latest_version: str, *, show_installer: bool = True):
-        super().__init__(parent, fg_color=BG_DEEP)
-        self.title("Update available")
-        self.geometry("440x220")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(100, self._make_modal)
-
-        self._parent = parent
-        self._current = current_version
-        self._latest = latest_version
-        self._show_installer = show_installer
-        self._build()
-
-    def _make_modal(self):
-        try:
-            self.grab_set()
-            self.focus_set()
-        except Exception:
-            pass
-
-    def _build(self):
-        self.grid_columnconfigure(0, weight=1)
-
-        msg = (
-            f"A new version of Amethyst Mod Manager is available.\n\n"
-            f"Current: {self._current}\n"
-            f"Latest:  {self._latest}"
-        )
-        ctk.CTkLabel(
-            self, text=msg, font=FONT_NORMAL, text_color=TEXT_MAIN,
-            justify="left", anchor="w"
-        ).grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 20))
-        btn_frame.grid_columnconfigure(0, weight=1)
-
-        if self._show_installer:
-            ctk.CTkButton(
-                btn_frame, text="Update via installer",
-                width=160, height=32, font=FONT_BOLD,
-                fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
-                command=self._on_update
-            ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            btn_frame, text="Open releases page",
-            width=140, height=32, font=FONT_NORMAL,
-            fg_color=ACCENT if not self._show_installer else BG_HEADER,
-            hover_color=ACCENT_HOV if not self._show_installer else BG_HOVER,
-            text_color="white" if not self._show_installer else TEXT_MAIN,
-            command=self._on_releases
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            btn_frame, text="Later",
-            width=80, height=32, font=FONT_NORMAL,
-            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
-            command=self._on_close
-        ).pack(side="left")
-
-    def _on_update(self):
-        _run_installer()
-        self.grab_release()
-        self.destroy()
-        # Close the app so the running AppImage is released and can be replaced.
-        try:
-            from Nexus.nxm_handler import NxmIPC
-            NxmIPC.shutdown()
-        except Exception:
-            pass
-        self._parent.destroy()
-
-    def _on_releases(self):
-        open_url(_APP_UPDATE_RELEASES_URL)
-        self.grab_release()
-        self.destroy()
-
-    def _on_close(self):
-        try:
-            self.grab_release()
-        except Exception:
-            pass
-        self.destroy()
-
-
-class _UpdateAvailableAurDialog(ctk.CTkToplevel):
-    """Modal dialog when a new app version is available for AUR users.
-
-    The AUR package is maintained by a third party so we can't auto-install;
-    we just inform the user and link to the AUR page.
-    """
-
-    def __init__(self, parent, current_version: str, aur_version: str):
-        super().__init__(parent, fg_color=BG_DEEP)
-        self.title("Update available")
-        self.geometry("480x230")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(100, self._make_modal)
-
-        self._parent = parent
-        self._current = current_version
-        self._aur = aur_version
-        self._build()
-
-    def _make_modal(self):
-        try:
-            self.grab_set()
-            self.focus_set()
-        except Exception:
-            pass
-
-    def _build(self):
-        self.grid_columnconfigure(0, weight=1)
-
-        msg = (
-            f"A new version of Amethyst Mod Manager is available on the AUR.\n\n"
-            f"Current: {self._current}\n"
-            f"AUR:     {self._aur}\n\n"
-            f"Update via your AUR helper, e.g.\n"
-            f"  yay -Syu amethyst-mod-manager"
-        )
-        ctk.CTkLabel(
-            self, text=msg, font=FONT_NORMAL, text_color=TEXT_MAIN,
-            justify="left", anchor="w"
-        ).grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 20))
-
-        ctk.CTkButton(
-            btn_frame, text="Open AUR page",
-            width=140, height=32, font=FONT_NORMAL,
-            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
-            command=self._on_aur
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            btn_frame, text="Later",
-            width=80, height=32, font=FONT_NORMAL,
-            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
-            command=self._on_close
-        ).pack(side="left")
-
-    def _on_aur(self):
-        open_url(_AUR_PACKAGE_URL)
-        self.grab_release()
-        self.destroy()
-
-    def _on_close(self):
-        try:
-            self.grab_release()
-        except Exception:
-            pass
-        self.destroy()
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +187,10 @@ class App(ctk.CTk):
         self._update_window_title()
         self._build_layout()
         self._startup_log()
+        # Show onboarding if no games are configured yet
+        configured = sum(1 for g in _GAMES.values() if g.is_configured())
+        if configured == 0:
+            self.after(200, self._show_onboarding)
         # Process --nxm argument if the app was launched via protocol handler
         self._handle_nxm_argv()
         # Check for app update after a short delay (non-blocking)
@@ -448,6 +290,88 @@ class App(ctk.CTk):
 
     # -- App update check ---------------------------------------------------
 
+    def _show_update_overlay(self, current: str, latest: str, *, mode: str = "appimage"):
+        """Show an update-available banner overlaid on the mod list panel.
+
+        *mode* is one of ``"appimage"``, ``"flatpak"``, or ``"aur"``.
+        """
+        container = self._mod_panel_container
+
+        overlay = ctk.CTkFrame(container, fg_color=BG_DEEP, corner_radius=8)
+        overlay.place(relx=0.5, rely=0.5, anchor="center")
+
+        def _close():
+            overlay.place_forget()
+            overlay.destroy()
+
+        inner = ctk.CTkFrame(overlay, fg_color="transparent")
+        inner.pack(padx=24, pady=20)
+
+        if mode == "aur":
+            msg = (
+                f"A new version of Amethyst Mod Manager is available on the AUR.\n\n"
+                f"Current: {current}\n"
+                f"AUR:     {latest}\n\n"
+                f"Update via your AUR helper, e.g.\n"
+                f"  yay -Syu amethyst-mod-manager"
+            )
+        else:
+            msg = (
+                f"A new version of Amethyst Mod Manager is available.\n\n"
+                f"Current: {current}\n"
+                f"Latest:  {latest}"
+            )
+
+        ctk.CTkLabel(
+            inner, text=msg, font=FONT_NORMAL, text_color=TEXT_MAIN,
+            justify="left", anchor="w",
+        ).pack(anchor="w", pady=(0, 14))
+
+        btn_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_frame.pack(anchor="w")
+
+        if mode == "appimage":
+            def _on_update():
+                _run_installer()
+                _close()
+                try:
+                    from Nexus.nxm_handler import NxmIPC
+                    NxmIPC.shutdown()
+                except Exception:
+                    pass
+                self.destroy()
+
+            ctk.CTkButton(
+                btn_frame, text="Update via installer",
+                width=160, height=32, font=FONT_BOLD,
+                fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+                command=_on_update,
+            ).pack(side="left", padx=(0, 8))
+
+        if mode == "aur":
+            ctk.CTkButton(
+                btn_frame, text="Open AUR page",
+                width=140, height=32, font=FONT_NORMAL,
+                fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+                command=lambda: (open_url(_AUR_PACKAGE_URL), _close()),
+            ).pack(side="left", padx=(0, 8))
+        else:
+            ctk.CTkButton(
+                btn_frame, text="Open releases page",
+                width=140, height=32, font=FONT_NORMAL,
+                fg_color=ACCENT if mode == "flatpak" else BG_HEADER,
+                hover_color=ACCENT_HOV if mode == "flatpak" else BG_HOVER,
+                text_color="white" if mode == "flatpak" else TEXT_MAIN,
+                command=lambda: (open_url(_APP_UPDATE_RELEASES_URL), _close()),
+            ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_frame, text="Later",
+            width=80, height=32, font=FONT_NORMAL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=_close,
+        ).pack(side="left")
+
     def _check_for_app_update(self):
         """Run in background: fetch latest version and prompt if newer.
 
@@ -462,28 +386,25 @@ class App(ctk.CTk):
                 if latest is None:
                     return
                 if _is_newer_version(__version__, latest):
-                    def _show():
-                        dlg = _UpdateAvailableDialog(self, __version__, latest, show_installer=True)
-                        self.wait_window(dlg)
-                    self.call_threadsafe(_show)
+                    self.call_threadsafe(
+                        lambda: self._show_update_overlay(__version__, latest, mode="appimage")
+                    )
             elif is_flatpak():
                 latest = _fetch_latest_version()
                 if latest is None:
                     return
                 if _is_newer_version(__version__, latest):
-                    def _show():
-                        dlg = _UpdateAvailableDialog(self, __version__, latest, show_installer=False)
-                        self.wait_window(dlg)
-                    self.call_threadsafe(_show)
+                    self.call_threadsafe(
+                        lambda: self._show_update_overlay(__version__, latest, mode="flatpak")
+                    )
             else:
                 aur_ver = _fetch_aur_version()
                 if aur_ver is None:
                     return
                 if _is_newer_version(__version__, aur_ver):
-                    def _show():
-                        dlg = _UpdateAvailableAurDialog(self, __version__, aur_ver)
-                        self.wait_window(dlg)
-                    self.call_threadsafe(_show)
+                    self.call_threadsafe(
+                        lambda: self._show_update_overlay(__version__, aur_ver, mode="aur")
+                    )
 
         threading.Thread(target=_do_check, daemon=True).start()
 
@@ -1012,6 +933,40 @@ class App(ctk.CTk):
             self._mod_panel.load_game(None, "")
             if hasattr(self._plugin_panel, "_plugin_entries"):
                 self._plugin_panel._plugin_entries = []
+
+    # -- Onboarding overlay -------------------------------------------------
+
+    def _show_onboarding(self):
+        from gui.onboarding_panel import OnboardingPanel
+
+        def _key_changed():
+            self._init_nexus_api()
+            self._topbar._log("Nexus API key updated.")
+            self.after(200, self._topbar._check_collections_visibility)
+
+        def _add_game():
+            # Trigger the same flow as the "+" button in the top bar
+            self._topbar._on_add_game()
+
+        self._onboarding_panel = OnboardingPanel(
+            self._mod_panel_container,
+            on_nexus_key_changed=_key_changed,
+            on_add_game=_add_game,
+            on_done=self._hide_onboarding,
+            already_logged_in=self._nexus_api is not None,
+        )
+        self._onboarding_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._onboarding_panel.lift()
+
+    def _hide_onboarding(self):
+        panel = getattr(self, "_onboarding_panel", None)
+        if panel is not None:
+            self._onboarding_panel = None
+            try:
+                panel.place_forget()
+                panel.destroy()
+            except Exception:
+                pass
 
     # -- Game picker panel (inline overlay) --------------------------------
 

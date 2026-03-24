@@ -20,6 +20,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from gui.nexus_mod_list_panel_base import _NexusModListPanel
+from Utils.ui_config import load_nexus_show_adult, save_nexus_show_adult
 from gui.theme import (
     BG_HEADER,
     BG_ROW,
@@ -48,6 +49,7 @@ class BrowseModEntry:
     endorsement_count: int = 0
     downloads_total: int = 0
     picture_url: str = ""
+    contains_adult_content: bool = False
 
 
 CATEGORIES = [
@@ -89,6 +91,7 @@ class BrowseModsPanel(_NexusModListPanel):
         self._cat_idx: int = 0
         self._page: int = 0
         self._search_active: bool = False
+        self._show_adult_var: tk.BooleanVar | None = None
         super().__init__(
             parent_tab,
             log_fn=log_fn,
@@ -239,6 +242,13 @@ class BrowseModsPanel(_NexusModListPanel):
         )
         self._next_btn.pack(side="left", padx=4, pady=2)
 
+        self._show_adult_var = tk.BooleanVar(value=load_nexus_show_adult())
+        ctk.CTkCheckBox(
+            toolbar, text="Show Adult", variable=self._show_adult_var,
+            height=26, font=FONT_HEADER, text_color=TEXT_MAIN,
+            command=self._on_show_adult_toggle,
+        ).pack(side="left", padx=(10, 4), pady=2)
+
     # ------------------------------------------------------------------
     # Category cycling
     # ------------------------------------------------------------------
@@ -268,6 +278,20 @@ class BrowseModsPanel(_NexusModListPanel):
             if len(self._entries) >= PAGE_SIZE:
                 self._page += 1
                 self._load_page()
+
+    def _on_show_adult_toggle(self):
+        save_nexus_show_adult(self._show_adult_var.get())
+        self._build_cards()
+
+    def _build_cards(self):
+        show_adult = self._show_adult_var is not None and self._show_adult_var.get()
+        if not show_adult:
+            orig = self._entries
+            self._entries = [e for e in orig if not e.contains_adult_content]
+            super()._build_cards()
+            self._entries = orig
+        else:
+            super()._build_cards()
 
     def _load_page(self):
         """Fetch the current page and replace cards."""
@@ -350,6 +374,7 @@ class BrowseModsPanel(_NexusModListPanel):
                 endorsement_count=get("endorsement_count", 0),
                 downloads_total=get("downloads_total", 0),
                 picture_url=get("picture_url", ""),
+                contains_adult_content=bool(get("contains_adult_content", False)),
             ))
         return entries
 
@@ -399,6 +424,7 @@ class BrowseModsPanel(_NexusModListPanel):
                         endorsement_count=get("endorsement_count", 0),
                         downloads_total=get("downloads_total", 0),
                         picture_url=get("picture_url", ""),
+                        contains_adult_content=bool(get("contains_adult_content", False)),
                     ))
 
                 def _done():

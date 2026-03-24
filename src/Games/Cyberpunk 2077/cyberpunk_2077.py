@@ -54,7 +54,7 @@ class Cyberpunk2077(BaseGame):
 
     @property
     def mod_required_top_level_folders(self) -> set[str]:
-        return {"bin", "r6", "archive", "red4ext","engine"}
+        return {"bin", "r6", "archive", "red4ext","engine","mods"}
 
     @property
     def mod_required_file_types(self) -> set[str]:
