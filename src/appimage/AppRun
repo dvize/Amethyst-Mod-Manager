@@ -29,7 +29,7 @@ cd "${APPDIR}/usr/app"
 
 # If the first argument is a known CLI subcommand, run the CLI instead of the GUI.
 case "$1" in
-    deploy|restore|list-games|list-profiles)
+    deploy|restore|list-games|list-profiles|clear-credentials)
         exec "${PYTHON_PREFIX}/bin/python3.13" cli.py "$@"
         ;;
     *)
