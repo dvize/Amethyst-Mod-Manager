@@ -663,6 +663,17 @@ class CollectionDetailDialog(tk.Frame):
         )
         self._status_lbl.pack(fill="x", side="top", padx=10, pady=(4, 0))
 
+        # --- Install progress bar (hidden until a collection install starts) ---
+        self._install_progress_bar = ctk.CTkProgressBar(
+            self,
+            height=scaled(8),
+            progress_color=ACCENT,
+            fg_color=BG_PANEL,
+            corner_radius=4,
+        )
+        self._install_progress_bar.set(0)
+        # Do not pack yet — shown only during install
+
         # --- Treeview with scrollbars ---
         tree_frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
         tree_frame.pack(fill="both", expand=True, padx=8, pady=6)
@@ -1278,6 +1289,22 @@ class CollectionDetailDialog(tk.Frame):
             except Exception:
                 pass
 
+        def _set_progress(value: float | None) -> None:
+            """Show/update/hide the install progress bar (0.0–1.0; None = hide)."""
+            try:
+                if value is None:
+                    self.after(0, self._install_progress_bar.pack_forget)
+                else:
+                    def _show_and_set(v=value):
+                        bar = self._install_progress_bar
+                        if not bar.winfo_ismapped():
+                            bar.pack(fill="x", side="top", padx=10, pady=(2, 0),
+                                     after=self._status_lbl)
+                        bar.set(v)
+                    self.after(0, _show_and_set)
+            except Exception:
+                pass
+
         self._game.set_active_profile_dir(profile_dir)
         modlist_path = profile_dir / "modlist.txt"
         plugins_path = profile_dir / "plugins.txt"
@@ -1695,6 +1722,7 @@ class CollectionDetailDialog(tk.Frame):
 
             # Update progress and mark row green — also write to registry for reconnect.
             _set_status(f"Installing: {done_so_far}/{_dl_total} complete\u2026")
+            _set_progress(done_so_far / _dl_total if _dl_total else 1.0)
             if mod.file_id and folder_name:
                 _install_state["installed_fids"].add(mod.file_id)
                 try:
@@ -1704,6 +1732,7 @@ class CollectionDetailDialog(tk.Frame):
 
         if to_download:
             _set_status(f"Installing {_dl_total} mod(s) — up to {_INSTALL_WORKERS} at a time\u2026")
+            _set_progress(0.0)
             # Sort smallest archives first so workers stay busy and large mods
             # don't block the queue.  Any mod that needs a manual FOMOD dialog
             # will still serialize correctly via the _interactive_dialog_lock — running
@@ -1897,6 +1926,10 @@ class CollectionDetailDialog(tk.Frame):
             f"Collection install complete: {installed} installed, {skipped} skipped. "
             f"Switch to profile '{profile_name}' to use it."
         )
+        try:
+            self._install_progress_bar.pack_forget()
+        except Exception:
+            pass
         self._refresh_profile_menu()
         self._update_reset_btn_visibility()
         self._update_open_missing_btn_visibility()

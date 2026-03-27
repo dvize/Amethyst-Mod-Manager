@@ -21,6 +21,14 @@ class PluginEntry:
     enabled: bool
 
 
+def _normalise_ext(name: str) -> str:
+    """Return name with its file extension lowercased (e.g. Mod.ESP → Mod.esp)."""
+    dot = name.rfind(".")
+    if dot == -1:
+        return name
+    return name[:dot] + name[dot:].lower()
+
+
 def read_plugins(path: Path, star_prefix: bool = True) -> list[PluginEntry]:
     """
     Parse plugins.txt and return entries in file order (index 0 = first loaded).
@@ -40,11 +48,12 @@ def read_plugins(path: Path, star_prefix: bool = True) -> list[PluginEntry]:
             continue
         if star_prefix:
             if line.startswith("*"):
-                entries.append(PluginEntry(name=line[1:], enabled=True))
+                name = line[1:]
+                entries.append(PluginEntry(name=_normalise_ext(name), enabled=True))
             else:
-                entries.append(PluginEntry(name=line, enabled=False))
+                entries.append(PluginEntry(name=_normalise_ext(line), enabled=False))
         else:
-            entries.append(PluginEntry(name=line, enabled=True))
+            entries.append(PluginEntry(name=_normalise_ext(line), enabled=True))
     return entries
 
 
@@ -303,8 +312,13 @@ def sync_plugins_from_filemap(
                     mod_disabled = {n.lower() for n in disabled_plugins.get(mod_name, [])}
                     if filename.lower() in mod_disabled:
                         continue
-                new_entries.append(PluginEntry(name=filename, enabled=True))
-                existing_lower.add(filename.lower())
+                # Normalise extension to lowercase so case-sensitive filesystems
+                # (Linux) can locate the file on disk (e.g. .ESP → .esp).
+                stem = Path(filename).stem
+                ext  = Path(filename).suffix.lower()
+                normalised = stem + ext
+                new_entries.append(PluginEntry(name=normalised, enabled=True))
+                existing_lower.add(normalised.lower())
 
     if new_entries:
         write_plugins(plugins_path, existing + new_entries, star_prefix=star_prefix)

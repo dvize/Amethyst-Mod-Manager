@@ -394,45 +394,58 @@ def _resolve_direct_files(extract_dir: str) -> list[tuple[str, str, bool]]:
     return result
 
 
-def _resolve_src_case(src_root: Path, src_rel: str) -> Path:
+def _resolve_src_case(src_root: Path, src_rel: str,
+                      _cache: "dict[Path, dict[str, str]] | None" = None) -> Path:
     """
     Build src_root / src_rel while resolving each path component case-insensitively
     against what actually exists on disk.  FOMOD XML is written on Windows (case-
     insensitive) so source paths like "00 SOS\\FULL\\" may not match the real
     capitalisation on a Linux filesystem (e.g. "00 SOS/Full/").
+
+    Pass a shared dict as ``_cache`` to avoid re-scanning the same directories
+    when resolving many paths under the same root.
     """
+    if _cache is None:
+        _cache = {}
     parts = src_rel.replace("\\", "/").strip("/").split("/")
     current = src_root
     for part in parts:
         if not part:
             continue
-        try:
-            existing = {p.name.lower(): p.name for p in current.iterdir() if current.is_dir()}
-        except OSError:
-            existing = {}
-        resolved = existing.get(part.lower(), part)
+        if current not in _cache:
+            try:
+                _cache[current] = {p.name.lower(): p.name for p in current.iterdir() if current.is_dir()}
+            except OSError:
+                _cache[current] = {}
+        resolved = _cache[current].get(part.lower(), part)
         current = current / resolved
     return current
 
 
-def _resolve_dst_case(dest_root: Path, dst_rel: str) -> Path:
+def _resolve_dst_case(dest_root: Path, dst_rel: str,
+                      _cache: "dict[Path, dict[str, str]] | None" = None) -> Path:
     """
     Build dest_root / dst_rel while resolving each path component case-insensitively
     against what already exists on disk.  This prevents FOMOD installs from creating
     duplicate folders that differ only in case (e.g. 'Interface' vs 'interface') when
     running on a case-sensitive Linux filesystem.
+
+    Pass a shared dict as ``_cache`` to avoid re-scanning the same directories
+    when resolving many paths under the same root.
     """
+    if _cache is None:
+        _cache = {}
     parts = dst_rel.replace("\\", "/").split("/")
     current = dest_root
     for part in parts:
         if not part:
             continue
-        # Check if any existing child matches case-insensitively
-        try:
-            existing = {p.name.lower(): p.name for p in current.iterdir() if current.is_dir()}
-        except OSError:
-            existing = {}
-        resolved = existing.get(part.lower(), part)
+        if current not in _cache:
+            try:
+                _cache[current] = {p.name.lower(): p.name for p in current.iterdir() if current.is_dir()}
+            except OSError:
+                _cache[current] = {}
+        resolved = _cache[current].get(part.lower(), part)
         current = current / resolved
     return current
 
@@ -475,15 +488,27 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
     Folder entries use the recursive case-insensitive copytree (serial).
     File-only entries are copied in parallel for speed on large mods.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
     import threading as _threading
 
     folder_copied = 0
     file_entries: list[tuple[Path, Path]] = []  # (src, dst) pairs ready to copy
 
+    _src_cache: dict[Path, dict[str, str]] = {}
+    _dst_cache: dict[Path, dict[str, str]] = {}
+    _src_root_path = Path(src_root)
+
     for src_rel, dst_rel, is_folder in file_list:
-        src = _resolve_src_case(Path(src_root), src_rel) if src_rel else Path(src_root)
-        dst = _resolve_dst_case(dest_root, dst_rel) if dst_rel else dest_root / dst_rel
+        # For direct installs src_rel == dst_rel and the path was produced by rglob
+        # on the local filesystem — no case resolution needed on the source side.
+        if src_rel and src_rel == dst_rel:
+            src = _src_root_path / src_rel.replace("\\", "/")
+        elif src_rel:
+            src = _resolve_src_case(_src_root_path, src_rel, _src_cache)
+        else:
+            src = _src_root_path
+
+        dst = _resolve_dst_case(dest_root, dst_rel, _dst_cache) if dst_rel else dest_root / dst_rel
 
         if is_folder:
             if not dst_rel:
@@ -494,7 +519,7 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
             if not dst_rel:
                 dst = dest_root / src.name
             elif dst_rel.endswith("/") or dst_rel.endswith("\\"):
-                dst = _resolve_dst_case(dest_root, dst_rel.rstrip("/\\")) / src.name
+                dst = _resolve_dst_case(dest_root, dst_rel.rstrip("/\\"), _dst_cache) / src.name
             if src.is_file():
                 file_entries.append((src, dst))
 
@@ -519,9 +544,10 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
 
     _COPY_WORKERS = 8
     with ThreadPoolExecutor(max_workers=_COPY_WORKERS) as pool:
-        futs = [pool.submit(_copy_one, pair) for pair in file_entries]
-        for f in as_completed(futs):
-            f.result()  # re-raise any exception
+        # map() streams results lazily — far less memory overhead than submit()+as_completed()
+        # when file_entries is large (tens of thousands of files).
+        for _ in pool.map(_copy_one, file_entries, chunksize=256):
+            pass
 
     copied = folder_copied + len(file_entries)
     log_fn(f"Copied {copied} item(s) to staging area.")

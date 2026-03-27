@@ -65,9 +65,9 @@ from Utils.plugins import (
     sync_plugins_from_filemap,
     prune_plugins_from_filemap,
 )
-from Utils.plugin_parser import check_missing_masters, check_late_masters
+from Utils.plugin_parser import check_missing_masters, check_late_masters, check_version_mismatched_masters, read_masters
 from LOOT.loot_sorter import sort_plugins as loot_sort, is_available as loot_available
-from Nexus.nexus_meta import write_meta, read_meta, scan_installed_mods
+from Nexus.nexus_meta import write_meta, read_meta
 
 
 def _file_exists_ci(base: Path, rel: Path) -> bool:
@@ -159,12 +159,15 @@ class PluginPanel(ctk.CTkFrame):
         self._phover_idx: int = -1        # plugin row index under the mouse cursor
         self._plugin_mod_map: dict[str, str] = {}  # plugin name → staging mod folder name
         self._highlighted_plugins: set[str] = set()  # plugin names highlighted when their mod is selected
+        self._master_highlights: set[str] = set()    # master plugin names for the currently selected plugin
+        self._plugin_paths: dict[str, "Path"] = {}   # plugin name.lower() → path on disk
         self._on_plugin_selected_cb = None  # callable(mod_name: str | None)
         self._on_mod_selected_cb = None     # callable() — notify mod panel a plugin was selected
 
         # Missing masters detection
         self._missing_masters: dict[str, list[str]] = {}
         self._late_masters: dict[str, list[str]] = {}
+        self._version_mismatch_masters: dict[str, list[str]] = {}
         self._staging_root: Path | None = None
         self._data_dir: Path | None = None
 
@@ -181,6 +184,13 @@ class PluginPanel(ctk.CTkFrame):
         if _late_warn_path.is_file():
             _img2 = PilImage.open(_late_warn_path).convert("RGBA").resize((16, 16), PilImage.LANCZOS)
             self._late_warn_icon = ImageTk.PhotoImage(_img2)
+
+        # Warning icon for version-mismatched masters
+        self._version_mismatch_icon: ImageTk.PhotoImage | None = None
+        _vmm_path = _ICONS_DIR / "info.png"
+        if _vmm_path.is_file():
+            _img3 = PilImage.open(_vmm_path).convert("RGBA").resize((16, 16), PilImage.LANCZOS)
+            self._version_mismatch_icon = ImageTk.PhotoImage(_img3)
 
         # Lock icon
         self._icon_lock: ImageTk.PhotoImage | None = None
@@ -222,6 +232,7 @@ class PluginPanel(ctk.CTkFrame):
         self._pool_idx_text: list[int] = []
         self._pool_warn: list[int | None] = []
         self._pool_late_warn: list[int | None] = []
+        self._pool_vmm_warn: list[int | None] = []
         self._pool_check_rects: list[int] = []
         self._pool_check_marks: list[int] = []
         self._pool_lock_rects: list[int] = []
@@ -2391,8 +2402,15 @@ class PluginPanel(ctk.CTkFrame):
                 staging = game.get_effective_mod_staging_path()
                 if not staging or not Path(staging).is_dir():
                     return set()
-                mods = scan_installed_mods(Path(staging))
-                return {m.installation_file for m in mods if m.installation_file}
+                staging_path = Path(staging)
+                names: set[str] = set()
+                for folder in staging_path.iterdir():
+                    meta_path = folder / "meta.ini"
+                    if meta_path.is_file():
+                        m = read_meta(meta_path)
+                        if m.installation_file:
+                            names.add(m.installation_file)
+                return names
             except Exception:
                 return set()
 
@@ -2579,8 +2597,14 @@ class PluginPanel(ctk.CTkFrame):
             self._pool_bg.append(bg_id)
             self._pool_name.append(name_id)
             self._pool_idx_text.append(idx_id)
+            vmm_warn_id: int | None = None
+            if self._version_mismatch_icon:
+                vmm_warn_id = c.create_image(0, -200, image=self._version_mismatch_icon,
+                                             anchor="center", state="hidden")
+
             self._pool_warn.append(warn_id)
             self._pool_late_warn.append(late_warn_id)
+            self._pool_vmm_warn.append(vmm_warn_id)
 
             cb_tag = f"pcb_{s}"
             cb_rect = c.create_rectangle(
@@ -2681,7 +2705,7 @@ class PluginPanel(ctk.CTkFrame):
             if query in entry.name.casefold():
                 result.append(i)
                 continue
-            mod_name = self._plugin_mod_map.get(entry.name, "")
+            mod_name = self._plugin_mod_map.get(entry.name.lower(), "")
             if mod_name and query in mod_name.casefold():
                 result.append(i)
         self._plugin_filtered_indices = result
@@ -2875,9 +2899,10 @@ class PluginPanel(ctk.CTkFrame):
 
     def clear_plugin_selection(self):
         """Clear the plugin list selection, e.g. when a mod is selected."""
-        if self._sel_idx >= 0 or self._psel_set:
+        if self._sel_idx >= 0 or self._psel_set or self._master_highlights:
             self._sel_idx = -1
             self._psel_set = set()
+            self._master_highlights = set()
             self._predraw()
 
     def set_highlighted_plugins(self, mod_name: str | None):
@@ -2886,8 +2911,10 @@ class PluginPanel(ctk.CTkFrame):
             new_highlighted = set()
         else:
             new_highlighted = {p for p, m in self._plugin_mod_map.items() if m == mod_name}
-        if new_highlighted != self._highlighted_plugins:
-            self._highlighted_plugins = new_highlighted
+        changed = new_highlighted != self._highlighted_plugins or self._master_highlights
+        self._highlighted_plugins = new_highlighted
+        self._master_highlights = set()
+        if changed:
             self._predraw()
         # Also update Ini Files tab: marker strip and row highlight
         if getattr(self, "_highlighted_ini_mod", None) != mod_name:
@@ -3013,6 +3040,7 @@ class PluginPanel(ctk.CTkFrame):
         self._refresh_framework_banners()
         self._sel_idx = -1
         self._psel_set = set()
+        self._master_highlights = set()
         self._drag_idx = -1
         self._highlighted_plugins = set()
         self._highlighted_ini_mod = None
@@ -3169,6 +3197,7 @@ class PluginPanel(ctk.CTkFrame):
         first_row = max(0, canvas_top // self.ROW_H)
         last_row = min(n, (canvas_top + canvas_h) // self.ROW_H + 2)
         vis_count = last_row - first_row
+        master_names_lower = {m.lower() for m in self._master_highlights}
 
         for s in range(self._pool_size):
             row = first_row + s
@@ -3183,6 +3212,8 @@ class PluginPanel(ctk.CTkFrame):
                 is_sel = (actual_idx in self._psel_set) or (actual_idx == self._drag_idx and self._drag_moved)
                 if is_sel:
                     bg = BG_SELECT
+                elif entry.name.lower() in master_names_lower:
+                    bg = "#1a5c1a"
                 elif entry.name in self._highlighted_plugins:
                     bg = plugin_mod
                 elif actual_idx == self._phover_idx:
@@ -3207,15 +3238,20 @@ class PluginPanel(ctk.CTkFrame):
 
                 has_missing = entry.name in self._missing_masters
                 has_late = entry.name in self._late_masters
+                has_vmm = entry.name in self._version_mismatch_masters
                 flags_x0 = self._pcol_x[2]
                 flags_x1 = self._pcol_x[3]
-                flags_third = (flags_x1 - flags_x0) // 3
+                active_flags = [f for f in [has_missing, has_late, has_vmm] if f]
+                n_flags = len(active_flags)
+                flags_step = (flags_x1 - flags_x0) // (n_flags + 1) if n_flags else 0
+                _flag_pos = iter(
+                    flags_x0 + flags_step * (i + 1) for i in range(n_flags)
+                )
 
                 warn_id = self._pool_warn[s]
                 if warn_id is not None:
                     if has_missing:
-                        wx = flags_x0 + flags_third if has_late else (flags_x0 + flags_x1) // 2
-                        c.coords(warn_id, wx, y_mid)
+                        c.coords(warn_id, next(_flag_pos), y_mid)
                         c.itemconfigure(warn_id, state="normal")
                     else:
                         c.itemconfigure(warn_id, state="hidden")
@@ -3223,11 +3259,18 @@ class PluginPanel(ctk.CTkFrame):
                 late_warn_id = self._pool_late_warn[s]
                 if late_warn_id is not None:
                     if has_late:
-                        lx = flags_x1 - flags_third if has_missing else (flags_x0 + flags_x1) // 2
-                        c.coords(late_warn_id, lx, y_mid)
+                        c.coords(late_warn_id, next(_flag_pos), y_mid)
                         c.itemconfigure(late_warn_id, state="normal")
                     else:
                         c.itemconfigure(late_warn_id, state="hidden")
+
+                vmm_warn_id = self._pool_vmm_warn[s]
+                if vmm_warn_id is not None:
+                    if has_vmm:
+                        c.coords(vmm_warn_id, next(_flag_pos), y_mid)
+                        c.itemconfigure(vmm_warn_id, state="normal")
+                    else:
+                        c.itemconfigure(vmm_warn_id, state="hidden")
 
                 self._pool_data_idx[s] = actual_idx
 
@@ -3269,6 +3312,8 @@ class PluginPanel(ctk.CTkFrame):
                     c.itemconfigure(self._pool_warn[s], state="hidden")
                 if self._pool_late_warn[s] is not None:
                     c.itemconfigure(self._pool_late_warn[s], state="hidden")
+                if self._pool_vmm_warn[s] is not None:
+                    c.itemconfigure(self._pool_vmm_warn[s], state="hidden")
                 c.itemconfigure(self._pool_check_rects[s], state="hidden")
                 c.itemconfigure(self._pool_check_marks[s], state="hidden")
                 c.itemconfigure(self._pool_lock_rects[s], state="hidden")
@@ -3284,31 +3329,32 @@ class PluginPanel(ctk.CTkFrame):
         self._marker_strip_after_id = self.after(250, self._draw_marker_strip)
 
     def _draw_marker_strip(self):
-        """Draw orange tick marks on the strip beside the plugins scrollbar for
-        plugins belonging to the selected mod (_highlighted_plugins)."""
+        """Draw tick marks on the strip beside the plugins scrollbar.
+        Orange ticks for plugins belonging to the selected mod (_highlighted_plugins).
+        Green ticks for master dependencies of the selected plugin (_master_highlights)."""
         self._marker_strip_after_id = None
         c = self._pmarker_strip
         c.delete("marker")
         entries = self._plugin_entries
         n = len(entries)
-        if not n or not self._highlighted_plugins:
+        if not n or (not self._highlighted_plugins and not self._master_highlights):
             return
         strip_h = c.winfo_height()
         if strip_h <= 1:
             return
 
-        # Row indices of highlighted plugins
-        highlighted_rows = {i for i, e in enumerate(entries) if e.name in self._highlighted_plugins}
-        if not highlighted_rows:
-            return
+        master_names_lower = {m.lower() for m in self._master_highlights}
 
-        def _tick(row_idx: int):
+        def _tick(row_idx: int, color: str):
             frac = row_idx / n
             y = max(2, min(int(frac * strip_h), strip_h - 4))
-            c.create_rectangle(0, y, 4, y + 3, fill=plugin_mod, outline="", tags="marker")
+            c.create_rectangle(0, y, 4, y + 3, fill=color, outline="", tags="marker")
 
-        for row in highlighted_rows:
-            _tick(row)
+        for i, e in enumerate(entries):
+            if e.name in self._highlighted_plugins:
+                _tick(i, plugin_mod)
+            elif e.name.lower() in master_names_lower:
+                _tick(i, "#2a8c2a")
 
     def _schedule_predraw(self) -> None:
         """Debounced _predraw — coalesces rapid scroll/resize events."""
@@ -3320,10 +3366,32 @@ class PluginPanel(ctk.CTkFrame):
     # Missing masters detection
     # ------------------------------------------------------------------
 
+    def _find_plugin_in_mod_dir(self, mod_dir: "Path", filename: str) -> "Path | None":
+        """Search mod_dir recursively (one level deep) for a file matching filename
+        case-insensitively. Used when the filemap strips a prefix (e.g. 'Data Files')
+        so the staging file lives in a subdirectory not reflected in rel_path."""
+        from pathlib import Path as _Path
+        name_lower = filename.lower()
+        if not mod_dir.is_dir():
+            return None
+        for entry in mod_dir.iterdir():
+            if entry.is_file() and entry.name.lower() == name_lower:
+                return entry
+            if entry.is_dir():
+                candidate = entry / filename
+                if candidate.is_file():
+                    return candidate
+                # case-insensitive check within subdir
+                for sub in entry.iterdir():
+                    if sub.is_file() and sub.name.lower() == name_lower:
+                        return sub
+        return None
+
     def _check_all_masters(self) -> None:
         """Build plugin_paths dict and check all plugins for missing/late masters."""
         self._missing_masters = {}
         self._late_masters = {}
+        self._version_mismatch_masters = {}
         self._plugin_mod_map = {}
         if not self._plugin_entries or not self._plugin_extensions:
             return
@@ -3350,11 +3418,19 @@ class PluginPanel(ctk.CTkFrame):
                             if mod_name == _OVERWRITE_NAME and overwrite_dir:
                                 plugin_paths[rel_path.lower()] = overwrite_dir / rel_path
                             else:
-                                plugin_paths[rel_path.lower()] = (
-                                    self._staging_root / mod_name / rel_path
-                                )
+                                direct = self._staging_root / mod_name / rel_path
+                                if direct.is_file():
+                                    plugin_paths[rel_path.lower()] = direct
+                                else:
+                                    # File may live under a strip-prefix subfolder in staging
+                                    # (e.g. staging/mod/Data Files/plugin.esp).
+                                    # Search the mod dir for a matching filename.
+                                    found = self._find_plugin_in_mod_dir(
+                                        self._staging_root / mod_name, rel_path
+                                    )
+                                    plugin_paths[rel_path.lower()] = found or direct
                             # Map plugin filename → mod folder name
-                            self._plugin_mod_map[rel_path] = mod_name
+                            self._plugin_mod_map[rel_path.lower()] = mod_name
 
         # 2. Plugins in overwrite that may not be in filemap yet (added by sync, index stale)
         if overwrite_dir and overwrite_dir.is_dir():
@@ -3363,7 +3439,7 @@ class PluginPanel(ctk.CTkFrame):
                     low = entry.name.lower()
                     if low not in plugin_paths:
                         plugin_paths[low] = entry
-                        self._plugin_mod_map[entry.name] = _OVERWRITE_NAME
+                        self._plugin_mod_map[entry.name.lower()] = _OVERWRITE_NAME
             data_sub = overwrite_dir / "Data"
             if data_sub.is_dir():
                 for entry in data_sub.iterdir():
@@ -3371,7 +3447,7 @@ class PluginPanel(ctk.CTkFrame):
                         low = entry.name.lower()
                         if low not in plugin_paths:
                             plugin_paths[low] = entry
-                            self._plugin_mod_map[entry.name] = _OVERWRITE_NAME
+                            self._plugin_mod_map[entry.name.lower()] = _OVERWRITE_NAME
 
         # 3. Also map vanilla plugins from the game Data dir
         if self._data_dir and self._data_dir.is_dir():
@@ -3381,9 +3457,15 @@ class PluginPanel(ctk.CTkFrame):
                 if entry.is_file() and entry.suffix.lower() in exts_lower:
                     plugin_paths.setdefault(entry.name.lower(), entry)
 
+        self._plugin_paths = plugin_paths
         plugin_names = [e.name for e in self._plugin_entries if e.enabled]
         self._missing_masters = check_missing_masters(plugin_names, plugin_paths)
         self._late_masters = check_late_masters(plugin_names, plugin_paths)
+        if self._data_dir:
+            self._version_mismatch_masters = check_version_mismatched_masters(
+                plugin_names, plugin_paths, self._data_dir
+            )
+
 
     # ------------------------------------------------------------------
     # Tooltip for missing masters
@@ -3433,6 +3515,8 @@ class PluginPanel(ctk.CTkFrame):
                 is_sel = data_row in self._psel_set
                 if is_sel:
                     bg = BG_SELECT
+                elif entry and entry.name.lower() in {m.lower() for m in self._master_highlights}:
+                    bg = "#1a5c1a"
                 elif entry and entry.name in self._highlighted_plugins:
                     bg = plugin_mod
                 elif data_row == self._phover_idx:
@@ -3469,11 +3553,14 @@ class PluginPanel(ctk.CTkFrame):
             entry = self._plugin_entries[actual_idx]
             missing = self._missing_masters.get(entry.name)
             late = self._late_masters.get(entry.name)
+            vmm = self._version_mismatch_masters.get(entry.name)
             parts: list[str] = []
             if missing:
                 parts.append("Missing masters:\n" + "\n".join(f"  - {m}" for m in missing))
             if late:
                 parts.append("Masters loaded after this plugin:\n" + "\n".join(f"  - {m}" for m in late))
+            if vmm:
+                parts.append("Version mismatched masters:\n" + "\n".join(f"  - {m}" for m in vmm))
             if parts:
                 screen_x = event.x_root
                 screen_y = event.y_root
@@ -3586,12 +3673,21 @@ class PluginPanel(ctk.CTkFrame):
         self._highlighted_ini_mod = None
         self._apply_ini_row_highlight()
         self._draw_ini_marker_strip()
-        self._predraw()
         plugin_name = self._plugin_entries[idx].name
+        # Highlight masters of the selected plugin in green
+        plugin_key = plugin_name.lower()
+        plugin_path = self._plugin_paths.get(plugin_key)
+        if plugin_path is not None:
+            masters = read_masters(plugin_path)
+            plugin_names_lower = {e.name.lower() for e in self._plugin_entries}
+            self._master_highlights = {m for m in masters if m.lower() in plugin_names_lower}
+        else:
+            self._master_highlights = set()
+        self._predraw()
         if self._on_mod_selected_cb is not None:
             self._on_mod_selected_cb()
         if self._on_plugin_selected_cb is not None:
-            mod_name = self._plugin_mod_map.get(plugin_name)
+            mod_name = self._plugin_mod_map.get(plugin_name.lower())
             self._on_plugin_selected_cb(mod_name)
 
     def _on_pmouse_drag(self, event):

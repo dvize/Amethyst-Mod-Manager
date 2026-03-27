@@ -685,6 +685,8 @@ class ReconfigureGamePanel(ctk.CTkFrame):
 
     def _on_browse(self):
         def _apply(chosen: Optional[Path]):
+            if not self._status_label.winfo_exists():
+                return
             if chosen:
                 # Verify the game exe is present in the chosen folder
                 all_exes = [self._game.exe_name] + list(self._game.exe_name_alts)
@@ -715,6 +717,8 @@ class ReconfigureGamePanel(ctk.CTkFrame):
 
     def _on_browse_prefix(self):
         def _apply(chosen: Optional[Path]):
+            if not self._prefix_status_label.winfo_exists():
+                return
             if chosen:
                 if chosen.name.lower() != "pfx" and (chosen / "pfx").is_dir():
                     chosen = chosen / "pfx"
@@ -733,6 +737,8 @@ class ReconfigureGamePanel(ctk.CTkFrame):
 
     def _on_browse_staging(self):
         def _apply(chosen: Optional[Path]):
+            if not self._staging_status_label.winfo_exists():
+                return
             if chosen:
                 chosen = chosen / self._game.game_id
                 self._set_staging(chosen, status="found")

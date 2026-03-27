@@ -977,9 +977,7 @@ class App(ctk.CTk):
                 game = _GAMES.get(self._topbar._game_var.get())
                 if game and game.is_configured():
                     self._plugin_panel._vanilla_plugins = _vanilla_plugins_for_game(game)
-                    self._plugin_panel._staging_root = (
-                        self._mod_panel._modlist_path.parent.parent.parent / "mods"
-                    )
+                    self._plugin_panel._staging_root = game.get_effective_mod_staging_path()
                 data_dir = (
                     game.get_vanilla_plugins_path()
                     if game and game.is_configured() and hasattr(game, 'get_vanilla_plugins_path')

@@ -42,6 +42,7 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 | Starfield | |
 | Oblivion | |
 | Oblivion Remastered | |
+| Morrowind | |
 | Baldur's Gate 3 | |
 | Witcher 3 | |
 | Cyberpunk 2077 | |
