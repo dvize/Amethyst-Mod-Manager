@@ -105,6 +105,8 @@ class BaldursGate3(BaseGame):
             CustomRule(dest="Data", folders=["public"]),
             CustomRule(dest="Data", folders=["video"]),
             CustomRule(dest="Data", folders=["mods"]),
+            CustomRule(dest="Data", folders=["Cursors"]),
+            CustomRule(dest="bin", filenames=["DWrite.dll"]),
             CustomRule(dest="", folders=["bin"]),
             CustomRule(dest="", folders=["data"]),
         ]
@@ -116,6 +118,17 @@ class BaldursGate3(BaseGame):
     @property
     def conflict_ignore_filenames(self) -> set[str]:
         return {"info.json","*.txt"}
+    
+    @property
+    def frameworks(self) -> dict[str, str]:
+        return {
+                "Script Extender": "bin/DWrite.dll",
+                "Native Mod Loader":"bin/bink2w64.dll"
+            }
+
+    @property
+    def wine_dll_overrides(self) -> dict[str, str]:
+        return {"DWrite": "native,builtin"}
 
     # -----------------------------------------------------------------------
     # Paths

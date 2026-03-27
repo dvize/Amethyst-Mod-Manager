@@ -144,6 +144,8 @@ def cmd_deploy(games: dict, key: str, profile: str):
                 root_deploy_folders=game.mod_root_deploy_folders or None,
                 excluded_mod_files=_exc,
                 conflict_ignore_filenames=getattr(game, "conflict_ignore_filenames", None) or None,
+                normalize_folder_case=getattr(game, "normalize_folder_case", True),
+                conflict_key_fn=getattr(game, "filemap_conflict_key_fn", None),
             )
         except Exception as fm_err:
             _log(f"Filemap rebuild warning: {fm_err}")

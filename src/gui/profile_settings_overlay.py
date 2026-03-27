@@ -5,6 +5,7 @@ Profile Settings overlay — manage profiles (rename/remove) over the modlist pa
 from __future__ import annotations
 
 import shutil
+import threading
 import tkinter as tk
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,6 +30,7 @@ from gui import game_helpers as _gh
 from gui.game_helpers import _profiles_for_game
 from Utils.profile_state import merge_profile_settings, read_profile_settings
 from gui.ctk_components import CTkAlert
+from Utils.mo2_import import validate_mo2_folder, count_mo2_mods, import_mo2
 
 
 class ProfileSettingsOverlay(tk.Frame):
@@ -50,6 +52,7 @@ class ProfileSettingsOverlay(tk.Frame):
         on_close: Optional[Callable[[], None]] = None,
         on_profile_renamed: Optional[Callable[[str, str], None]] = None,
         on_profile_removed: Optional[Callable[[str], None]] = None,
+        on_profiles_changed: Optional[Callable[[], None]] = None,
         log_fn: Optional[Callable[[str], None]] = None,
     ):
         super().__init__(parent, bg=BG_DEEP)
@@ -58,6 +61,7 @@ class ProfileSettingsOverlay(tk.Frame):
         self._on_close = on_close
         self._on_profile_renamed = on_profile_renamed
         self._on_profile_removed = on_profile_removed
+        self._on_profiles_changed = on_profiles_changed
         self._log = log_fn or (lambda msg: None)
 
         self._rename_frame: tk.Frame | None = None
@@ -89,6 +93,12 @@ class ProfileSettingsOverlay(tk.Frame):
             fg_color="#6b3333", hover_color="#8c4444", text_color="white",
             font=FONT_BOLD, command=self._do_close,
         ).pack(side="right", padx=(6, 12), pady=5)
+
+        ctk.CTkButton(
+            toolbar, text="Import MO2", width=100, height=30,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            font=FONT_BOLD, command=self._on_import_mo2,
+        ).pack(side="right", padx=(6, 0), pady=5)
 
         # Content area
         content = tk.Frame(self, bg=BG_DEEP)
@@ -381,6 +391,99 @@ class ProfileSettingsOverlay(tk.Frame):
             return game.get_profile_root() / "profiles" / profile
         from Utils.config_paths import get_profiles_dir
         return get_profiles_dir() / self._game_name / "profiles" / profile
+
+    # ------------------------------------------------------------------
+    # MO2 Import
+    # ------------------------------------------------------------------
+
+    def _on_import_mo2(self):
+        from Utils.portal_filechooser import pick_folder
+
+        pick_folder("Select MO2 Folder",
+                    lambda f: self.after(0, self._on_mo2_folder_chosen, f))
+
+    def _on_mo2_folder_chosen(self, folder: "Path | None"):
+        if folder is None:
+            return
+
+        err = validate_mo2_folder(folder)
+        if err:
+            CTkAlert(
+                state="warning", title="Invalid MO2 Folder",
+                body_text=err, btn1="OK", btn2="",
+                parent=self.winfo_toplevel(),
+            )
+            return
+
+        mod_count = count_mo2_mods(folder)
+        has_overwrite = (folder / "overwrite").is_dir()
+        has_profiles = (folder / "profiles").is_dir()
+
+        parts = [f"{mod_count} mod(s)"]
+        if has_overwrite:
+            parts.append("overwrite folder")
+        if has_profiles:
+            parts.append("profiles folder")
+
+        alert = CTkAlert(
+            state="warning",
+            title="Import from MO2",
+            body_text=(
+                f"This will move the following from:\n{folder}\n\n"
+                f"• {', '.join(parts)}\n\n"
+                "into this game's staging directory.\n\n"
+                "Are you sure?"
+            ),
+            btn1="Import",
+            btn2="Cancel",
+            parent=self.winfo_toplevel(),
+            width=500,
+            height=300,
+        )
+        if alert.get() != "Import":
+            return
+
+        game = _gh._GAMES.get(self._game_name)
+        if game is None:
+            self._log("No game handler found.")
+            return
+
+        staging_root = game.get_profile_root()
+        self._log(f"Importing MO2 mods from {folder} …")
+
+        def _do():
+            try:
+                import_mo2(folder, staging_root, log_fn=self._log)
+                self.after(0, self._mo2_import_done)
+            except Exception as exc:
+                self._log(f"MO2 import failed: {exc}")
+                self.after(0, lambda: CTkAlert(
+                    state="warning", title="Import Failed",
+                    body_text=str(exc), btn1="OK", btn2="",
+                    parent=self.winfo_toplevel(),
+                ))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _mo2_import_done(self):
+        profiles = _profiles_for_game(self._game_name)
+        profile_list = "\n".join(f"  • {p}" for p in profiles)
+        body = f"MO2 profiles have been imported.\n\nAvailable profiles:\n{profile_list}"
+        line_count = body.count("\n") + 1
+        height = max(220, 140 + line_count * 22)
+        CTkAlert(
+            state="info",
+            title="MO2 Import Complete",
+            body_text=body,
+            btn1="OK",
+            btn2="",
+            parent=self.winfo_toplevel(),
+            width=450,
+            height=height,
+        )
+        self._populate_list()
+        if self._on_profiles_changed:
+            self._on_profiles_changed()
 
     def _do_close(self):
         if self._on_close:

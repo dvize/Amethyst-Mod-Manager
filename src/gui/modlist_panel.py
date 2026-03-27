@@ -76,6 +76,7 @@ from gui.backup_restore_dialog import BackupRestoreDialog
 
 from Utils.filemap import (
     build_filemap,
+    read_mod_index,
     rebuild_mod_index,
     remove_from_mod_index,
     fix_flat_staging_folders,
@@ -302,6 +303,13 @@ class ModListPanel(ctk.CTkFrame):
             self._icon_warning = ImageTk.PhotoImage(
                 PilImage.open(_warning_path).convert("RGBA").resize((_icon_sz, _icon_sz), PilImage.LANCZOS))
 
+        # Pre-RTX mod info icon
+        self._icon_info: ImageTk.PhotoImage | None = None
+        _info_path = _ICONS_DIR / "info.png"
+        if _info_path.is_file():
+            self._icon_info = ImageTk.PhotoImage(
+                PilImage.open(_info_path).convert("RGBA").resize((_icon_sz, _icon_sz), PilImage.LANCZOS))
+
         # Endorsed mod tick icon
         self._icon_endorsed: ImageTk.PhotoImage | None = None
         _tick_path = _ICONS_DIR / "tick.png"
@@ -340,9 +348,13 @@ class ModListPanel(ctk.CTkFrame):
 
         # Tooltip state (missing requirements hover)
         self._tooltip_win: tk.Toplevel | None = None
+        self._tooltip_text: str = ""
 
         # Set of mod names the user has endorsed on Nexus
         self._endorsed_mods: set[str] = set()
+
+        # Set of mod names that contain pre-RTX (natives/x64) files
+        self._prertx_mods: set[str] = set()
 
         # Map mod name → install date display string
         self._install_dates: dict[str, str] = {}
@@ -452,7 +464,10 @@ class ModListPanel(ctk.CTkFrame):
         self._pool_data_idx: list[int] = []          # slot → entry index (-1 = unused)
         self._pool_bg: list[int] = []                # rectangle canvas item ids
         self._pool_name: list[int] = []              # text canvas item ids (mod name / sep label)
-        self._pool_flag_icon: list[int] = []         # image canvas item ids (flags column)
+        self._pool_flag_icon: list[int] = []         # image canvas item ids (flags column, slot 1)
+        self._pool_flag_icon2: list[int] = []        # image canvas item ids (flags column, slot 2)
+        self._pool_flag_icon3: list[int] = []        # image canvas item ids (flags column, slot 3)
+        self._pool_flag_star: list[int] = []         # text canvas item ids (lock star in flags column)
         self._pool_conflict_icon1: list[int] = []    # image canvas item ids (conflict col left)
         self._pool_conflict_icon2: list[int] = []    # image canvas item ids (conflict col right)
         self._pool_category_text: list[int] = []     # text canvas item ids (category)
@@ -803,6 +818,16 @@ class ModListPanel(ctk.CTkFrame):
         close_btn.bind("<Enter>",    lambda _e: close_btn.configure(fg=TEXT_MAIN))
         close_btn.bind("<Leave>",    lambda _e: close_btn.configure(fg=TEXT_DIM))
 
+        # Clear all button
+        clear_btn = tk.Label(
+            header, text="Clear all", bg=BG_HEADER, fg=TEXT_DIM,
+            font=_theme.FONT_SMALL, cursor="hand2",
+        )
+        clear_btn.pack(side="right", padx=(0, 4))
+        clear_btn.bind("<Button-1>", lambda _e: self._clear_all_filters())
+        clear_btn.bind("<Enter>",    lambda _e: clear_btn.configure(fg=TEXT_MAIN))
+        clear_btn.bind("<Leave>",    lambda _e: clear_btn.configure(fg=TEXT_DIM))
+
         # Separator
         tk.Frame(panel, bg=BORDER, height=1).pack(fill="x")
 
@@ -909,6 +934,14 @@ class ModListPanel(ctk.CTkFrame):
             ).pack(anchor="w", pady=2)
 
         self._bind_filter_panel_scroll()
+
+    def _clear_all_filters(self):
+        """Reset all filter checkboxes to unchecked."""
+        for v in self._fsp_vars.values():
+            v.set(False)
+        for v in self._fsp_category_vars.values():
+            v.set(False)
+        self._apply_modlist_filters({"filter_categories": frozenset()})
 
     def _on_filter_panel_change(self):
         """Called when any checkbox in the inline filter panel changes."""
@@ -1647,8 +1680,12 @@ class ModListPanel(ctk.CTkFrame):
             # Mod name / separator label text
             name_id = c.create_text(0, -200, text="", anchor="w", fill="",
                                     font=("Segoe UI", _theme.FS11), state="hidden")
-            # Flags column icon (warning / lock star / update / endorsed)
+            # Flags column icons (up to 3 icons + lock star text)
             flag_id = c.create_image(0, -200, anchor="center", state="hidden")
+            flag2_id = c.create_image(0, -200, anchor="center", state="hidden")
+            flag3_id = c.create_image(0, -200, anchor="center", state="hidden")
+            flag_star_id = c.create_text(0, -200, text="★", anchor="center", fill="#e5c07b",
+                                         font=("Segoe UI", _theme.FS11), state="hidden")
             # Conflict icons (left slot and right slot)
             conf1_id = c.create_image(0, -200, anchor="center", state="hidden")
             conf2_id = c.create_image(0, -200, anchor="center", state="hidden")
@@ -1673,6 +1710,9 @@ class ModListPanel(ctk.CTkFrame):
             self._pool_bg.append(bg_id)
             self._pool_name.append(name_id)
             self._pool_flag_icon.append(flag_id)
+            self._pool_flag_icon2.append(flag2_id)
+            self._pool_flag_icon3.append(flag3_id)
+            self._pool_flag_star.append(flag_star_id)
             self._pool_conflict_icon1.append(conf1_id)
             self._pool_conflict_icon2.append(conf2_id)
             self._pool_category_text.append(cat_id)
@@ -1993,6 +2033,9 @@ class ModListPanel(ctk.CTkFrame):
 
                     # Hide mod-only items
                     c.itemconfigure(self._pool_flag_icon[s], state="hidden")
+                    c.itemconfigure(self._pool_flag_icon2[s], state="hidden")
+                    c.itemconfigure(self._pool_flag_icon3[s], state="hidden")
+                    c.itemconfigure(self._pool_flag_star[s], state="hidden")
                     c.itemconfigure(self._pool_category_text[s], state="hidden")
                     c.itemconfigure(self._pool_install_text[s], state="hidden")
                     c.itemconfigure(self._pool_priority_text[s], state="hidden")
@@ -2146,51 +2189,62 @@ class ModListPanel(ctk.CTkFrame):
                     else:
                         c.itemconfigure(self._pool_category_text[s], state="hidden")
 
-                    # Flags icon
-                    flag_x = _FLAG_X + _FLAG_W // 2
-                    if (entry.name in self._missing_reqs
-                            and entry.name not in self._ignored_missing_reqs
-                            and self._icon_warning):
-                        c.coords(self._pool_flag_icon[s], flag_x, y_mid)
-                        c.itemconfigure(self._pool_flag_icon[s],
-                                        image=self._icon_warning, state="normal")
-                    elif entry.locked:
-                        # ★ star drawn as text — reuse install_text slot's text item
-                        # for the star; hide the image icon slot
-                        c.itemconfigure(self._pool_flag_icon[s], state="hidden")
-                        c.coords(self._pool_install_text[s], flag_x, y_mid)
-                        c.itemconfigure(self._pool_install_text[s],
-                                        text="★", anchor="center", fill="#e5c07b",
-                                        font=_FONT_STAR, state="normal")
-                        # secondary icon after star
-                        flag_x2 = flag_x + 18
-                        if entry.name in self._update_mods and self._icon_update:
-                            c.coords(self._pool_priority_text[s], flag_x2, y_mid)
-                            c.itemconfigure(self._pool_priority_text[s],
-                                            text="", state="hidden")
-                            c.coords(self._pool_conflict_icon1[s], flag_x2, y_mid)
-                            c.itemconfigure(self._pool_conflict_icon1[s],
-                                            image=self._icon_update, state="normal")
-                        elif entry.name in self._endorsed_mods and self._icon_endorsed:
-                            c.coords(self._pool_conflict_icon1[s], flag_x2, y_mid)
-                            c.itemconfigure(self._pool_conflict_icon1[s],
-                                            image=self._icon_endorsed, state="normal")
-                        else:
-                            c.itemconfigure(self._pool_conflict_icon1[s], state="hidden")
-                        c.itemconfigure(self._pool_conflict_icon2[s], state="hidden")
-                    elif entry.name in self._update_mods and self._icon_update:
-                        c.coords(self._pool_flag_icon[s], flag_x, y_mid)
-                        c.itemconfigure(self._pool_flag_icon[s],
-                                        image=self._icon_update, state="normal")
-                    elif entry.name in self._endorsed_mods and self._icon_endorsed:
-                        c.coords(self._pool_flag_icon[s], flag_x, y_mid)
-                        c.itemconfigure(self._pool_flag_icon[s],
-                                        image=self._icon_endorsed, state="normal")
-                    else:
-                        c.itemconfigure(self._pool_flag_icon[s], state="hidden")
+                    # Flags column — collect ordered list of icons/items to show side by side.
+                    # Each flag is a tuple: ("img", image_obj) or ("star",).
+                    _flags: list = []
+                    has_missing = (entry.name in self._missing_reqs
+                                   and entry.name not in self._ignored_missing_reqs)
+                    if has_missing and self._icon_warning:
+                        _flags.append(("img", self._icon_warning))
+                    if entry.locked:
+                        _flags.append(("star",))
+                    if entry.name in self._update_mods and self._icon_update:
+                        _flags.append(("img", self._icon_update))
+                    if entry.name in self._endorsed_mods and self._icon_endorsed:
+                        _flags.append(("img", self._icon_endorsed))
+                    if entry.name in self._prertx_mods and self._icon_info:
+                        _flags.append(("img", self._icon_info))
 
-                    # Conflict icons (non-locked rows; locked rows' icons already set above)
-                    if not entry.locked:
+                    # Lay out flags left-aligned inside the flags column (icon spacing = 18px)
+                    _FLAG_ICON_SPACING = 18
+                    _flag_slots = [
+                        (self._pool_flag_icon[s], "img"),
+                        (self._pool_flag_icon2[s], "img"),
+                        (self._pool_flag_icon3[s], "img"),
+                    ]
+                    _flag_star_slot = self._pool_flag_star[s]
+                    # Centre the group within the column
+                    _n_flags = len(_flags)
+                    if _n_flags > 0:
+                        _group_w = (_n_flags - 1) * _FLAG_ICON_SPACING
+                        _fx_start = _FLAG_X + _FLAG_W // 2 - _group_w // 2
+                    else:
+                        _fx_start = _FLAG_X + _FLAG_W // 2
+                    _img_slot_idx = 0
+                    _star_placed = False
+                    for _fi, _flag in enumerate(_flags):
+                        _fx = _fx_start + _fi * _FLAG_ICON_SPACING
+                        if _flag[0] == "star":
+                            c.coords(_flag_star_slot, _fx, y_mid)
+                            c.itemconfigure(_flag_star_slot, state="normal")
+                            _star_placed = True
+                        else:
+                            if _img_slot_idx < len(_flag_slots):
+                                _slot_id = _flag_slots[_img_slot_idx][0]
+                                c.coords(_slot_id, _fx, y_mid)
+                                c.itemconfigure(_slot_id, image=_flag[1], state="normal")
+                                _img_slot_idx += 1
+                    # Hide unused image slots
+                    for _si in range(_img_slot_idx, len(_flag_slots)):
+                        c.itemconfigure(_flag_slots[_si][0], state="hidden")
+                    if not _star_placed:
+                        c.itemconfigure(_flag_star_slot, state="hidden")
+
+                    # Conflict icons
+                    if entry.locked:
+                        c.itemconfigure(self._pool_conflict_icon1[s], state="hidden")
+                        c.itemconfigure(self._pool_conflict_icon2[s], state="hidden")
+                    else:
                         conflict = self._conflict_map.get(entry.name, CONFLICT_NONE)
                         cx = _CONF_X + _CONF_W // 2
                         if conflict == CONFLICT_WINS and self._icon_plus:
@@ -2219,35 +2273,23 @@ class ModListPanel(ctk.CTkFrame):
                             c.itemconfigure(self._pool_conflict_icon1[s], state="hidden")
                             c.itemconfigure(self._pool_conflict_icon2[s], state="hidden")
 
-                        # Install date text
-                        install_text = self._install_dates.get(entry.name, "")
-                        if install_text:
-                            inst_cx = _INST_X + _INST_W // 2
-                            c.coords(self._pool_install_text[s], inst_cx, y_mid)
-                            c.itemconfigure(self._pool_install_text[s],
-                                            text=install_text, anchor="center",
-                                            fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
-                        else:
-                            c.itemconfigure(self._pool_install_text[s], state="hidden")
-
-                        # Priority text
-                        prio_cx = _PRIO_X + _PRIO_W // 2
-                        c.coords(self._pool_priority_text[s], prio_cx, y_mid)
-                        c.itemconfigure(self._pool_priority_text[s],
-                                        text=str(priorities.get(i, "")), anchor="center",
-                                        fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
-                    else:
-                        # locked row — install date / priority still shown
-                        install_text = self._install_dates.get(entry.name, "")
-                        if install_text:
-                            c.coords(self._pool_install_text[s], _INST_X + _INST_W // 2, y_mid)
+                    # Install date text
+                    install_text = self._install_dates.get(entry.name, "")
+                    if install_text:
+                        inst_cx = _INST_X + _INST_W // 2
+                        c.coords(self._pool_install_text[s], inst_cx, y_mid)
                         c.itemconfigure(self._pool_install_text[s],
                                         text=install_text, anchor="center",
                                         fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
-                        c.coords(self._pool_priority_text[s], _PRIO_X + _PRIO_W // 2, y_mid)
-                        c.itemconfigure(self._pool_priority_text[s],
-                                        text=str(priorities.get(i, "")), anchor="center",
-                                        fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
+                    else:
+                        c.itemconfigure(self._pool_install_text[s], state="hidden")
+
+                    # Priority text
+                    prio_cx = _PRIO_X + _PRIO_W // 2
+                    c.coords(self._pool_priority_text[s], prio_cx, y_mid)
+                    c.itemconfigure(self._pool_priority_text[s],
+                                    text=str(priorities.get(i, "")), anchor="center",
+                                    fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
 
                     # Enable/disable control (canvas-drawn)
                     # Bundle variants → radio circle (● / ○); normal mods → checkbox
@@ -3228,6 +3270,8 @@ class ModListPanel(ctk.CTkFrame):
 
     def _show_tooltip(self, x: int, y: int, text: str) -> None:
         """Show a tooltip window near the given screen coordinates."""
+        if self._tooltip_win is not None and self._tooltip_text == text:
+            return
         self._hide_tooltip()
         tw = tk.Toplevel(self)
         tw.withdraw()
@@ -3246,11 +3290,13 @@ class ModListPanel(ctk.CTkFrame):
         tw.wm_geometry(f"+{tip_x}+{y + 8}")
         tw.deiconify()
         self._tooltip_win = tw
+        self._tooltip_text = text
 
     def _hide_tooltip(self) -> None:
         if self._tooltip_win:
             self._tooltip_win.destroy()
             self._tooltip_win = None
+            self._tooltip_text = ""
 
     def _on_mouse_motion(self, event):
         """Update hover highlight as the mouse moves over the modlist."""
@@ -3265,7 +3311,8 @@ class ModListPanel(ctk.CTkFrame):
             self._hover_idx = new_hover
             self._redraw()
 
-        # Show tooltip when hovering over the flags column icons
+        # Show tooltip when hovering over the flags column icons.
+        # Replicate the same layout logic as _redraw() to find which icon the cursor is over.
         x = event.x
         flag_slot = self._col_pos.get(3, 3)
         flags_col_start = self._COL_X[flag_slot]
@@ -3273,19 +3320,51 @@ class ModListPanel(ctk.CTkFrame):
         if flags_col_start <= x < flags_col_end and 0 <= row < len(vis):
             entry = self._entries[vis[row]]
             if not entry.is_separator:
-                if (entry.name in self._missing_reqs
-                        and entry.name not in self._ignored_missing_reqs):
-                    missing = self._missing_reqs_detail.get(entry.name, [])
-                    if missing:
-                        text = "Missing requirements:\n" + "\n".join(f"  - {m}" for m in missing)
-                    else:
-                        text = "Missing requirements"
-                    if self._tooltip_win is None:
-                        self._show_tooltip(event.x_root, event.y_root, text)
-                    return
+                # Build the same ordered flag list as _redraw()
+                _FLAG_ICON_SPACING = 18
+                _HIT_RADIUS = _FLAG_ICON_SPACING // 2
+                _flag_tooltips: list[tuple[int, str]] = []  # (center_x, tooltip_text)
+                _flag_x_start: int = 0
+                _FLAG_X = flags_col_start
+                _FLAG_W = self._COL_W[flag_slot]
+                has_missing = (entry.name in self._missing_reqs
+                               and entry.name not in self._ignored_missing_reqs)
+                _items: list[str] = []
+                if has_missing:
+                    _items.append("missing")
+                if entry.locked:
+                    _items.append("star")
                 if entry.name in self._update_mods:
-                    if self._tooltip_win is None:
-                        self._show_tooltip(event.x_root, event.y_root, "Update available on Nexus Mods")
+                    _items.append("update")
+                if entry.name in self._endorsed_mods:
+                    _items.append("endorsed")
+                if entry.name in self._prertx_mods:
+                    _items.append("prertx")
+                _n = len(_items)
+                if _n > 0:
+                    _group_w = (_n - 1) * _FLAG_ICON_SPACING
+                    _fx_start = _FLAG_X + _FLAG_W // 2 - _group_w // 2
+                    for _fi, _kind in enumerate(_items):
+                        _fx = _fx_start + _fi * _FLAG_ICON_SPACING
+                        if _kind == "missing":
+                            missing = self._missing_reqs_detail.get(entry.name, [])
+                            tip = ("Missing requirements:\n" + "\n".join(f"  - {m}" for m in missing)
+                                   if missing else "Missing requirements")
+                        elif _kind == "update":
+                            tip = "Update available on Nexus Mods"
+                        elif _kind == "prertx":
+                            tip = "Pre-RTX mod"
+                        else:
+                            tip = ""
+                        if tip:
+                            _flag_tooltips.append((_fx, tip))
+                    # Find which icon the cursor is closest to (within hit radius)
+                    for _fx, tip in _flag_tooltips:
+                        if abs(x - _fx) <= _HIT_RADIUS:
+                            self._show_tooltip(event.x_root, event.y_root, tip)
+                            return
+                    # Cursor is in the flags column but not over a specific icon —
+                    # keep any existing tooltip rather than flashing it away
                     return
         self._hide_tooltip()
 
@@ -5488,7 +5567,8 @@ class ModListPanel(ctk.CTkFrame):
             self._nexus_browser_panel = None
 
     def show_profile_settings(self, game_name: str, current_profile: str,
-                               on_profile_renamed=None, on_profile_removed=None):
+                               on_profile_renamed=None, on_profile_removed=None,
+                               on_profiles_changed=None):
         """Show the Profile Settings overlay over the modlist panel."""
         from gui.profile_settings_overlay import ProfileSettingsOverlay
         self._close_profile_settings()
@@ -5499,6 +5579,7 @@ class ModListPanel(ctk.CTkFrame):
             on_close=self._close_profile_settings,
             on_profile_renamed=on_profile_renamed,
             on_profile_removed=on_profile_removed,
+            on_profiles_changed=on_profiles_changed,
             log_fn=self._log,
         )
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -5816,6 +5897,14 @@ class ModListPanel(ctk.CTkFrame):
             def _conflict_key_fn(rel_key: str, _g=_captured_game) -> str:
                 dest, final = _g._resolve_entry(rel_key)
                 return (dest + "/" + final) if dest else final
+        elif _captured_game is not None:
+            _conflict_key_fn = getattr(_captured_game, "filemap_conflict_key_fn", None)
+        # Pre-RTX detection: gather the source prefixes that indicate old-format mods
+        # (e.g. "natives/x64/" for RE2/RE3/RE7).
+        _prertx_prefixes: list[str] = []
+        if _captured_game is not None:
+            _path_remap = getattr(_captured_game, "mod_deploy_path_remap", {}) or {}
+            _prertx_prefixes = [k.lower() for k in _path_remap]
         staging_requires_subdir = self._staging_requires_subdir
         normalize_folder_case   = self._normalize_folder_case
         self._filemap_rescan_index = False
@@ -5865,11 +5954,22 @@ class ModListPanel(ctk.CTkFrame):
                 _game = getattr(self, "_game", None)
                 if _game is not None:
                     _game.post_build_filemap(output, staging)
-                self.after(0, lambda: _done(count, conflict_map, overrides, overridden_by, None))
+                # Detect pre-RTX mods: any mod with at least one file under a
+                # remapped source prefix (e.g. natives/x64/).
+                prertx_mods: set[str] = set()
+                if _prertx_prefixes:
+                    _index = read_mod_index(output.parent / "modindex.bin")
+                    if _index:
+                        for mod_name, (normal, _) in _index.items():
+                            for rel_key in normal:
+                                if any(rel_key.startswith(p) for p in _prertx_prefixes):
+                                    prertx_mods.add(mod_name)
+                                    break
+                self.after(0, lambda: _done(count, conflict_map, overrides, overridden_by, None, prertx_mods))
             except Exception as exc:
-                self.after(0, lambda: _done(0, {}, {}, {}, exc))
+                self.after(0, lambda: _done(0, {}, {}, {}, exc, set()))
 
-        def _done(count, conflict_map, overrides, overridden_by, exc):
+        def _done(count, conflict_map, overrides, overridden_by, exc, prertx_mods=set()):
             self._filemap_pending = False
             if exc is not None:
                 self._conflict_map = {}
@@ -5880,6 +5980,7 @@ class ModListPanel(ctk.CTkFrame):
                 self._conflict_map  = conflict_map
                 self._overrides     = overrides
                 self._overridden_by = overridden_by
+                self._prertx_mods   = prertx_mods
                 self._log(f"Filemap updated: {count} file(s).")
             self._vis_dirty = True  # conflict filters depend on conflict_map
             self._redraw()

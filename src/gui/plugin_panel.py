@@ -2271,29 +2271,42 @@ class PluginPanel(ctk.CTkFrame):
         if not rules:
             return entries
 
+        import os
         # Pre-process rules (mirrors deploy_custom_rules logic)
-        _rules = [(r, {f.lower() for f in r.folders}, {e.lower() for e in r.extensions})
-                  for r in rules]
+        _rules = [
+            (r,
+             {f.lower() for f in r.folders},
+             {e.lower() for e in r.extensions},
+             {n.lower() for n in r.filenames})
+            for r in rules
+        ]
 
         def _match(rel_lower: str):
-            import os
             first_seg = rel_lower.split("/")[0]
             ext = os.path.splitext(rel_lower)[1]
-            for rule, folders, exts in _rules:
+            filename = rel_lower.split("/")[-1]
+            for rule, folders, exts, filenames in _rules:
                 if folders and first_seg in folders and (not exts or ext in exts):
-                    return rule
-                if exts and ext in exts and not folders:
-                    return rule
-            return None
+                    return rule, True
+                if exts and ext in exts and not folders and not filenames:
+                    return rule, False
+                if filenames and filename in filenames:
+                    return rule, False
+            return None, False
 
         resolved = []
         for rel_path, mod_name in entries:
             rel_norm = rel_path.replace("\\", "/")
-            rule = _match(rel_norm.lower())
+            rule, folder_match = _match(rel_norm.lower())
             if rule is not None:
                 dest = rule.dest
-                final_rel = rel_norm
-                full_path = dest + "/" + final_rel if dest else final_rel
+                if folder_match:
+                    # full path preserved under dest
+                    full_path = dest + "/" + rel_norm if dest else rel_norm
+                else:
+                    # flat placement — just filename under dest
+                    basename = rel_norm.split("/")[-1]
+                    full_path = dest + "/" + basename if dest else basename
             else:
                 full_path = rel_norm
             resolved.append((full_path, mod_name))
@@ -3214,7 +3227,7 @@ class PluginPanel(ctk.CTkFrame):
                     bg = BG_SELECT
                 elif entry.name.lower() in master_names_lower:
                     bg = "#1a5c1a"
-                elif entry.name in self._highlighted_plugins:
+                elif entry.name.lower() in self._highlighted_plugins:
                     bg = plugin_mod
                 elif actual_idx == self._phover_idx:
                     bg = BG_HOVER_ROW
@@ -3351,7 +3364,7 @@ class PluginPanel(ctk.CTkFrame):
             c.create_rectangle(0, y, 4, y + 3, fill=color, outline="", tags="marker")
 
         for i, e in enumerate(entries):
-            if e.name in self._highlighted_plugins:
+            if e.name.lower() in self._highlighted_plugins:
                 _tick(i, plugin_mod)
             elif e.name.lower() in master_names_lower:
                 _tick(i, "#2a8c2a")
@@ -3517,7 +3530,7 @@ class PluginPanel(ctk.CTkFrame):
                     bg = BG_SELECT
                 elif entry and entry.name.lower() in {m.lower() for m in self._master_highlights}:
                     bg = "#1a5c1a"
-                elif entry and entry.name in self._highlighted_plugins:
+                elif entry and entry.name.lower() in self._highlighted_plugins:
                     bg = plugin_mod
                 elif data_row == self._phover_idx:
                     bg = BG_HOVER_ROW

@@ -502,11 +502,16 @@ class TopBar(ctk.CTkFrame):
                 self._profile_var.set(profiles[0])
                 self._reload_mod_panel()
 
+        def _on_profiles_changed():
+            profiles = _profiles_for_game(game_name)
+            self._profile_menu.configure(values=profiles)
+
         app._mod_panel.show_profile_settings(
             game_name=game_name,
             current_profile=self._profile_var.get(),
             on_profile_renamed=_on_renamed,
             on_profile_removed=_on_removed,
+            on_profiles_changed=_on_profiles_changed,
         )
 
     def _on_remove_profile(self):

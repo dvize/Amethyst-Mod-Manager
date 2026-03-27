@@ -1244,6 +1244,9 @@ class CollectionDetailDialog(tk.Frame):
 
         self._status_var.set(f"Starting install of {len(mods)} mods into '{profile_name}'…")
 
+        # Show a blocking overlay so the user can't click anything during install
+        self._show_install_overlay(len(mods), profile_name)
+
         # Save the old profile dir so we can restore it after install
         old_profile = getattr(self._game, "_active_profile_dir", None)
 
@@ -1301,6 +1304,13 @@ class CollectionDetailDialog(tk.Frame):
                             bar.pack(fill="x", side="top", padx=10, pady=(2, 0),
                                      after=self._status_lbl)
                         bar.set(v)
+                        # Mirror to overlay bar if visible
+                        _obar = getattr(self, "_install_overlay_bar", None)
+                        if _obar is not None:
+                            try:
+                                _obar.set(v)
+                            except Exception:
+                                pass
                     self.after(0, _show_and_set)
             except Exception:
                 pass
@@ -1917,22 +1927,93 @@ class CollectionDetailDialog(tk.Frame):
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Install overlay (blocks interaction while install is running)
+    # ------------------------------------------------------------------
+
+    def _show_install_overlay(self, mod_count: int, profile_name: str):
+        """Show a semi-transparent overlay that blocks all interaction."""
+        overlay = tk.Frame(self, bg="#1a1a1a")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+        # Consume all clicks so nothing underneath is reachable
+        overlay.bind("<Button-1>", lambda e: "break")
+        overlay.bind("<ButtonRelease-1>", lambda e: "break")
+
+        inner = tk.Frame(overlay, bg="#2b2b2b", width=500, bd=0, highlightthickness=0)
+        inner.place(relx=0.5, rely=0.5, anchor="center", width=500)
+
+        tk.Label(
+            inner, text=f"Installing {mod_count} mods…" if mod_count else "Installing…",
+            font=("Segoe UI", 16, "bold"), fg="#ffffff", bg="#2b2b2b",
+            bd=0, highlightthickness=0,
+        ).pack(pady=(20, 4))
+        if profile_name:
+            tk.Label(
+                inner, text=f"Profile: {profile_name}",
+                font=("Segoe UI", 12), fg="#aaaaaa", bg="#2b2b2b",
+                bd=0, highlightthickness=0,
+            ).pack(pady=(0, 4))
+
+        # Dedicated overlay status label — mirrors self._status_var
+        tk.Label(
+            inner, textvariable=self._status_var,
+            bg="#2b2b2b", fg="#aaaaaa",
+            font=("Segoe UI", 11), anchor="w", bd=0, highlightthickness=0,
+        ).pack(fill="x", padx=16, pady=(6, 2))
+
+        # Dedicated overlay progress bar
+        overlay_bar = ctk.CTkProgressBar(
+            inner, height=8, progress_color=ACCENT,
+            fg_color=BG_PANEL, corner_radius=4,
+        )
+        overlay_bar.set(0)
+        overlay_bar.pack(fill="x", padx=16, pady=(2, 16))
+
+        self._install_overlay = overlay
+        self._install_overlay_bar = overlay_bar
+
+    def _dismiss_install_overlay(self):
+        """Remove the install overlay."""
+        overlay = getattr(self, "_install_overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay.destroy()
+        except Exception:
+            pass
+        self._install_overlay = None
+        self._install_overlay_bar = None
+
     def _on_install_done(self, installed: int, skipped: int, total: int, profile_name: str):
+        self._dismiss_install_overlay()
         self._status_var.set(
             f"Done — {installed}/{total} mods installed into profile '{profile_name}'."
             + (f" ({skipped} skipped)" if skipped else "")
         )
         self._log(
-            f"Collection install complete: {installed} installed, {skipped} skipped. "
-            f"Switch to profile '{profile_name}' to use it."
+            f"Collection install complete: {installed} installed, {skipped} skipped."
         )
         try:
             self._install_progress_bar.pack_forget()
         except Exception:
             pass
         self._refresh_profile_menu()
+        # Auto-switch to the installed collection's profile
+        self._switch_to_profile(profile_name)
         self._update_reset_btn_visibility()
         self._update_open_missing_btn_visibility()
+
+    def _switch_to_profile(self, profile_name: str):
+        """Switch the app to the given profile."""
+        try:
+            topbar = getattr(self._app_root, "_topbar", None)
+            if topbar is None:
+                return
+            topbar._profile_var.set(profile_name)
+            topbar._on_profile_change(profile_name)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Install-progress reconnect (survives panel close/reopen)
@@ -1941,6 +2022,9 @@ class CollectionDetailDialog(tk.Frame):
         """If an install is already running for this collection, start polling it."""
         slug = self._collection.slug or ""
         if slug and slug in _ACTIVE_INSTALLS:
+            state = _ACTIVE_INSTALLS[slug]
+            if not state.get("done") and not getattr(self, "_install_overlay", None):
+                self._show_install_overlay(0, "")
             self._poll_install_progress()
 
     def _poll_install_progress(self) -> None:
@@ -1967,6 +2051,7 @@ class CollectionDetailDialog(tk.Frame):
                 pass
 
         if state.get("done"):
+            self._dismiss_install_overlay()
             # Final refresh so buttons update
             try:
                 self._update_reset_btn_visibility()

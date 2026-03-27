@@ -1,3 +1,16 @@
+- v1.1
+- Added Morrowind
+- Added Blade and Sorcery (Custom game handler)
+- Added a collections install progress bar
+- Selecting a plugin on the plugins panel will highlight it's master/s (if any) in green
+- Added a Mo2 import button in the profile settings window
+- Added .tex conversion for resident evil 2,3 and 7 for pre rtx mods
+- Pre rtx mods for re engine games are flagged for visibility
+- Flags in the modlist panel no longer stack and are shown side by side.
+- Added a clear all filters button to the filters panel
+- Added detection of Bg3 Script extender and native mod loader
+- Optimised the resolve loop during deploy, The resolve step is now near instant. ~100k deployed files down to ~0.5 seconds from 10-15 seconds.
+
 - v1.0.15
 - Fixed some fomod folders not installing correctly due to case mismatch between the extraced file and what is in the xml file.
 - Manually installing a mod while not logged into nexus now creates the meta.ini correctly

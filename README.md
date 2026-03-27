@@ -58,7 +58,7 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 <tr><td>Subnautica</td><td></td><td></td><td></td></tr>
 <tr><td>Subnautica Below Zero</td><td></td><td></td><td></td></tr>
 </table>
-- The manager now has the ability to define custom games. See the Wiki for the guide
+- The manager has the ability to define custom games. See the Wiki for the guide
 
 ## Usage
 
@@ -86,7 +86,6 @@ The manager has the ability to add Nexus collections straight into the manager. 
 - Collections are installed as separate profiles and can be switched between, letting you easily swap modlists.
 - There are some limitations, Not all collections will work fully due to missing mods or our game handlers coming across a mod that has been shipped/packaged in an unusual fashion. Some may require some manual intervention to get to work.
 
-
 ## Supporting Applications
 
 The manager supports many supporting applications used to mod games. Place the applications in the games applications folder (**In the staging folder**) and they will be auto detected. The arguments/config used to run them will be auto-generated to make setup easier.
@@ -112,7 +111,7 @@ The manager supports many supporting applications used to mod games. Place the a
 
 The other xedit applications for the other games also work as well as the quickautoclean applications.
 
-## WIKI
+## Wiki
 
 See the wiki page for a detailed guide on how to the use the mod manager and its functions
 

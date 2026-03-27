@@ -29,9 +29,19 @@ import json
 import os
 import shutil
 import time as _time
+from contextlib import contextmanager as _contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
+
+
+@_contextmanager
+def _timer(label: str):
+    """Print elapsed wall-clock time for a labelled block to stderr."""
+    t0 = _time.perf_counter()
+    yield
+    dt = _time.perf_counter() - t0
+    print(f"  [TIMER] {label}: {dt:.3f}s")
 
 
 def load_per_mod_strip_prefixes(profile_dir: Path) -> dict[str, list[str]]:
@@ -283,10 +293,12 @@ class CustomRule:
     - extension-only match: file placed as game_root/dest/<filename> (flat)
     - folder match (with or without extension): file placed as
       game_root/dest/<original rel_path> (full path preserved)
+    - filename match: file placed flat as game_root/dest/<filename>
     """
     dest: str
     extensions: list[str] = field(default_factory=list)
     folders: list[str] = field(default_factory=list)
+    filenames: list[str] = field(default_factory=list)
 
 
 _CUSTOM_RULES_LOG_NAME = "custom_rules_deployed.txt"
@@ -358,15 +370,17 @@ def move_to_core(
         return 0
 
     # Count files before the move so we can report the number moved.
-    count = sum(1 for _ in deploy_dir.rglob("*") if _.is_file())
+    with _timer("move_to_core — count files"):
+        count = sum(1 for _ in deploy_dir.rglob("*") if _.is_file())
     if not count:
         core_dir.mkdir(parents=True, exist_ok=True)
         return 0
 
     # Same filesystem → os.rename is a single instant syscall.
     # shutil.move falls back to copy+delete if cross-device.
-    core_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(deploy_dir), str(core_dir))
+    with _timer("move_to_core — rename dir"):
+        core_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(deploy_dir), str(core_dir))
 
     # Recreate the (now-empty) deploy dir so downstream code finds it.
     deploy_dir.mkdir(parents=True, exist_ok=True)
@@ -588,11 +602,39 @@ def deploy_filemap(
     mod_index_cache: dict[Path, dict[str, Path]] = {}
     dst_dir_cache: dict[Path, dict[str, str]] = {}
 
+    _t_resolve_start = _time.perf_counter()
     with filemap_path.open(encoding="utf-8") as f:
         _tab_lines = [ln.rstrip("\n") for ln in f if "\t" in ln]
     total_lines = len(_tab_lines)
     line_idx = 0
 
+    # Pre-build per-mod file indexes for all mods referenced in the filemap.
+    # This replaces thousands of stat() calls with one os.walk per mod folder.
+    _mod_names_in_filemap: set[str] = set()
+    for _ln in _tab_lines:
+        _tab_pos = _ln.find("\t")
+        if _tab_pos > 0:
+            _mod_names_in_filemap.add(_ln[_tab_pos + 1:])
+
+    for _mn in _mod_names_in_filemap:
+        _mr = overwrite_dir if _mn == _OVERWRITE_NAME else staging_root / _mn
+        if _mr not in mod_index_cache:
+            mod_index_cache[_mr] = _build_mod_index(_mr)
+    print(f"  [TIMER] deploy_filemap — pre-build mod indexes ({len(_mod_names_in_filemap)} mods): "
+          f"{_time.perf_counter() - _t_resolve_start:.3f}s")
+
+    _t_resolve_loop = _time.perf_counter()
+    _index_hits = 0
+    _slow_hits = 0
+    _t_src_acc = 0.0
+    _t_dst_acc = 0.0
+    # Cache mod_root Path objects — avoids 92k Path / operations for ~520 mods
+    _mod_root_cache: dict[str, Path] = {}
+    # String-based caches for _resolve_root_path_str
+    _deploy_dir_str = str(deploy_dir)
+    _core_base_str = str(core_dir) if core_dir is not None else None
+    _dir_listing_cache: dict[str, dict[str, str]] = {}
+    _resolved_dir_cache: dict[str, str] = {}
     for line in _tab_lines:
         rel_str, mod_name = line.split("\t", 1)
         rel_lower = rel_str.lower()
@@ -603,25 +645,50 @@ def deploy_filemap(
             continue
         line_idx += 1
 
-        src_str = _resolve_source(
-            mod_name, rel_str, rel_lower, overwrite_dir, staging_root,
-            _overwrite_str, _staging_str, sorted_strip, _per_mod,
-            nocase_cache, mod_index_cache,
-        )
+        # --- Fast path: O(1) mod-index lookup (no syscall) ---
+        _t0 = _time.perf_counter()
+        _mr = _mod_root_cache.get(mod_name)
+        if _mr is None:
+            _mr = overwrite_dir if mod_name == _OVERWRITE_NAME else staging_root / mod_name
+            _mod_root_cache[mod_name] = _mr
+        _idx = mod_index_cache.get(_mr)
+        src_str: str | None = None
+        if _idx is not None:
+            _hit = _idx.get(rel_lower)
+            if _hit is not None:
+                src_str = _hit if isinstance(_hit, str) else str(_hit)
+                _index_hits += 1
+        if src_str is None:
+            # Fall back to full resolve (stat-based)
+            src_str = _resolve_source(
+                mod_name, rel_str, rel_lower, overwrite_dir, staging_root,
+                _overwrite_str, _staging_str, sorted_strip, _per_mod,
+                nocase_cache, mod_index_cache,
+            )
+            if src_str is not None:
+                _slow_hits += 1
+        _t_src_acc += _time.perf_counter() - _t0
         if src_str is None:
             _log(f"  WARN: source not found — {rel_str} ({mod_name})")
             continue
 
+        _t0 = _time.perf_counter()
         effective_dir = _per_deploy.get(mod_name, deploy_dir)
-        _core = core_dir if effective_dir is deploy_dir else None
-        dst_path = _resolve_root_path(effective_dir, Path(rel_str), dir_cache=dst_dir_cache, core_base=_core)
-        dst_str = str(dst_path)
+        _core_s = _core_base_str if effective_dir is deploy_dir else None
+        _eff_s = _deploy_dir_str if effective_dir is deploy_dir else str(effective_dir)
+        dst_str = _resolve_root_path_str(_eff_s, rel_str, _dir_listing_cache,
+                                         core_base_str=_core_s,
+                                         resolved_dir_cache=_resolved_dir_cache)
         use_symlink = symlink_exts is not None and os.path.splitext(src_str)[1].lower() in symlink_exts
         tasks.append((src_str, dst_str, rel_lower, effective_dir is not deploy_dir, use_symlink))
+        _t_dst_acc += _time.perf_counter() - _t0
 
         if progress_fn is not None and line_idx % 500 == 0:
             progress_fn(line_idx, total_lines)
 
+    print(f"  [TIMER] deploy_filemap — resolve loop: {_time.perf_counter() - _t_resolve_loop:.3f}s "
+          f"(index={_index_hits}, slow={_slow_hits})")
+    print(f"  [TIMER]   src resolve: {_t_src_acc:.3f}s, dst resolve: {_t_dst_acc:.3f}s")
     total = len(tasks)
     if total == 0:
         return 0, placed_lower
@@ -637,9 +704,10 @@ def deploy_filemap(
 
     # Pre-create all destination directories up front (single-threaded) to
     # avoid mkdir races inside the thread pool.
-    needed_dirs: set[str] = {os.path.dirname(dst) for _, dst, _, _is_custom, _ in tasks}
-    for d in needed_dirs:
-        os.makedirs(d, exist_ok=True)
+    with _timer("deploy_filemap — mkdir"):
+        needed_dirs: set[str] = {os.path.dirname(dst) for _, dst, _, _is_custom, _ in tasks}
+        for d in needed_dirs:
+            os.makedirs(d, exist_ok=True)
 
     # Back up any pre-existing files at custom deploy locations so restore can
     # put the originals back.  Mirror each dst's absolute path as a relative
@@ -669,6 +737,7 @@ def deploy_filemap(
             return rel_lower, None
         return None, (dst, err)
 
+    _t_transfer = _time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         for result, err in pool.map(_do_transfer, tasks):
             done_count += 1
@@ -680,6 +749,7 @@ def deploy_filemap(
                 _log(f"  WARN: could not transfer {dst_err}: {exc}")
             if progress_fn is not None and (done_count % 200 == 0 or done_count == total):
                 progress_fn(done_count, total)
+    print(f"  [TIMER] deploy_filemap — transfer {total} files: {_time.perf_counter() - _t_transfer:.3f}s")
 
     # Write a log of files placed in custom locations so cleanup knows what to
     # remove.  Each line is the absolute path of a deployed file.
@@ -730,6 +800,7 @@ def deploy_core(
     _core_str = str(core_dir)
     _core_prefix_len = len(_core_str) + 1  # +1 for the trailing separator
 
+    _t_core_walk = _time.perf_counter()
     tasks_core: list[tuple[str, str]] = []  # (src_str, rel_str)
     for dirpath, _dirnames, filenames in os.walk(_core_str):
         for fname in filenames:
@@ -737,6 +808,7 @@ def deploy_core(
             rel_str = src_str[_core_prefix_len:]
             if rel_str.replace("\\", "/").lower() not in already_placed:
                 tasks_core.append((src_str, rel_str))
+    print(f"  [TIMER] deploy_core — walk + filter: {_time.perf_counter() - _t_core_walk:.3f}s")
 
     if not tasks_core:
         return 0
@@ -768,6 +840,7 @@ def deploy_core(
         err = _do_link(src, dst_str, mode)
         return (True, dst_str, None) if err is None else (False, dst_str, err)
 
+    _t_core_transfer = _time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         for ok, rel_str, exc in pool.map(_do_core, resolved_tasks):
             done_count += 1
@@ -777,6 +850,7 @@ def deploy_core(
                 _log(f"  WARN: could not transfer {rel_str}: {exc}")
             if progress_fn is not None:
                 progress_fn(done_count, total)
+    print(f"  [TIMER] deploy_core — transfer {total} files: {_time.perf_counter() - _t_core_transfer:.3f}s")
 
     return linked
 
@@ -814,19 +888,22 @@ def _resolve_root_path(base: Path, rel: Path,
         part_lower = part.lower()
         # Check if a directory with this name (any case) already exists.
         matched: str | None = None
-        if current.is_dir():
-            if dir_cache is not None:
-                if current not in dir_cache:
-                    try:
+        if dir_cache is not None:
+            if current not in dir_cache:
+                try:
+                    if current.is_dir():
                         dir_cache[current] = {
                             e.name.lower(): e.name
                             for e in current.iterdir()
                             if e.is_dir()
                         }
-                    except OSError:
+                    else:
                         dir_cache[current] = {}
-                matched = dir_cache[current].get(part_lower)
-            else:
+                except OSError:
+                    dir_cache[current] = {}
+            matched = dir_cache[current].get(part_lower)
+        else:
+            if current.is_dir():
                 try:
                     for entry in current.iterdir():
                         if entry.is_dir() and entry.name.lower() == part_lower:
@@ -840,11 +917,14 @@ def _resolve_root_path(base: Path, rel: Path,
             if dir_cache is not None:
                 if core_current not in dir_cache:
                     try:
-                        dir_cache[core_current] = {
-                            e.name.lower(): e.name
-                            for e in core_current.iterdir()
-                            if e.is_dir()
-                        }
+                        if core_current.is_dir():
+                            dir_cache[core_current] = {
+                                e.name.lower(): e.name
+                                for e in core_current.iterdir()
+                                if e.is_dir()
+                            }
+                        else:
+                            dir_cache[core_current] = {}
                     except OSError:
                         dir_cache[core_current] = {}
                 matched = dir_cache[core_current].get(part_lower)
@@ -860,6 +940,87 @@ def _resolve_root_path(base: Path, rel: Path,
         current = current / chosen
         core_current = (core_current / chosen) if core_current is not None else None
     return current / parts[-1]
+
+
+def _resolve_root_path_str(base_str: str, rel_str: str,
+                           dir_listing_cache: "dict[str, dict[str, str]]",
+                           core_base_str: "str | None" = None,
+                           resolved_dir_cache: "dict[str, str] | None" = None) -> str:
+    """Fast string-based variant of _resolve_root_path for bulk deploy.
+
+    Instead of creating Path objects per call, works entirely with strings
+    and caches the fully-resolved directory path so files sharing the same
+    parent directory skip all resolution after the first.
+
+    dir_listing_cache — maps dir_path_str → {lower_name: actual_name}
+    resolved_dir_cache — maps (base_str + "!" + dir_parts_lower) → resolved_dir_str
+    """
+    # Split rel_str into directory part and filename
+    slash_pos = rel_str.rfind("/")
+    if slash_pos < 0:
+        # No directory component — file directly under base
+        return base_str + "/" + rel_str
+
+    dir_part = rel_str[:slash_pos]
+    filename = rel_str[slash_pos + 1:]
+    dir_lower = dir_part.lower()
+
+    # Check resolved dir cache first — covers the common case where many
+    # files share the same directory.
+    if resolved_dir_cache is not None:
+        cache_key = dir_lower
+        cached = resolved_dir_cache.get(cache_key)
+        if cached is not None:
+            return cached + "/" + filename
+
+    # Walk each directory segment, resolving case
+    parts = dir_part.split("/")
+    current = base_str
+    core_current = core_base_str
+    _isdir = os.path.isdir
+    _scandir = os.scandir
+
+    for part in parts:
+        part_lower = part.lower()
+        matched: str | None = None
+
+        listing = dir_listing_cache.get(current)
+        if listing is None:
+            listing = {}
+            if _isdir(current):
+                try:
+                    with _scandir(current) as it:
+                        for e in it:
+                            if e.is_dir(follow_symlinks=False):
+                                listing[e.name.lower()] = e.name
+                except OSError:
+                    pass
+            dir_listing_cache[current] = listing
+        matched = listing.get(part_lower)
+
+        if matched is None and core_current is not None:
+            core_listing = dir_listing_cache.get(core_current)
+            if core_listing is None:
+                core_listing = {}
+                if _isdir(core_current):
+                    try:
+                        with _scandir(core_current) as it:
+                            for e in it:
+                                if e.is_dir(follow_symlinks=False):
+                                    core_listing[e.name.lower()] = e.name
+                    except OSError:
+                        pass
+                dir_listing_cache[core_current] = core_listing
+            matched = core_listing.get(part_lower)
+
+        chosen = matched if matched is not None else part
+        current = current + "/" + chosen
+        core_current = (core_current + "/" + chosen) if core_current is not None else None
+
+    if resolved_dir_cache is not None:
+        resolved_dir_cache[dir_lower] = current
+
+    return current + "/" + filename
 
 
 def deploy_root_folder(
@@ -940,6 +1101,7 @@ def deploy_root_folder(
             f.write("\n---dirs---\n")
             f.write("\n".join(sorted(created_dirs)))
 
+    print(f"  [TIMER] deploy_root_folder: transferred {len(placed)} files")
     _log(f"  Root Folder: {len(placed)} file(s) transferred to game root.")
     return len(placed)
 
@@ -961,6 +1123,7 @@ def restore_root_folder(
     Silently does nothing if the log file is absent (no prior deploy).
     """
     _log = log_fn or (lambda _: None)
+    _t_root_restore = _time.perf_counter()
 
     log_path   = root_folder_dir.parent / _ROOT_LOG_NAME
     backup_dir = root_folder_dir.parent / _ROOT_BACKUP_NAME
@@ -1035,6 +1198,7 @@ def restore_root_folder(
         except OSError:
             pass
 
+    print(f"  [TIMER] restore_root_folder: {_time.perf_counter() - _t_root_restore:.3f}s")
     _log(f"  Root Folder restore: removed {removed} file(s) from game root.")
     return removed
 
@@ -1097,6 +1261,7 @@ def restore_data_core(
     # Data is the only remaining version and must be rescued to overwrite.
     if overwrite_dir is not None and deploy_dir.is_dir():
         # Build core_lower using os.walk — avoids per-file stat() from rglob+is_file.
+        _t_rescue_start = _time.perf_counter()
         _core_str = str(core_dir)
         _core_plen = len(_core_str) + 1
         core_lower: set[str] = set()
@@ -1142,82 +1307,95 @@ def restore_data_core(
         _overwrite_str = str(overwrite_dir)
         _staging_str = str(_staging) if _staging else ""
         _lstat = os.lstat
-        import stat as _stat_mod
-        for dirpath, _dirnames, filenames in os.walk(_deploy_str, followlinks=False):
-            for fname in filenames:
-                src_str = dirpath + "/" + fname
-                try:
-                    st = _lstat(src_str)
-                except OSError:
-                    continue
-                if _stat_mod.S_ISLNK(st.st_mode):
-                    continue  # deployed mod symlink
-                if not _stat_mod.S_ISREG(st.st_mode):
-                    continue
-                if st.st_nlink > 1:
-                    continue  # deployed mod hardlink
-                rel_str = src_str[_deploy_plen:]
-                rel_lower = rel_str.lower()
-                if rel_lower in core_lower:
-                    continue  # vanilla file — will be restored from core
-                # Check if we would skip as a known mod file
-                in_filemap = rel_lower in filemap_lower
-                in_modindex = rel_lower in modindex_lower
-                if in_filemap or in_modindex:
-                    # xEdit orphan check: if staging source is missing, rescue the
-                    # edited file (e.g. xEdit deleted original from staging on close)
-                    if _staging and _strip:
-                        mods_to_check: list[str] = []
-                        if in_filemap:
-                            m = filemap_rel_to_mod.get(rel_lower)
-                            if m:
-                                mods_to_check.append(m)
-                        if in_modindex:
-                            for m in modindex_rel_to_mods.get(rel_lower, []):
-                                if m and m not in mods_to_check:
+        # Use os.scandir-based walk: DirEntry.is_symlink() and is_file() use
+        # d_type from readdir on Linux — no extra syscall.  Only non-symlink
+        # regular files need a real lstat() to check st_nlink.
+        _scandir = os.scandir
+        _walk_stack = [_deploy_str]
+        while _walk_stack:
+            _cur_dir = _walk_stack.pop()
+            try:
+                _scan_it = _scandir(_cur_dir)
+            except OSError:
+                continue
+            with _scan_it:
+                for _de in _scan_it:
+                    if _de.is_dir(follow_symlinks=False):
+                        _walk_stack.append(_de.path)
+                        continue
+                    if _de.is_symlink():
+                        continue  # deployed mod symlink — free check via d_type
+                    if not _de.is_file(follow_symlinks=False):
+                        continue
+                    src_str = _de.path
+                    try:
+                        st = _lstat(src_str)
+                    except OSError:
+                        continue
+                    if st.st_nlink > 1:
+                        continue  # deployed mod hardlink
+                    rel_str = src_str[_deploy_plen:]
+                    rel_lower = rel_str.lower()
+                    if rel_lower in core_lower:
+                        continue  # vanilla file — will be restored from core
+                    # Check if we would skip as a known mod file
+                    in_filemap = rel_lower in filemap_lower
+                    in_modindex = rel_lower in modindex_lower
+                    if in_filemap or in_modindex:
+                        # xEdit orphan check: if staging source is missing, rescue the
+                        # edited file (e.g. xEdit deleted original from staging on close)
+                        if _staging and _strip:
+                            mods_to_check: list[str] = []
+                            if in_filemap:
+                                m = filemap_rel_to_mod.get(rel_lower)
+                                if m:
                                     mods_to_check.append(m)
-                        staging_path: Path | None = None
-                        target_mod: str | None = None
-                        for mod_name in mods_to_check:
-                            if mod_name == _OVERWRITE_NAME:
-                                mod_root = overwrite_dir
-                            else:
-                                mod_root = _staging / mod_name
-                            found = _get_staging_source_path(mod_root, rel_str, _strip)
-                            if found is not None:
-                                staging_path = found
-                                target_mod = mod_name
-                                break
-                        if staging_path is not None and target_mod is not None:
-                            staging_path.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.move(src_str, str(staging_path))
-                            rescued += 1
-                            rescued_to_mod += 1
-                            continue
-                        # xEdit orphan: staging missing — put file back in original mod or overwrite
-                        target_mod = (
-                            filemap_rel_to_mod.get(rel_lower)
-                            or (modindex_rel_to_mods.get(rel_lower) or [None])[0]
-                        )
-                        if target_mod:
-                            if target_mod == _OVERWRITE_NAME:
-                                dst_str = _overwrite_str + "/" + rel_str
-                                rescued_to_overwrite += 1
-                            else:
-                                dst_str = _staging_str + "/" + target_mod + "/" + rel_str
+                            if in_modindex:
+                                for m in modindex_rel_to_mods.get(rel_lower, []):
+                                    if m and m not in mods_to_check:
+                                        mods_to_check.append(m)
+                            staging_path: Path | None = None
+                            target_mod: str | None = None
+                            for mod_name in mods_to_check:
+                                if mod_name == _OVERWRITE_NAME:
+                                    mod_root = overwrite_dir
+                                else:
+                                    mod_root = _staging / mod_name
+                                found = _get_staging_source_path(mod_root, rel_str, _strip)
+                                if found is not None:
+                                    staging_path = found
+                                    target_mod = mod_name
+                                    break
+                            if staging_path is not None and target_mod is not None:
+                                staging_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(src_str, str(staging_path))
+                                rescued += 1
                                 rescued_to_mod += 1
-                            os.makedirs(os.path.dirname(dst_str), exist_ok=True)
-                            shutil.move(src_str, dst_str)
-                            rescued += 1
-                            continue
-                    else:
-                        continue  # no staging check — skip as before
-                # Genuine runtime-generated file (never in a mod) — goes to overwrite
-                dst_str = _overwrite_str + "/" + rel_str
-                os.makedirs(os.path.dirname(dst_str), exist_ok=True)
-                shutil.move(src_str, dst_str)
-                rescued += 1
-                rescued_to_overwrite += 1
+                                continue
+                            # xEdit orphan: staging missing — put file back in original mod or overwrite
+                            target_mod = (
+                                filemap_rel_to_mod.get(rel_lower)
+                                or (modindex_rel_to_mods.get(rel_lower) or [None])[0]
+                            )
+                            if target_mod:
+                                if target_mod == _OVERWRITE_NAME:
+                                    dst_str = _overwrite_str + "/" + rel_str
+                                    rescued_to_overwrite += 1
+                                else:
+                                    dst_str = _staging_str + "/" + target_mod + "/" + rel_str
+                                    rescued_to_mod += 1
+                                os.makedirs(os.path.dirname(dst_str), exist_ok=True)
+                                shutil.move(src_str, dst_str)
+                                rescued += 1
+                                continue
+                        else:
+                            continue  # no staging check — skip as before
+                    # Genuine runtime-generated file (never in a mod) — goes to overwrite
+                    dst_str = _overwrite_str + "/" + rel_str
+                    os.makedirs(os.path.dirname(dst_str), exist_ok=True)
+                    shutil.move(src_str, dst_str)
+                    rescued += 1
+                    rescued_to_overwrite += 1
         if rescued:
             if rescued_to_mod:
                 _log(f"  Rescued {rescued_to_mod} file(s) back to mod folder(s).")
@@ -1241,18 +1419,24 @@ def restore_data_core(
                     update_mod_index(index_path, _OVERWRITE_NAME, new_normal, existing_root)
                 except Exception:
                     pass
+        print(f"  [TIMER] restore — rescue walk: {_time.perf_counter() - _t_rescue_start:.3f}s")
 
-    removed = _clear_dir(deploy_dir) if deploy_dir.is_dir() else 0
-    _log(f"  Removed {removed} file(s) from {deploy_dir.name}/.")
+    # Count core files before we move anything — we need this for the return
+    # value.  Use os.walk instead of rglob to avoid per-entry stat() calls
+    # (os.walk uses scandir which already knows file vs dir from d_type).
+    with _timer("restore — count core files"):
+        _core_str2 = str(core_dir)
+        restored = 0
+        for _dp2, _dns2, _fns2 in os.walk(_core_str2):
+            restored += len(_fns2)
 
-    # Count files before moving so we can report the number restored.
-    restored = sum(1 for _ in core_dir.rglob("*") if _.is_file())
-
-    # After _clear_dir, deploy_dir is empty — remove it and rename core_dir
-    # in its place.  This is O(1) on the same filesystem vs O(n) per-file moves.
-    if deploy_dir.is_dir():
-        shutil.rmtree(deploy_dir)
-    shutil.move(str(core_dir), str(deploy_dir))
+    # Wipe deploy_dir and rename core_dir in its place — single rmtree + O(1)
+    # rename on the same filesystem.  No need to clear first then rmtree again.
+    with _timer("restore — rmtree + rename"):
+        if deploy_dir.is_dir():
+            shutil.rmtree(deploy_dir)
+        _log(f"  Cleared {deploy_dir.name}/.")
+        shutil.move(str(core_dir), str(deploy_dir))
 
     return restored
 
@@ -1376,6 +1560,8 @@ def deploy_filemap_to_root(
     progress_fn=None,
     exclude: set[str] | None = None,
     path_remap: dict[str, str] | None = None,
+    ext_remap: dict[str, str] | None = None,
+    file_transform=None,
 ) -> tuple[int, set[str]]:
     """Deploy mod files directly into game_root, backing up any files they
     overwrite so restore_filemap_from_root() can undo the operation cleanly.
@@ -1395,6 +1581,11 @@ def deploy_filemap_to_root(
     progress_fn   — optional callable(done: int, total: int)
     path_remap    — optional dict of prefix replacements applied to dest paths
                     e.g. {"natives/x64/": "natives/STM/"} for RE2/RE3
+    ext_remap     — optional dict of file extension substitutions applied to
+                    dest paths, e.g. {".tex.10": ".tex.34"} for RTX-updated RE
+    file_transform — optional callable(src_path: str, dst_path: str) -> str | None
+                     If it returns a new path, that path is used as the source
+                     for the transfer instead (e.g. for TEX format conversion).
 
     Writes a log file next to filemap.txt so restore_filemap_from_root() knows
     exactly which files to remove.
@@ -1409,6 +1600,10 @@ def deploy_filemap_to_root(
     if path_remap:
         for old, new in path_remap.items():
             _remap.append((old.lower(), new))
+    _ext_remap: list[tuple[str, str]] = []
+    if ext_remap:
+        for old_ext, new_ext in ext_remap.items():
+            _ext_remap.append((old_ext.lower(), new_ext))
     overwrite_dir = staging_root.parent / "overwrite"
     backup_dir    = filemap_path.parent / _FILEMAP_BACKUP_DIR
     log_path      = filemap_path.parent / _FILEMAP_LOG_NAME
@@ -1418,6 +1613,7 @@ def deploy_filemap_to_root(
         shutil.rmtree(backup_dir)
 
     already_seen: set[str] = set()
+    already_seen_dst: set[str] = set()  # dedup by final destination path (after all remaps)
     placed_lower: set[str] = set()
     placed_log:   list[str] = []
     tasks: list[tuple[str, str, str, str]] = []  # (src_str, dst_str, rel_lower, rel_str)
@@ -1451,6 +1647,21 @@ def deploy_filemap_to_root(
                 if rel_lower_check.startswith(old_prefix):
                     dst_rel = new_prefix + rel_str[len(old_prefix):]
                     break
+        # Apply file extension remapping (e.g. .tex.10 → .tex.34).
+        if _ext_remap:
+            dst_rel_lower = dst_rel.lower()
+            for old_ext, new_ext in _ext_remap:
+                if dst_rel_lower.endswith(old_ext):
+                    dst_rel = dst_rel[: len(dst_rel) - len(old_ext)] + new_ext
+                    break
+
+        # Skip if a higher-priority entry already resolved to the same destination
+        # (e.g. a mod ships both a .tex.34 and a .tex.10 for the same file, or two
+        # mods cover the same path after prefix/extension remapping).
+        _dst_rel_lower = dst_rel.lower()
+        if _dst_rel_lower in already_seen_dst:
+            continue
+        already_seen_dst.add(_dst_rel_lower)
 
         src_str = _resolve_source(
             mod_name, rel_str, rel_lower, overwrite_dir, staging_root,
@@ -1460,6 +1671,13 @@ def deploy_filemap_to_root(
         if src_str is None:
             _log(f"  WARN: source not found — {rel_str} ({mod_name})")
             continue
+
+        # Apply file transform (e.g. TEX v10→v34 conversion).  The callback
+        # may return a new source path (pointing at a converted temp file).
+        if file_transform is not None:
+            transformed = file_transform(src_str, dst_rel)
+            if transformed is not None:
+                src_str = transformed
 
         dst_path = _resolve_root_path(game_root, Path(dst_rel), dir_cache=dst_dir_cache)
         dst_str = str(dst_path)
@@ -1585,24 +1803,28 @@ def deploy_custom_rules(
     sorted_strip   = sorted(_strip) if _strip else []
 
     # Pre-process rules into normalised form for fast matching
-    _rules: list[tuple[CustomRule, set[str], set[str]]] = []
+    _rules: list[tuple[CustomRule, set[str], set[str], set[str]]] = []
     for rule in rules:
         _rules.append((
             rule,
             {f.lower() for f in rule.folders},
             {e.lower() for e in rule.extensions},
+            {n.lower() for n in rule.filenames},
         ))
 
     def _match_rule(rel_lower: str) -> tuple[CustomRule, bool] | None:
         """Return (rule, folder_match) for the first matching rule, or None."""
         first_seg = rel_lower.split("/")[0]
         ext = os.path.splitext(rel_lower)[1]
-        for rule, folders, exts in _rules:
+        filename = rel_lower.split("/")[-1]
+        for rule, folders, exts, filenames in _rules:
             folder_match = bool(folders and first_seg in folders)
             ext_match    = bool(exts and ext in exts)
             if folder_match and (not exts or ext_match):
                 return rule, True
-            if ext_match and not folders:
+            if ext_match and not folders and not filenames:
+                return rule, False
+            if filenames and filename in filenames:
                 return rule, False
         return None
 
@@ -1807,19 +2029,23 @@ def _get_staging_source_path(mod_root: Path, rel_str: str, strip_prefixes: set[s
         return None
     rel_lower = rel_str.lower()
     idx = _build_mod_index(mod_root)
-    if rel_lower in idx:
-        return idx[rel_lower]
-    for prefix in sorted(strip_prefixes):
-        candidate = (prefix + "/" + rel_str).lower()
-        if candidate in idx:
-            return idx[candidate]
-        for prefix2 in strip_prefixes:
-            if prefix2 == prefix:
-                continue
-            candidate2 = (prefix + "/" + prefix2 + "/" + rel_str).lower()
-            if candidate2 in idx:
-                return idx[candidate2]
-    return None
+    hit = idx.get(rel_lower)
+    if hit is None:
+        for prefix in sorted(strip_prefixes):
+            candidate = (prefix + "/" + rel_str).lower()
+            hit = idx.get(candidate)
+            if hit is not None:
+                break
+            for prefix2 in strip_prefixes:
+                if prefix2 == prefix:
+                    continue
+                candidate2 = (prefix + "/" + prefix2 + "/" + rel_str).lower()
+                hit = idx.get(candidate2)
+                if hit is not None:
+                    break
+            if hit is not None:
+                break
+    return Path(hit) if hit is not None else None
 
 
 def _staging_source_exists(mod_root: Path, rel_str: str, strip_prefixes: set[str]) -> bool:
@@ -1827,19 +2053,21 @@ def _staging_source_exists(mod_root: Path, rel_str: str, strip_prefixes: set[str
     return _get_staging_source_path(mod_root, rel_str, strip_prefixes) is not None
 
 
-def _build_mod_index(mod_root: Path) -> dict[str, Path]:
+def _build_mod_index(mod_root: Path) -> "dict[str, str | Path]":
     """Build a case-insensitive index of all files under mod_root.
 
-    Returns dict mapping lowercase rel_path -> Path for O(1) lookup.
+    Returns dict mapping lowercase rel_path -> full path (str) for O(1) lookup.
     Uses os.walk to avoid stat() per file (walk separates dirs from files).
     """
-    out: dict[str, Path] = {}
+    out: dict[str, str | Path] = {}
+    _root_str = str(mod_root)
+    _root_plen = len(_root_str) + 1  # +1 for the trailing "/"
     try:
-        for dirpath, _dirnames, filenames in os.walk(mod_root):
+        for dirpath, _dirnames, filenames in os.walk(_root_str):
             for name in filenames:
-                full = Path(dirpath) / name
-                rel = full.relative_to(mod_root)
-                out[str(rel).replace("\\", "/").lower()] = full
+                full_str = dirpath + "/" + name
+                rel_lower = full_str[_root_plen:].lower()
+                out[rel_lower] = full_str
     except OSError:
         pass
     return out

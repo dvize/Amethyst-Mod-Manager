@@ -334,6 +334,39 @@ class BaseGame(ABC):
         return {}
 
     @property
+    def filemap_conflict_key_fn(self) -> "Callable[[str], str] | None":
+        """Return a function that normalises a filemap rel_key for conflict detection.
+
+        When two staged paths produce the same conflict key they are treated as
+        the same file.  This is needed when ``mod_deploy_path_remap`` or
+        ``pak_hash_extension_remap`` map different staged paths to the same
+        deployed path (e.g. ``natives/x64/foo.tex.10`` and
+        ``natives/STM/foo.tex.34`` both land at ``natives/STM/foo.tex.34``).
+
+        Returns None (the default) when no normalisation is needed.
+        """
+        _path_remap = self.mod_deploy_path_remap
+        _ext_remap = self.pak_hash_extension_remap
+        if not _path_remap and not _ext_remap:
+            return None
+        _prefix_pairs = [(k.lower(), v.lower()) for k, v in _path_remap.items()]
+        _ext_pairs = [(k.lower(), v.lower()) for k, v in _ext_remap.items()]
+
+        def _normalise(rel_key: str) -> str:
+            k = rel_key.lower()
+            for old_p, new_p in _prefix_pairs:
+                if k.startswith(old_p):
+                    k = new_p + k[len(old_p):]
+                    break
+            for old_e, new_e in _ext_pairs:
+                if k.endswith(old_e):
+                    k = k[: len(k) - len(old_e)] + new_e
+                    break
+            return k
+
+        return _normalise
+
+    @property
     def normalize_folder_case(self) -> bool:
         """
         When True (the default), folder segments that differ only in case across

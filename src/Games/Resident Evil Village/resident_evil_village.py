@@ -31,7 +31,10 @@ Mod structure:
     3. Clean pak_patches/ directory
 """
 
+import errno
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 from Games.base_game import BaseGame
@@ -47,6 +50,7 @@ from Utils.modlist import read_modlist
 from Utils.config_paths import get_profiles_dir
 from Utils.steam_finder import find_prefix
 from Utils.re_pak_patcher import find_pak_files, hash_filepath, patch_pak_file, restore_pak_file
+from Utils.tex_convert import convert_tex_v10_to_v34, tex_needs_conversion
 
 _PROFILES_DIR = get_profiles_dir()
 
@@ -252,15 +256,66 @@ class ResidentEvilVillage(BaseGame):
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
 
         _log("Step 1: Deploying mod files to game root, backing up overwritten vanilla files ...")
-        linked_mod, placed_lower = deploy_filemap_to_root(
-            filemap, self._game_path, staging,
-            mode=mode,
-            strip_prefixes=self.mod_folder_strip_prefixes,
-            per_mod_strip_prefixes=per_mod_strip,
-            log_fn=_log,
-            progress_fn=progress_fn,
-            path_remap=self.mod_deploy_path_remap or None,
-        )
+
+        # Set up TEX conversion for RTX-updated games (RE2/RE3/RE7).
+        # When pak_hash_extension_remap is set, .tex.10 files need both a
+        # header conversion (v10→v34 format) and extension rename on deploy.
+        _tex_ext_remap = self.pak_hash_extension_remap  # e.g. {".tex.10": ".tex.34"}
+        _tex_tmp_dir: str | None = None
+        _file_transform = None
+        if _tex_ext_remap:
+            _tex_tmp_dir = tempfile.mkdtemp(prefix="mm_tex_", dir=profile_dir)
+            _convert_count = [0]
+
+            def _tex_transform(src_path: str, dst_rel: str) -> str | None:
+                """Convert .tex.10 files to .tex.34 format via a temp copy."""
+                src_lower = src_path.lower()
+                for old_ext, new_ext in _tex_ext_remap.items():
+                    if src_lower.endswith(old_ext):
+                        break
+                else:
+                    return None
+                src_p = Path(src_path)
+                if not tex_needs_conversion(src_p):
+                    return None
+                target_ext = int(new_ext.rsplit(".", 1)[-1])
+                converted = Path(_tex_tmp_dir) / f"tex_{_convert_count[0]}{new_ext}"
+                _convert_count[0] += 1
+                try:
+                    if convert_tex_v10_to_v34(src_p, converted, target_extension=target_ext):
+                        return str(converted)
+                except OSError as e:
+                    if e.errno == errno.ENOSPC:
+                        raise RuntimeError(
+                            f"Not enough space in the profile directory to convert TEX files.\n"
+                            f"Free up space on the filesystem containing {profile_dir} and try again."
+                        ) from e
+                    raise
+                return None
+
+            _file_transform = _tex_transform
+
+        try:
+            linked_mod, placed_lower = deploy_filemap_to_root(
+                filemap, self._game_path, staging,
+                mode=mode,
+                strip_prefixes=self.mod_folder_strip_prefixes,
+                per_mod_strip_prefixes=per_mod_strip,
+                log_fn=_log,
+                progress_fn=progress_fn,
+                path_remap=self.mod_deploy_path_remap or None,
+                ext_remap=_tex_ext_remap or None,
+                file_transform=_file_transform,
+            )
+        finally:
+            # Clean up temp converted files (safe for hardlink/copy since the
+            # deployed files are independent copies; skip for symlink mode
+            # since symlinks would point back to these temp files).
+            if _tex_tmp_dir and mode is not LinkMode.SYMLINK:
+                shutil.rmtree(_tex_tmp_dir, ignore_errors=True)
+
+        if _tex_ext_remap and _file_transform:
+            _log(f"  Converted {_convert_count[0]} TEX file(s) from pre-RTX to post-RTX format.")
         _log(f"  Deployed {linked_mod} mod file(s).")
 
         if placed_lower:
