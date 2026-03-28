@@ -210,7 +210,7 @@ class ModFilesOverlay(tk.Frame):
         try:
             files = self._fetch_files_fn()
         except Exception as exc:
-            self.after(0, lambda: self._show_error(str(exc)))
+            self.after(0, lambda e=exc: self._show_error(str(e)))
             return
         self.after(0, lambda: self._populate(files))
 

@@ -176,6 +176,6 @@ class TrackedModsPanel(_NexusModListPanel):
                 self._parent.after(0, _done)
             except Exception as exc:
                 self._parent.after(0,
-                    lambda: self._log(f"Tracked Mods: Untrack failed — {exc}"))
+                    lambda e=exc: self._log(f"Tracked Mods: Untrack failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()

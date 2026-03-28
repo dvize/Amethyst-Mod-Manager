@@ -212,7 +212,7 @@ class TrendingModsPanel(_NexusModListPanel):
                     lambda: self._log(f"Trending: Now tracking '{entry.name}' ({entry.mod_id})."))
             except Exception as exc:
                 self._parent.after(0,
-                    lambda: self._log(f"Trending: Track failed — {exc}"))
+                    lambda e=exc: self._log(f"Trending: Track failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -229,6 +229,6 @@ class TrendingModsPanel(_NexusModListPanel):
                     lambda: self._log(f"Trending: Endorsed '{entry.name}' ({entry.mod_id})."))
             except Exception as exc:
                 self._parent.after(0,
-                    lambda: self._log(f"Trending: Endorse failed — {exc}"))
+                    lambda e=exc: self._log(f"Trending: Endorse failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()

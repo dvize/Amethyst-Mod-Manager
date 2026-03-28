@@ -4812,7 +4812,7 @@ class ModListPanel(ctk.CTkFrame):
                     self._redraw()
                 app.after(0, lambda: _done(result))
             except Exception as exc:
-                app.after(0, lambda: log_fn(f"Nexus: Endorse failed — {exc}"))
+                app.after(0, lambda e=exc: log_fn(f"Nexus: Endorse failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -4848,7 +4848,7 @@ class ModListPanel(ctk.CTkFrame):
                     self._redraw()
                 app.after(0, lambda: _done(result))
             except Exception as exc:
-                app.after(0, lambda: log_fn(f"Nexus: Abstain failed — {exc}"))
+                app.after(0, lambda e=exc: log_fn(f"Nexus: Abstain failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -4982,7 +4982,7 @@ class ModListPanel(ctk.CTkFrame):
                         file_info = f
                         break
             except Exception as exc:
-                app.after(0, lambda: log_fn(f"Nexus: Could not fetch mod info — {exc}"))
+                app.after(0, lambda e=exc: log_fn(f"Nexus: Could not fetch mod info — {e}"))
                 app.after(0, lambda: mod_panel.hide_download_progress(cancel=cancel_event))
                 return
 
@@ -5644,9 +5644,9 @@ class ModListPanel(ctk.CTkFrame):
                     self._scan_meta_flags_async()
                 app.after(0, _done)
             except Exception as exc:
-                app.after(0, lambda: (
+                app.after(0, lambda e=exc: (
                     self._update_btn.configure(text="Check Updates", state="normal"),
-                    log_fn(f"Nexus: Check failed — {exc}"),
+                    log_fn(f"Nexus: Check failed — {e}"),
                 ))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -5955,7 +5955,7 @@ class ModListPanel(ctk.CTkFrame):
                                     break
                 self.after(0, lambda: _done(count, conflict_map, overrides, overridden_by, None, prertx_mods))
             except Exception as exc:
-                self.after(0, lambda: _done(0, {}, {}, {}, exc, set()))
+                self.after(0, lambda e=exc: _done(0, {}, {}, {}, e, set()))
 
         def _done(count, conflict_map, overrides, overridden_by, exc, prertx_mods=set()):
             self._filemap_pending = False

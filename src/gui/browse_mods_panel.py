@@ -490,7 +490,7 @@ class BrowseModsPanel(_NexusModListPanel):
                     lambda: self._log(f"Browse: Now tracking '{entry.name}' ({entry.mod_id})."))
             except Exception as exc:
                 self._parent.after(0,
-                    lambda: self._log(f"Browse: Track failed — {exc}"))
+                    lambda e=exc: self._log(f"Browse: Track failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -507,6 +507,6 @@ class BrowseModsPanel(_NexusModListPanel):
                     lambda: self._log(f"Browse: Endorsed '{entry.name}' ({entry.mod_id})."))
             except Exception as exc:
                 self._parent.after(0,
-                    lambda: self._log(f"Browse: Endorse failed — {exc}"))
+                    lambda e=exc: self._log(f"Browse: Endorse failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()

@@ -732,8 +732,8 @@ class SettingsPanel(ctk.CTkFrame):
                             pass
                     self.after(0, lambda: _done(cleared))
                 except Exception as exc:
-                    self.after(0, lambda: self._cache_status_lbl.configure(
-                        text=f"Failed: {exc}", text_color=TEXT_ERR))
+                    self.after(0, lambda e=exc: self._cache_status_lbl.configure(
+                        text=f"Failed: {e}", text_color=TEXT_ERR))
 
             def _done(n):
                 self._cache_status_lbl.configure(

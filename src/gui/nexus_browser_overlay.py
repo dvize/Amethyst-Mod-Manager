@@ -97,9 +97,9 @@ def install_nexus_mod_from_entry(app, api, game, mod_panel, log_fn, entry,
             elif files_resp.files:
                 file_info = max(files_resp.files, key=lambda f: f.uploaded_timestamp)
         except Exception as exc:
-            app.after(0, lambda: (
+            app.after(0, lambda e=exc: (
                 mod_panel.hide_download_progress(cancel=cancel_ev) if mod_panel else None,
-                log_fn(f"{label}: Could not fetch file list — {exc}"),
+                log_fn(f"{label}: Could not fetch file list — {e}"),
             ))
             return
 

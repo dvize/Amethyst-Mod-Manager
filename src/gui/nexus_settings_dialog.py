@@ -537,8 +537,8 @@ class NexusSettingsPanel(ctk.CTkFrame):
                 app_log(f"OAuth userinfo fields: {list(data.keys())}")
                 self.after(0, lambda: self._set_status(f"✓ Logged in as {name}", TEXT_OK))
             except Exception as exc:
-                self.after(0, lambda: self._set_status(
-                    f"✓ Logged in (could not fetch user info: {exc})", TEXT_OK))
+                self.after(0, lambda e=exc: self._set_status(
+                    f"✓ Logged in (could not fetch user info: {e})", TEXT_OK))
         threading.Thread(target=_worker, daemon=True).start()
 
     def _oauth_on_error(self, msg: str):

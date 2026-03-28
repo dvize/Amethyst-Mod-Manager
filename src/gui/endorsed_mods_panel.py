@@ -187,6 +187,6 @@ class EndorsedModsPanel(_NexusModListPanel):
                 self._parent.after(0, _done)
             except Exception as exc:
                 self._parent.after(0,
-                    lambda: self._log(f"Endorsed Mods: Abstain failed — {exc}"))
+                    lambda e=exc: self._log(f"Endorsed Mods: Abstain failed — {e}"))
 
         threading.Thread(target=_worker, daemon=True).start()

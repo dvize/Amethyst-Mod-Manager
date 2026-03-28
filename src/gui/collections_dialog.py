@@ -2962,7 +2962,7 @@ class CollectionsDialog(tk.Frame):
                 )
                 self.after(0, lambda: self._on_loaded(cols, page, search=False))
             except Exception as exc:
-                self.after(0, lambda: self._on_error(exc))
+                self.after(0, lambda e=exc: self._on_error(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -3018,7 +3018,7 @@ class CollectionsDialog(tk.Frame):
                 )
                 self.after(0, lambda: self._on_search_done(cols, query_text))
             except Exception as exc:
-                self.after(0, lambda: self._on_search_error(exc))
+                self.after(0, lambda e=exc: self._on_search_error(e))
 
         threading.Thread(target=_worker, daemon=True).start()
 
