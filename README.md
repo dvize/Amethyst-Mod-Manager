@@ -51,9 +51,9 @@ curl -sSL https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/s
 <tr><td>Cyberpunk 2077</td><td></td><td>Green Hell</td><td></td></tr>
 <tr><td>Mewgenics</td><td></td><td>Schedule 1</td><td></td></tr>
 <tr><td>Stardew Valley</td><td></td><td>Ready Or Not</td><td></td></tr>
-<tr><td>Kingdom Come Deliverance</td><td>1 and 2</td><td></td><td></td></tr>
-<tr><td>Hogwarts Legacy</td><td></td><td></td><td></td></tr>
-<tr><td>Marvel Rivals</td><td></td><td></td><td></td></tr>
+<tr><td>Kingdom Come Deliverance</td><td>1 and 2</td><td>Monster Hunter World</td><td></td></tr>
+<tr><td>Hogwarts Legacy</td><td></td><td>Monster Hunter Rise</td><td></td></tr>
+<tr><td>Marvel Rivals</td><td></td><td>Monster Hunter Wilds</td><td></td></tr>
 <tr><td>Expedition 33</td><td></td><td></td><td></td></tr>
 <tr><td>Subnautica</td><td></td><td></td><td></td></tr>
 <tr><td>Subnautica Below Zero</td><td></td><td></td><td></td></tr>
