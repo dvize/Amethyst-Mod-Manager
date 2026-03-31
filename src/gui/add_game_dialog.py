@@ -107,7 +107,8 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         self._custom_staging: Optional[Path] = None
         self.result: Optional[Path] = None
         self.removed: bool = False
-        self._deploy_mode_var = tk.StringVar(value="symlink")
+        _default_mode = getattr(game, "default_deploy_mode", "symlink")
+        self._deploy_mode_var = tk.StringVar(value=_default_mode)
         self._symlink_plugins_var = tk.BooleanVar(value=False)
         self._auto_deploy_var = tk.BooleanVar(value=False)
         self._archive_invalidation_var = tk.BooleanVar(value=True)
@@ -325,9 +326,10 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         _deploy_row = ctk.CTkFrame(body, fg_color="transparent")
         _deploy_row.grid(row=16, column=0, sticky="w", padx=16, pady=(0, 10))
 
+        _rec_mode = getattr(self._game, "default_deploy_mode", "symlink")
         _mode_options = [
-            ("Symlink (Recommended)", "symlink"),
-            ("Hardlink",              "hardlink"),
+            ("Symlink (Recommended)" if _rec_mode == "symlink" else "Symlink", "symlink"),
+            ("Hardlink (Recommended)" if _rec_mode == "hardlink" else "Hardlink", "hardlink"),
         ]
         for label, value in _mode_options:
             ctk.CTkRadioButton(
@@ -868,7 +870,7 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         if hasattr(self._game, "get_effective_filemap_path"):
             try:
                 filemap_path = self._game.get_effective_filemap_path()
-                removed += restore_filemap_from_root(filemap_path, target_dir)
+                removed += restore_filemap_from_root(filemap_path, target_dir, move_runtime_files=False)
             except Exception:
                 pass
 
@@ -945,6 +947,19 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         self._game.archive_invalidation = self._archive_invalidation_var.get()
         _create_profile_structure(self._game)
         self.result = self._found_path
+
+        components = list(getattr(self._game, "winetricks_components", []))
+        prefix = self._game.get_prefix_path() if hasattr(self._game, "get_prefix_path") else None
+        if components and prefix and Path(prefix).is_dir():
+            def _install_components():
+                from Utils.protontricks import _install_via_winetricks
+                for comp in components:
+                    app_log(f"{self._game.name}: installing {comp} via winetricks …")
+                    ok = _install_via_winetricks(Path(prefix), comp, app_log)
+                    if not ok:
+                        app_log(f"{self._game.name}: {comp} install failed (see log above).")
+            threading.Thread(target=_install_components, daemon=True).start()
+
         self._on_done(self)
 
     def _on_cancel(self):

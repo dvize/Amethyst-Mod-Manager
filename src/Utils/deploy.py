@@ -1547,6 +1547,126 @@ def undeploy_mod_files(
 _FILEMAP_LOG_NAME   = "filemap_deployed.txt"
 # Sibling directory used to back up files overwritten during root deploy.
 _FILEMAP_BACKUP_DIR = "filemap_backup"
+# Snapshot of the game root written at deploy time; consumed by restore to
+# identify runtime-generated files (files that appeared after deploy).
+_FILEMAP_SNAPSHOT_NAME = "deploy_snapshot.txt"
+
+
+def _write_deploy_snapshot(
+    game_root: Path,
+    snapshot_path: Path,
+    log_fn=None,
+) -> int:
+    """Walk game_root and record every file as rel_path\\tmtime_ns\\tsize.
+
+    Written atomically via a .tmp sibling then renamed.  Returns the number
+    of files recorded, or 0 on error (the deploy is never aborted).
+    """
+    _log = log_fn or (lambda _: None)
+    tmp_path = snapshot_path.with_suffix(".tmp")
+    count = 0
+    game_root_str = str(game_root)
+    prefix_len = len(game_root_str) + 1          # +1 for trailing separator
+    try:
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            fh.write("# deploy_snapshot v1\n")
+            stack = [game_root_str]
+            while stack:
+                cur = stack.pop()
+                try:
+                    with os.scandir(cur) as it:
+                        for entry in it:
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(entry.path)
+                            elif entry.is_file(follow_symlinks=False):
+                                rel = entry.path[prefix_len:]
+                                st = entry.stat(follow_symlinks=False)
+                                fh.write(f"{rel}\t{st.st_mtime_ns}\t{st.st_size}\n")
+                                count += 1
+                except OSError:
+                    pass
+        tmp_path.rename(snapshot_path)
+        _log(f"  Snapshot: recorded {count} files in game root.")
+    except OSError as exc:
+        _log(f"  WARN: could not write deploy snapshot: {exc}")
+        return 0
+    return count
+
+
+def _load_deploy_snapshot(snapshot_path: Path) -> set[str]:
+    """Return a set of lowercased relative paths from a deploy snapshot file.
+
+    Returns an empty set if the file is missing or unreadable — callers treat
+    this as "no snapshot available" and skip runtime-file detection.
+    """
+    if not snapshot_path.is_file():
+        return set()
+    try:
+        known: set[str] = set()
+        with snapshot_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if line[0] == "#":
+                    continue
+                tab = line.find("\t")
+                known.add(line[:tab].lower() if tab != -1 else line.rstrip("\n").lower())
+        return known
+    except OSError:
+        return set()
+
+
+def _move_runtime_files(
+    game_root: Path,
+    snapshot_path: Path,
+    overwrite_dir: Path,
+    log_fn=None,
+) -> int:
+    """Move files that appeared after deploy (runtime-generated) to overwrite_dir.
+
+    Compares the current game_root contents against the deploy snapshot.
+    Files present now but absent from the snapshot are moved to overwrite_dir
+    preserving their relative path so they become part of the [Overwrite] mod.
+    Vanilla files (present in snapshot) are left untouched.
+    Symlinks are skipped entirely.
+
+    Returns the number of files moved.
+    """
+    _log = log_fn or (lambda _: None)
+    known = _load_deploy_snapshot(snapshot_path)
+    if not known:
+        _log("  WARN: deploy snapshot empty or unreadable — skipping runtime file detection.")
+        return 0
+
+    game_root_str = str(game_root)
+    prefix_len = len(game_root_str) + 1
+    overwrite_str = str(overwrite_dir)
+    made_dirs: set[str] = set()
+    moved = 0
+    stack = [game_root_str]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        rel = entry.path[prefix_len:]
+                        if rel.lower() in known:
+                            continue
+                        dst = overwrite_str + "/" + rel
+                        if os.path.exists(dst):
+                            _log(f"  WARN: overwrite/{rel} already exists — skipping.")
+                            continue
+                        dst_dir = os.path.dirname(dst)
+                        if dst_dir not in made_dirs:
+                            os.makedirs(dst_dir, exist_ok=True)
+                            made_dirs.add(dst_dir)
+                        shutil.move(entry.path, dst)
+                        moved += 1
+        except OSError:
+            pass
+    return moved
 
 
 def deploy_filemap_to_root(
@@ -1690,6 +1810,11 @@ def deploy_filemap_to_root(
     if total == 0:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("", encoding="utf-8")
+        snapshot_path = filemap_path.parent / _FILEMAP_SNAPSHOT_NAME
+        try:
+            _write_deploy_snapshot(game_root, snapshot_path, log_fn=_log)
+        except Exception as exc:
+            _log(f"  WARN: could not write deploy snapshot: {exc}")
         return 0, placed_lower
 
     # Pre-create all destination directories up front (single-threaded).
@@ -1730,6 +1855,13 @@ def deploy_filemap_to_root(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("\n".join(placed_log), encoding="utf-8")
 
+    # Snapshot the game root so restore can identify runtime-generated files.
+    snapshot_path = filemap_path.parent / _FILEMAP_SNAPSHOT_NAME
+    try:
+        _write_deploy_snapshot(game_root, snapshot_path, log_fn=_log)
+    except Exception as exc:
+        _log(f"  WARN: could not write deploy snapshot: {exc}")
+
     return linked, placed_lower
 
 
@@ -1737,12 +1869,20 @@ def restore_filemap_from_root(
     filemap_path: Path,
     game_root: Path,
     log_fn=None,
+    *,
+    move_runtime_files: bool = True,
 ) -> int:
     """Undo a deploy_filemap_to_root() operation.
 
     Reads the log written by deploy_filemap_to_root(), removes every mod file
     that was placed into game_root, then restores any backed-up vanilla files
     from filemap_backup/.  Silently does nothing if the log is absent.
+
+    If move_runtime_files is True (the default) and a deploy_snapshot.txt
+    exists, any file in game_root that was not present at deploy time is moved
+    to the profile's overwrite/ directory so it is preserved across redeploys.
+    Pass move_runtime_files=False for migration helpers that are not game
+    restore operations.
 
     filemap_path — Profiles/<game>/filemap.txt  (used to locate the log)
     game_root    — the game's install directory
@@ -1758,6 +1898,18 @@ def restore_filemap_from_root(
 
     removed = _restore_from_log(log_path, game_root, backup_dir, log_fn)
     _log(f"  Filemap restore: removed {removed} mod file(s) from game root.")
+
+    snapshot_path = filemap_path.parent / _FILEMAP_SNAPSHOT_NAME
+    if move_runtime_files and snapshot_path.is_file():
+        overwrite_dir = filemap_path.parent / "overwrite"
+        _log("  Scanning game root for runtime-generated files ...")
+        moved = _move_runtime_files(game_root, snapshot_path, overwrite_dir, log_fn)
+        _log(f"  Moved {moved} runtime-generated file(s) to overwrite/.")
+        try:
+            snapshot_path.unlink()
+        except OSError:
+            pass
+
     return removed
 
 

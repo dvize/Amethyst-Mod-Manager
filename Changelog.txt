@@ -5,6 +5,11 @@
 - Updated libloot to 0.29.2
 - Dragging mods under collapsed separators no longer hides the mod being dragged
 - Pgpatchers output path is now generated at runtime to allow other profiles to use it.
+- Removed the "Move selected to separator" and combined the function with the "move to separator" option
+- Removed the "Remove selected" and combined the function with the "remove mod" option
+- Certain context menu entries are now hidden when multiple mods are selected
+- Added a pause/cancel button to collections
+- Runtime generated files for root deployed games should now be moved to overwrite (Any existing runtime generated files before this change wont be affected)
 
 - v1.1.3
 - Added automatic archive invalidation to Bethesda games, Can be disabled in the games configure menu.

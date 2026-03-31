@@ -90,6 +90,17 @@ class BaseGame(ABC):
         return []
 
     @property
+    def default_deploy_mode(self) -> str:
+        """
+        The deploy method pre-selected in the configure dialog.
+        Returns ``"symlink"`` by default.  Override to ``"hardlink"`` for games
+        where symlinks are unsupported (e.g. Cyberpunk 2077 with CET mods).
+        The configure dialog will show "(Recommended)" next to whichever option
+        this returns.
+        """
+        return "symlink"
+
+    @property
     def root_folder_deploy_enabled(self) -> bool:
         """
         Whether Root_Folder deployment is supported for this game.
@@ -593,6 +604,20 @@ class BaseGame(ABC):
         Return an empty dict (the default) to leave the prefix unchanged.
         """
         return {}
+
+    @property
+    def winetricks_components(self) -> list[str]:
+        """
+        Winetricks components to install automatically when this game is first
+        added (i.e. when the user clicks Add/Confirm in the configure dialog).
+
+        Each entry is a winetricks verb, e.g. ``"d3dcompiler_47"`` or
+        ``"vcrun2022"``.  Installation is skipped silently when no Proton prefix
+        is available for the game.
+
+        Return an empty list (the default) to skip automatic installation.
+        """
+        return []
 
     @property
     def custom_routing_rules(self) -> list:

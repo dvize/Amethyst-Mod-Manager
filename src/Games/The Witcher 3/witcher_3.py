@@ -36,7 +36,7 @@ import shutil
 from pathlib import Path
 
 from Games.base_game import BaseGame
-from Utils.deploy import LinkMode, load_per_mod_strip_prefixes, load_separator_deploy_paths, expand_separator_deploy_paths, expand_separator_raw_deploy, _resolve_nocase, _resolve_root_path
+from Utils.deploy import LinkMode, load_per_mod_strip_prefixes, load_separator_deploy_paths, expand_separator_deploy_paths, expand_separator_raw_deploy, _resolve_nocase, _resolve_root_path, _write_deploy_snapshot, _load_deploy_snapshot, _move_runtime_files, _FILEMAP_SNAPSHOT_NAME
 from Utils.modlist import read_modlist
 from Utils.config_paths import get_profiles_dir
 from Utils.steam_finder import find_prefix
@@ -472,6 +472,13 @@ class Witcher3(BaseGame):
         backed_msg = f", {backed_up} vanilla file(s) backed up" if backed_up else ""
         _log(f"Deploy complete. {linked} file(s) placed{backed_msg}, {skipped} skipped.")
 
+        # Snapshot game root so restore can identify runtime-generated files.
+        snapshot_path = self.get_profile_root() / _FILEMAP_SNAPSHOT_NAME
+        try:
+            _write_deploy_snapshot(game_path, snapshot_path, log_fn=_log)
+        except Exception as exc:
+            _log(f"  WARN: could not write deploy snapshot: {exc}")
+
         update_menu_filelists(game_path, log_fn=_log)
 
     def _find_staged_file(
@@ -676,8 +683,8 @@ class Witcher3(BaseGame):
             _log(f"Restore complete. {removed} file(s) removed{vanilla_msg}.")
 
         # Preserve _MergedFiles folders so they survive the restore.
-        # If the active profile uses profile-specific mods, store them inside
-        # the profile directory so they don't bleed across profiles.
+        # Must run BEFORE runtime-file detection so merged files are moved to
+        # their dedicated staging location rather than ending up in overwrite/.
         mods_dir = game_path / "mods"
         if mods_dir.is_dir():
             profile_specific = False
@@ -702,6 +709,20 @@ class Witcher3(BaseGame):
                         shutil.rmtree(dest)
                     shutil.move(str(folder), dest)
                     _log(f"Moved merged files folder '{folder.name}' to {merged_dir}.")
+
+        # Move runtime-generated files to overwrite/ so they persist across
+        # redeploys.  Runs after _MergedFiles preservation so those folders
+        # are already gone from the game root and won't be duplicated.
+        snapshot_path = self.get_profile_root() / _FILEMAP_SNAPSHOT_NAME
+        if snapshot_path.is_file():
+            overwrite_dir = self.get_effective_mod_staging_path().parent / "overwrite"
+            _log("  Scanning game root for runtime-generated files ...")
+            moved = _move_runtime_files(game_path, snapshot_path, overwrite_dir, log_fn=_log)
+            _log(f"  Moved {moved} runtime-generated file(s) to overwrite/.")
+            try:
+                snapshot_path.unlink()
+            except OSError:
+                pass
 
         update_menu_filelists(game_path, log_fn=_log)
 

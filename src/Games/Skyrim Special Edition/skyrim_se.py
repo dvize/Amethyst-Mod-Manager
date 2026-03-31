@@ -89,17 +89,21 @@ class SkyrimSE(Fallout_3):
         return "dxgi.dll"
 
     @property
+    def reshade_arch(self) -> int:
+        return 64
+    
+    @property
     def custom_routing_rules(self) -> list:
         from Utils.deploy import CustomRule
         return [
             CustomRule(dest="", filenames=["d3dx9_42.dll"]),
             CustomRule(dest="", filenames=["skse64_1_6_1170.dll"]),
             CustomRule(dest="", filenames=["skse64_loader.exe"]),
-                ]
-
+            ]
+    
     @property
-    def reshade_arch(self) -> int:
-        return 64
+    def winetricks_components(self) -> list[str]:
+        return ["d3dcompiler_47"]
 
     @property
     def wizard_tools(self) -> list[WizardTool]:

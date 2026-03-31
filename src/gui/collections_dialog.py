@@ -86,6 +86,8 @@ PAGE_SIZE    = 20
 #   "done":             bool,         # True once _run_install returns
 # }
 _ACTIVE_INSTALLS: dict[str, dict] = {}
+# Paused installs: slug → {"cancel": threading.Event, "pause": threading.Event}
+_PAUSED_INSTALLS: dict[str, dict] = {}
 
 
 def _topo_sort_collection(schema_mods: list[dict], mod_rules: list[dict]) -> dict[int, int]:
@@ -628,7 +630,7 @@ class CollectionDetailDialog(tk.Frame):
 
         self._build_ui()
         self._fetch()
-        self.after(100, lambda: (self._update_reset_btn_visibility(), self._update_open_missing_btn_visibility()))
+        self.after(100, lambda: (self._update_reset_btn_visibility(), self._update_open_missing_btn_visibility(), self._update_install_btn_state()))
         # Reconnect to any install that started before this panel was (re)opened
         self.after(200, self._maybe_reconnect_install)
 
@@ -794,13 +796,14 @@ class CollectionDetailDialog(tk.Frame):
             command=self._on_close,
         ).pack(side="right", padx=10, pady=6)
 
-        ctk.CTkButton(
+        self._install_btn = ctk.CTkButton(
             ftr, text="Install Collection",
             height=scaled(30), fg_color="#2d7a2d", hover_color="#3a9e3a",
             text_color="#ffffff", font=font_sized("Segoe UI", 10, "bold"),
             border_width=0,
             command=self._on_install_collection,
-        ).pack(side="right", padx=(10, 0), pady=6)
+        )
+        self._install_btn.pack(side="right", padx=(10, 0), pady=6)
 
         ctk.CTkButton(
             ftr, text="Open on Nexus",
@@ -1188,7 +1191,13 @@ class CollectionDetailDialog(tk.Frame):
     # Collection install
     # ------------------------------------------------------------------
     def _on_install_collection(self):
-        """Validate prerequisites then kick off the background install."""
+        """Validate prerequisites then kick off the background install.
+        Also handles Resume — clears paused state so the install restarts
+        from scratch (already-installed mods are skipped automatically)."""
+        slug = self._collection.slug or ""
+        if slug:
+            _PAUSED_INSTALLS.pop(slug, None)
+        self._update_install_btn_state()
         if not self._game:
             self._status_var.set("Error: no game object — cannot install.")
             return
@@ -1438,7 +1447,7 @@ class CollectionDetailDialog(tk.Frame):
         """
         # Register this install so any panel reopened mid-install can reconnect.
         _slug = self._collection.slug or ""
-        _install_state: dict = {"status": "", "installed_fids": set(), "done": False}
+        _install_state: dict = {"status": "", "installed_fids": set(), "done": False, "profile_dir": profile_dir}
         if _slug:
             _ACTIVE_INSTALLS[_slug] = _install_state
 
@@ -1753,9 +1762,15 @@ class CollectionDetailDialog(tk.Frame):
             if getattr(m, "file_id", None) not in _to_download_fids
         )  # pre-credit already-installed/skipped mods
         _per_mod_prev: dict[int, int] = {}  # file_id → last reported bytes (for delta tracking)
-        _col_cancel: threading.Event | None = None
+        _col_cancel = threading.Event()
+        _col_pause = threading.Event()   # set to pause after current items finish
         _dl_finished = threading.Event()   # set when all downloads are done
         _pipeline_finished = threading.Event()  # set when downloads AND installs are done
+
+        # Register pause/cancel events so the UI button can trigger them
+        if _slug:
+            _ACTIVE_INSTALLS[_slug]["cancel"] = _col_cancel
+            _ACTIVE_INSTALLS[_slug]["pause"] = _col_pause
 
         # Archives >= 1 GB are extracted with limited concurrency to avoid
         # excessive memory/I/O pressure, but allow 2 at a time since native
@@ -1781,6 +1796,13 @@ class CollectionDetailDialog(tk.Frame):
         # ------------------------------------------------------------------
         def _download_one(mod):
             nonlocal _dl_done, _dl_bytes_done
+
+            # If paused or cancelled, skip this download (push None so install queue drains)
+            if _col_pause.is_set() or _col_cancel.is_set():
+                with _dl_lock:
+                    _dl_done += 1
+                _install_queue.put((mod, None, self._game_domain))
+                return
 
             def _progress_cb(cur: int, tot: int, _fid=mod.file_id):
                 nonlocal _dl_bytes_done
@@ -1858,7 +1880,7 @@ class CollectionDetailDialog(tk.Frame):
         # ------------------------------------------------------------------
         def _install_one(mod, result, effective_domain):
             """Install a single downloaded mod archive."""
-            if _col_cancel is not None and _col_cancel.is_set():
+            if _col_cancel.is_set() or _col_pause.is_set():
                 with _install_lock:
                     _install_counters["skipped"] += 1
                     _install_counters["done"] += 1
@@ -2330,6 +2352,29 @@ class CollectionDetailDialog(tk.Frame):
         # Restore the original profile dir
         self._game.set_active_profile_dir(old_profile)
 
+        # If cancelled, hand off to cleanup (runs on main thread via after()).
+        if _col_cancel.is_set():
+            _install_state["done"] = True
+            _ACTIVE_INSTALLS.pop(_slug, None)
+            try:
+                self.after(0, lambda _pd=profile_dir: self._do_cancel_cleanup(_pd))
+            except Exception:
+                pass
+            return
+
+        # If paused (but not cancelled), register so the Resume button appears.
+        if _col_pause.is_set():
+            if _slug:
+                _PAUSED_INSTALLS[_slug] = {"profile_dir": profile_dir}
+            _install_state["status"] = f"Paused — {installed} installed so far."
+            _install_state["done"] = True
+            _ACTIVE_INSTALLS.pop(_slug, None)
+            try:
+                self.after(0, lambda: self._on_install_paused(installed, str(profile_dir.name)))
+            except Exception:
+                pass
+            return
+
         # Mark registry entry as done so the polling loop stops.
         final_msg = (
             f"Done — {installed}/{total} mods installed into profile '{profile_dir.name}'."
@@ -2416,21 +2461,49 @@ class CollectionDetailDialog(tk.Frame):
         dl_bar.set(0)
         # Not packed yet — shown when download starts via _show_overlay_download
 
+        # Button row — always packed last so dl_bar can be inserted before it
+        btn_row = tk.Frame(inner, bg="#2b2b2b")
+        btn_row.pack(pady=(8, 16))
+
+        pause_btn = ctk.CTkButton(
+            btn_row, text="Pause",
+            height=scaled(28), width=scaled(110),
+            fg_color="#7a5a00", hover_color="#a07800",
+            text_color="#ffffff", font=font_sized("Segoe UI", 10),
+            border_width=0,
+            command=self._on_pause_install,
+        )
+        pause_btn.pack(side="left", padx=(0, 8))
+
+        cancel_btn = ctk.CTkButton(
+            btn_row, text="Cancel",
+            height=scaled(28), width=scaled(110),
+            fg_color="#7a1a1a", hover_color="#a02020",
+            text_color="#ffffff", font=font_sized("Segoe UI", 10),
+            border_width=0,
+            command=self._on_cancel_install,
+        )
+        cancel_btn.pack(side="left")
+
         self._install_overlay = overlay
         self._install_overlay_bar = overlay_bar
         self._install_overlay_dl_msg = dl_msg_lbl
         self._install_overlay_dl_bar = dl_bar
+        self._install_overlay_pause_btn = pause_btn
+        self._install_overlay_btn_row = btn_row
 
     def _show_overlay_download(self, label: str):
         """Show the download progress section inside the install overlay."""
         lbl = getattr(self, "_install_overlay_dl_msg", None)
         bar = getattr(self, "_install_overlay_dl_bar", None)
+        btn_row = getattr(self, "_install_overlay_btn_row", None)
         if lbl is None or bar is None:
             return
         lbl.configure(text=label)
         if not lbl.winfo_ismapped():
-            lbl.pack(fill="x", padx=16, pady=(4, 0))
-            bar.pack(fill="x", padx=16, pady=(2, 16))
+            pack_kw = {"before": btn_row} if btn_row is not None else {}
+            lbl.pack(fill="x", padx=16, pady=(4, 0), **pack_kw)
+            bar.pack(fill="x", padx=16, pady=(2, 8), **pack_kw)
 
     def _update_overlay_download(self, current: int, total: int, speed_mbs: float = 0.0):
         """Update the download progress bar and message in the overlay."""
@@ -2473,6 +2546,8 @@ class CollectionDetailDialog(tk.Frame):
         self._install_overlay_bar = None
         self._install_overlay_dl_msg = None
         self._install_overlay_dl_bar = None
+        self._install_overlay_pause_btn = None
+        self._install_overlay_btn_row = None
 
     def _on_install_done(self, installed: int, skipped: int, total: int, profile_name: str):
         self._dismiss_install_overlay()
@@ -2492,6 +2567,179 @@ class CollectionDetailDialog(tk.Frame):
         self._switch_to_profile(profile_name)
         self._update_reset_btn_visibility()
         self._update_open_missing_btn_visibility()
+        self._update_install_btn_state()
+
+    def _on_pause_install(self):
+        """Called when the Pause button in the overlay is clicked."""
+        slug = self._collection.slug or ""
+        state = _ACTIVE_INSTALLS.get(slug)
+        if state is None:
+            return
+        pause_evt = state.get("pause")
+        if pause_evt is not None:
+            pause_evt.set()
+        self._status_var.set("Pausing… waiting for current downloads/installs to finish.")
+        # Disable the button so it can't be clicked twice
+        btn = getattr(self, "_install_overlay_pause_btn", None)
+        if btn is not None:
+            try:
+                btn.configure(state="disabled", text="Pausing…")
+            except Exception:
+                pass
+
+    def _on_cancel_install(self):
+        """Ask for confirmation then cancel the install, wipe the download cache and delete the profile."""
+        slug = self._collection.slug or ""
+        state = _ACTIVE_INSTALLS.get(slug)
+        if state is None:
+            return
+
+        # Get the app root window for the alert parent
+        app_root = getattr(self, "_app_root", None)
+        alert_parent = app_root if app_root is not None else self
+
+        alert = CTkAlert(
+            state="warning",
+            title="Cancel Install",
+            body_text=(
+                "Are you sure you want to cancel?\n\n"
+                "This will stop the install, clear the download cache, "
+                "and delete the collection profile."
+            ),
+            btn1="Cancel Install",
+            btn2="Keep Going",
+            parent=alert_parent,
+        )
+        result = alert.get()
+        if result != "Cancel Install":
+            return
+
+        # Signal the background thread to stop
+        cancel_evt = state.get("cancel")
+        if cancel_evt is not None:
+            cancel_evt.set()
+        pause_evt = state.get("pause")
+        if pause_evt is not None:
+            pause_evt.set()
+
+        self._status_var.set("Cancelling… waiting for current operations to finish.")
+        btn_row = getattr(self, "_install_overlay_btn_row", None)
+        if btn_row is not None:
+            for child in btn_row.winfo_children():
+                try:
+                    child.configure(state="disabled")
+                except Exception:
+                    pass
+        # Cleanup is triggered by _run_install itself once it detects _col_cancel
+        # and winds down — it calls self.after(0, _do_cancel_cleanup(profile_dir))
+
+    def _do_cancel_cleanup(self, profile_dir=None):
+        """Restore game, delete profile dir, wipe download cache, switch to default profile."""
+        import shutil as _shutil_cancel
+        slug = self._collection.slug or ""
+        _ACTIVE_INSTALLS.pop(slug, None)
+        _PAUSED_INSTALLS.pop(slug, None)
+        if profile_dir is None:
+            profile_dir = self._get_profile_dir()
+
+        game = self._game
+
+        # Restore any deployed mod files so we don't orphan files in the game folder
+        if profile_dir is not None and profile_dir.is_dir() and game is not None and game.is_configured():
+            game.set_active_profile_dir(profile_dir)
+            try:
+                if hasattr(game, "restore"):
+                    game.restore()
+            except Exception as exc:
+                self._log(f"Cancel: restore failed: {exc}")
+            try:
+                from Utils.deploy import restore_root_folder
+                root_folder_dir = game.get_effective_root_folder_path()
+                game_root = game.get_game_path()
+                if root_folder_dir.is_dir() and game_root:
+                    restore_root_folder(root_folder_dir, game_root)
+            except Exception as exc:
+                self._log(f"Cancel: restore_root_folder failed: {exc}")
+            game.set_active_profile_dir(None)
+
+        # Delete the collection profile directory
+        if profile_dir is not None and profile_dir.is_dir():
+            try:
+                _shutil_cancel.rmtree(str(profile_dir))
+                self._log(f"Cancel: deleted profile dir {profile_dir}")
+            except Exception as exc:
+                self._log(f"Cancel: failed to delete profile dir: {exc}")
+
+        # Clear the download cache
+        try:
+            cache_dir = get_download_cache_dir()
+            if cache_dir and cache_dir.is_dir():
+                for item in cache_dir.iterdir():
+                    try:
+                        if item.is_file() or item.is_symlink():
+                            item.unlink()
+                        elif item.is_dir():
+                            _shutil_cancel.rmtree(str(item), ignore_errors=True)
+                    except Exception:
+                        pass
+                self._log("Cancel: cleared download cache")
+        except Exception as exc:
+            self._log(f"Cancel: failed to clear download cache: {exc}")
+
+        # Switch topbar back to default profile
+        try:
+            topbar = getattr(self._app_root, "_topbar", None)
+            if topbar is not None and game is not None:
+                profiles = _profiles_for_game(game.name)
+                topbar._profile_menu.configure(values=profiles)
+                topbar._profile_var.set(profiles[0])
+                topbar._reload_mod_panel()
+        except Exception as exc:
+            self._log(f"Cancel: failed to switch profile: {exc}")
+
+        self._dismiss_install_overlay()
+        self._status_var.set("Install cancelled.")
+        try:
+            self._install_progress_bar.pack_forget()
+        except Exception:
+            pass
+        self._update_install_btn_state()
+        self._update_reset_btn_visibility()
+
+    def _on_install_paused(self, installed: int, profile_name: str):
+        """Called from background thread (via after()) when the install has fully paused."""
+        self._dismiss_install_overlay()
+        self._status_var.set(
+            f"Paused — {installed} mod(s) installed so far. Click Resume to continue."
+        )
+        try:
+            self._install_progress_bar.pack_forget()
+        except Exception:
+            pass
+        self._update_install_btn_state()
+
+    def _update_install_btn_state(self):
+        """Show Install button as orange Resume if a paused install exists, else green Install."""
+        btn = getattr(self, "_install_btn", None)
+        if btn is None:
+            return
+        slug = self._collection.slug or ""
+        if slug and slug in _PAUSED_INSTALLS:
+            try:
+                btn.configure(
+                    text="Resume Install",
+                    fg_color="#b35a00", hover_color="#d97000",
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                btn.configure(
+                    text="Install Collection",
+                    fg_color="#2d7a2d", hover_color="#3a9e3a",
+                )
+            except Exception:
+                pass
 
     def _switch_to_profile(self, profile_name: str):
         """Switch the app to the given profile."""
@@ -2510,6 +2758,7 @@ class CollectionDetailDialog(tk.Frame):
     def _maybe_reconnect_install(self) -> None:
         """If an install is already running for this collection, start polling it."""
         slug = self._collection.slug or ""
+        self._update_install_btn_state()
         if slug and slug in _ACTIVE_INSTALLS:
             state = _ACTIVE_INSTALLS[slug]
             if not state.get("done") and not getattr(self, "_install_overlay", None):

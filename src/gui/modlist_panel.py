@@ -382,6 +382,7 @@ class ModListPanel(ctk.CTkFrame):
         self._drag_block:    list  = []     # snapshot of (entry, var) at mousedown
         self._drag_sel_indices: list[int] = []  # actual entry indices for sparse multi-select drag
         self._drag_slot:     int  = -1     # last computed insertion slot (in vis-without-drag space)
+        self._drag_start_slot: int = 0     # slot when drag began (for delta-based movement)
 
         self._drag_pending:  bool = False  # waiting for click-vs-drag disambiguation
         self._drag_after_id: str | None = None  # after() id for drag-start timer
@@ -2993,6 +2994,12 @@ class ModListPanel(ctk.CTkFrame):
                         self._sel_set = set(vis[lo_row : hi_row + 1])
                     self._redraw()
                     return
+                # If this separator is part of an existing multi-selection, preserve
+                # it so the whole selection drags together (same as non-separator path).
+                if idx in self._sel_set and len(self._sel_set) > 1:
+                    self._activate_drag(idx, cy, False, [])
+                    self._redraw()
+                    return
                 self._sel_idx = idx
                 self._sel_set = {idx}
                 if self._on_mod_selected_cb is not None:
@@ -3094,10 +3101,32 @@ class ModListPanel(ctk.CTkFrame):
         self._drag_origin_idx = idx
         self._drag_start_y = start_y
         self._drag_moved = False
-        self._drag_slot  = -1
         self._drag_is_block = is_block
         self._drag_block = block
         self._drag_sel_indices = sel_indices  # empty list = contiguous block (separator drag)
+
+        # Compute the starting slot — position of the group's top among non-drag
+        # items.  _on_mouse_drag uses delta-based movement from this baseline.
+        if self._vis_dirty:
+            self._visible_indices = self._compute_visible_indices()
+            self._vis_dirty = False
+        vis = self._visible_indices
+        if sel_indices:
+            drag_set = set(sel_indices)
+            first_drag = sel_indices[0]
+        else:
+            blk_size = len(block) if is_block else 1
+            drag_set = set(range(idx, idx + blk_size))
+            first_drag = idx
+        # Count non-drag vis entries before the first dragged entry (in display order)
+        start_slot = 0
+        for ei in vis:
+            if ei == first_drag:
+                break
+            if ei not in drag_set:
+                start_slot += 1
+        self._drag_start_slot = start_slot
+        self._drag_slot = start_slot
 
     def _sep_block_range(self, sep_idx: int) -> range:
         """Return the range of indices [sep_idx, end) belonging to this separator block.
@@ -3230,13 +3259,13 @@ class ModListPanel(ctk.CTkFrame):
         # slot is an index into this list (0 = before first, len = after last).
         vis_without_drag = [i for i in vis if i not in drag_set]
 
-        # Map cursor Y to a slot in vis_without_drag.
-        # cy // ROW_H gives a visual row index in the full vis list.
-        # We convert it to vis_without_drag space by counting how many non-drag
-        # rows appear above the cursor row.
-        full_row = int(cy // self.ROW_H)
-        slot = sum(1 for idx_in_vis, ei in enumerate(vis)
-                   if idx_in_vis < full_row and ei not in drag_set)
+        # Map cursor movement to slot changes using a pixel delta from drag
+        # start.  Because real-time reordering moves the block under the cursor
+        # on every slot change, position-based mapping doesn't work — the cursor
+        # is always inside the block.  Instead, track cumulative pixel movement
+        # and convert to row steps.
+        dy = cy - self._drag_start_y
+        slot = self._drag_start_slot + int(dy / self.ROW_H)
         slot = max(0, min(slot, len(vis_without_drag)))
 
         if slot == self._drag_slot:
@@ -3541,10 +3570,12 @@ class ModListPanel(ctk.CTkFrame):
         is_overwrite = self._entries[idx].name == OVERWRITE_NAME
         is_root_folder = self._entries[idx].name == ROOT_FOLDER_NAME
         is_synthetic = is_overwrite or is_root_folder
+        _is_multi = len(self._sel_set) > 1 and idx in self._sel_set
 
-        menu.add_command("Add separator above", lambda: self._add_separator(idx, above=True))
-        menu.add_command("Add separator below", lambda: self._add_separator(idx, above=False))
-        if self._modlist_path is not None and not is_synthetic:
+        if not _is_multi:
+            menu.add_command("Add separator above", lambda: self._add_separator(idx, above=True))
+            menu.add_command("Add separator below", lambda: self._add_separator(idx, above=False))
+        if self._modlist_path is not None and not is_synthetic and not _is_multi:
             menu.add_command("Create empty mod below", lambda: self._create_empty_mod(idx))
         _is_bundle_sep = is_separator and self._is_bundle_separator(idx)
         if is_separator and not is_synthetic:
@@ -3556,36 +3587,60 @@ class ModListPanel(ctk.CTkFrame):
             menu.add_command("Remove separator", lambda: self._remove_separator(idx))
         elif not is_separator and not self._entries[idx].locked:
             _is_bundle_var = self._entries[idx].bundle_name is not None
-            if not _is_bundle_var:
+            if not _is_bundle_var and not _is_multi:
                 menu.add_command("Rename mod", lambda: self._rename_mod(idx))
                 menu.add_command("Set priority…", lambda: self._set_priority(idx))
-            menu.add_command("Remove mod", lambda: self._remove_mod(idx))
+            _remove_multi = [
+                i for i in sorted(self._sel_set)
+                if 0 <= i < len(self._entries)
+                and not self._entries[i].is_separator
+                and not self._entries[i].locked
+                and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
+            ] if len(self._sel_set) > 1 and idx in self._sel_set else []
+            if _remove_multi and self._modlist_path is not None:
+                menu.add_command(f"Remove mod ({len(_remove_multi)})",
+                    lambda rm=_remove_multi: self._remove_selected_mods(rm))
+            else:
+                menu.add_command("Remove mod", lambda: self._remove_mod(idx))
             if not _is_bundle_var:
                 sep_names = [e.name for e in self._entries
                              if e.is_separator and e.name != OVERWRITE_NAME
                              and e.name != ROOT_FOLDER_NAME
                              and e.display_name not in self._bundle_groups]
                 if sep_names:
-                    menu.add_submenu("Move to separator",
-                        lambda: self._show_separator_picker(idx, sep_names,
-                            parent_dismiss=menu._withdraw, parent_popup=menu))
-            if ini_files:
+                    _multi_sel = [
+                        i for i in sorted(self._sel_set)
+                        if 0 <= i < len(self._entries)
+                        and not self._entries[i].is_separator
+                        and not self._entries[i].locked
+                        and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
+                        and self._entries[i].bundle_name is None
+                    ] if len(self._sel_set) > 1 and idx in self._sel_set else []
+                    if _multi_sel:
+                        menu.add_submenu(f"Move to separator ({len(_multi_sel)})",
+                            lambda ms=_multi_sel: self._show_separator_picker_multi(ms, sep_names,
+                                parent_dismiss=menu._withdraw, parent_popup=menu))
+                    else:
+                        menu.add_submenu("Move to separator",
+                            lambda: self._show_separator_picker(idx, sep_names,
+                                parent_dismiss=menu._withdraw, parent_popup=menu))
+            if ini_files and not _is_multi:
                 menu.add_submenu("INI files",
                     lambda: self._show_ini_picker(ini_files,
                         parent_dismiss=menu._withdraw, parent_popup=menu))
-            if plugin_files:
+            if plugin_files and not _is_multi:
                 mod_name_cap = self._entries[idx].name
                 menu.add_command("Disable Plugins…",
                     lambda n=mod_name_cap, pf=plugin_files: self._show_disable_plugins_dialog(n, pf))
-            if mod_folder is not None:
+            if mod_folder is not None and not _is_multi:
                 mod_name_cap = self._entries[idx].name
                 menu.add_command("Set deployment paths…",
                     lambda: self._show_mod_strip_dialog(mod_name_cap, mod_folder))
 
-        if mod_folder is not None:
+        if mod_folder is not None and not _is_multi:
             menu.add_command("Open folder", lambda: self._open_folder(mod_folder))
 
-        if not is_separator or is_overwrite:
+        if not _is_multi and (not is_separator or is_overwrite):
             conflict_status = (
                 self._conflict_map.get(self._entries[idx].name, CONFLICT_NONE)
                 if not is_overwrite
@@ -3615,18 +3670,19 @@ class ModListPanel(ctk.CTkFrame):
                             else _ctx_meta.game_domain
                         )
                         nexus_url = f"https://www.nexusmods.com/{_domain}/mods/{_ctx_meta.mod_id}"
-                        menu.add_command("Open on Nexus",
-                            lambda: self._open_nexus_page(nexus_url))
-                        menu.add_command("Change Version",
-                            lambda mn=mod_name_capture: self._update_nexus_mod(mn))
-                        if _ctx_meta.endorsed:
-                            menu.add_command("Abstain from Endorsement",
-                                lambda: self._abstain_nexus_mod(mod_name_capture, _domain, _ctx_meta))
-                        else:
-                            menu.add_command("Endorse Mod",
-                                lambda: self._endorse_nexus_mod(mod_name_capture, _domain, _ctx_meta))
+                        if not _is_multi:
+                            menu.add_command("Open on Nexus",
+                                lambda u=nexus_url: self._open_nexus_page(u))
+                            menu.add_command("Change Version",
+                                lambda mn=mod_name_capture: self._update_nexus_mod(mn))
+                            if _ctx_meta.endorsed:
+                                menu.add_command("Abstain from Endorsement",
+                                    lambda: self._abstain_nexus_mod(mod_name_capture, _domain, _ctx_meta))
+                            else:
+                                menu.add_command("Endorse Mod",
+                                    lambda: self._endorse_nexus_mod(mod_name_capture, _domain, _ctx_meta))
                     # Reinstall Mod — visible when the source archive is still in ~/Downloads
-                    if _ctx_meta.installation_file:
+                    if not _is_multi and _ctx_meta.installation_file:
                         _xdg = os.environ.get("XDG_DOWNLOAD_DIR")
                         _dl_dir = Path(_xdg) if _xdg else Path.home() / "Downloads"
                         _archive_path = _dl_dir / _ctx_meta.installation_file
@@ -3635,7 +3691,7 @@ class ModListPanel(ctk.CTkFrame):
                                 lambda nc=mod_name_capture, ap=_archive_path: self._reinstall_mod(nc, ap))
                 except Exception:
                     pass
-            if mod_name_capture in self._missing_reqs:
+            if not _is_multi and mod_name_capture in self._missing_reqs:
                 dep_names = self._missing_reqs_detail.get(mod_name_capture, [])
                 menu.add_command("Missing Requirements",
                     lambda: self._show_missing_reqs(mod_name_capture, dep_names))
@@ -3654,17 +3710,6 @@ class ModListPanel(ctk.CTkFrame):
                     lambda: self._enable_selected_mods(toggleable))
                 menu.add_command(f"Disable selected ({count})",
                     lambda: self._disable_selected_mods(toggleable))
-                if self._modlist_path is not None:
-                    menu.add_command(f"Remove selected ({count})",
-                        lambda: self._remove_selected_mods(toggleable))
-                # Move all selected mods to a separator
-                sel_sep_names = [e.name for e in self._entries
-                                 if e.is_separator and e.name != OVERWRITE_NAME
-                                 and e.name != ROOT_FOLDER_NAME]
-                if sel_sep_names:
-                    menu.add_submenu(f"Move selected to separator",
-                        lambda: self._show_separator_picker_multi(toggleable, sel_sep_names,
-                            parent_dismiss=menu._withdraw, parent_popup=menu))
                 # Open Nexus pages for all selected mods that have a mod_id
                 if self._staging_root is not None:
                     _nexus_urls: list[str] = []

@@ -49,6 +49,10 @@ class Cyberpunk2077(BaseGame):
         return "1091500"
     
     @property
+    def default_deploy_mode(self) -> str:
+        return "hardlink"
+
+    @property
     def nexus_game_domain(self) -> str:
         return "cyberpunk2077"
 
@@ -66,7 +70,14 @@ class Cyberpunk2077(BaseGame):
 
     @property
     def wine_dll_overrides(self) -> dict[str, str]:
-        return {"winmm": "native,builtin"}
+        return {
+            "winmm": "native,builtin",
+            "version": "native,builtin"
+            }
+
+    @property
+    def winetricks_components(self) -> list[str]:
+        return ["d3dcompiler_47"]
 
     @property
     def conflict_ignore_filenames(self) -> set[str]:
