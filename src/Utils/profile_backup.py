@@ -21,6 +21,7 @@ _TIMESTAMP_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 _BACKUP_FILES = [
     "modlist.txt",
     "plugins.txt",
+    "userlist.yaml",
     "profile_state.json",
     # Legacy individual files — kept so old backups can still be restored
     "collapsed_seps.json",

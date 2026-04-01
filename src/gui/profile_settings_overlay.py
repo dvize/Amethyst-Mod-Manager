@@ -186,6 +186,13 @@ class ProfileSettingsOverlay(tk.Frame):
                 command=lambda p=profile, r=row, rb=row_bg: self._show_rename(p, r, rb),
             ).pack(side="left", padx=(0, 6))
 
+            # Open folder button
+            ctk.CTkButton(
+                btn_frame, text="Open", width=60, height=28, font=FONT_SMALL,
+                fg_color=BG_HOVER, hover_color=ACCENT_HOV, text_color=TEXT_MAIN,
+                command=lambda p=profile: self._open_profile_folder(p),
+            ).pack(side="left", padx=(0, 6))
+
             # Remove button (disabled for default)
             remove_btn = ctk.CTkButton(
                 btn_frame, text="Remove", width=72, height=28, font=FONT_SMALL,
@@ -254,6 +261,12 @@ class ProfileSettingsOverlay(tk.Frame):
             self._rename_frame = None
         self._rename_target = None
         self._rename_entry = None
+
+    def _open_profile_folder(self, profile: str):
+        import subprocess
+        folder = self._get_profile_dir(profile)
+        folder.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(["xdg-open", str(folder)])
 
     def _do_rename(self):
         if self._rename_entry is None or self._rename_target is None:

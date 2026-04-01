@@ -20,6 +20,7 @@ Game support is driven by the game handler's properties:
 from __future__ import annotations
 
 import shutil
+import time
 import urllib.request
 from pathlib import Path
 from dataclasses import dataclass
@@ -34,9 +35,19 @@ except ImportError:
 # Bundled masterlists shipped with the application (read-only in AppImage)
 _BUNDLED_DATA_DIR = Path(__file__).parent / "data"
 
-# User-writable masterlist directory in ~/.config/AmethystModManager/LOOT/data/
-from Utils.config_paths import get_loot_data_dir  # noqa: E402
-_DATA_DIR = get_loot_data_dir()
+# User-writable masterlist directory — resolved lazily to avoid import-time side effects
+_DATA_DIR: Path | None = None
+
+# Re-download masterlists at most once per 24 hours
+_MASTERLIST_TTL_SECS = 86400
+
+
+def _get_data_dir() -> Path:
+    global _DATA_DIR
+    if _DATA_DIR is None:
+        from Utils.config_paths import get_loot_data_dir
+        _DATA_DIR = get_loot_data_dir()
+    return _DATA_DIR
 
 PRELUDE_FILE = "masterlist_prelude.yaml"
 PRELUDE_URL = "https://raw.githubusercontent.com/loot/prelude/v0.21/prelude.yaml"
@@ -47,17 +58,25 @@ def _ensure_masterlist(
     download_url: str = "",
     log_fn=None,
 ) -> None:
-    """Ensure a masterlist exists in the config dir, always fetching the latest.
+    """Ensure a masterlist exists in the config dir, fetching if stale.
 
     Resolution order:
-      1. Download from the provided URL (always attempted to get latest version).
+      1. If a cached file exists and is younger than _MASTERLIST_TTL_SECS, use it.
+      2. Download from the provided URL.
          Falls back to the existing cached file if the download fails.
-      2. If no URL or download fails and no cached file: copy from bundled data dir.
+      3. If no URL or download fails and no cached file: copy from bundled data dir.
     """
     _log = log_fn or (lambda _: None)
-    dest = _DATA_DIR / filename
+    data_dir = _get_data_dir()
+    dest = data_dir / filename
 
-    # Always try to download the latest version if a URL is provided
+    # Skip download if the cached file is fresh enough
+    if dest.is_file() and download_url:
+        age = time.time() - dest.stat().st_mtime
+        if age < _MASTERLIST_TTL_SECS:
+            return
+
+    # Try to download if a URL is provided
     if download_url:
         tmp = dest.with_suffix(".tmp")
         _log(f"Fetching latest {filename}...")
@@ -128,7 +147,7 @@ def _find_plugin_paths(
                 found[name] = str(full)
                 found_basenames.add(name.lower())
 
-    # 2. For anything still missing, search staging mod folders
+    # 2. For anything still missing, search staging mod folders (recursively)
     if staging_root and staging_root.is_dir():
         still_missing = [n for n in plugin_names if n not in found]
         if still_missing:
@@ -136,7 +155,7 @@ def _find_plugin_paths(
             for mod_dir in staging_root.iterdir():
                 if not mod_dir.is_dir():
                     continue
-                for f in mod_dir.iterdir():
+                for f in mod_dir.rglob("*"):
                     if f.is_file() and f.name.lower() in missing_lower:
                         # Map back to the original-cased name
                         orig = names_lower.get(f.name.lower())
@@ -152,7 +171,7 @@ def _find_plugin_paths(
             still_missing = [n for n in plugin_names if n not in found]
             if still_missing:
                 missing_lower = {n.lower() for n in still_missing}
-                for f in overwrite_dir.iterdir():
+                for f in overwrite_dir.rglob("*"):
                     if f.is_file() and f.name.lower() in missing_lower:
                         orig = names_lower.get(f.name.lower())
                         if orig and orig not in found and f.name.lower() not in found_basenames:
@@ -175,6 +194,7 @@ def sort_plugins(
     game_id: str = "",
     masterlist_url: str = "",
     game_data_dir: Path | None = None,
+    userlist_path: Path | None = None,
 ) -> SortResult:
     """
     Sort plugins using libloot's masterlist rules.
@@ -234,8 +254,9 @@ def sort_plugins(
     _ensure_masterlist(ml_filename, download_url=masterlist_url, log_fn=_log)
     _ensure_masterlist(PRELUDE_FILE, download_url=PRELUDE_URL, log_fn=_log)
 
-    masterlist_path = _DATA_DIR / ml_filename
-    prelude_path = _DATA_DIR / PRELUDE_FILE
+    data_dir = _get_data_dir()
+    masterlist_path = data_dir / ml_filename
+    prelude_path = data_dir / PRELUDE_FILE
 
     if not masterlist_path.is_file():
         url_hint = (f"\nDownload from: {masterlist_url}" if masterlist_url
@@ -247,7 +268,7 @@ def sort_plugins(
     warnings: list[str] = []
 
     # Create libloot Game instance
-    local_data = str(_DATA_DIR)
+    local_data = str(data_dir)
     _log("Initializing LOOT...")
     game = loot.Game(game_type, str(game_path), local_data)
     game.load_current_load_order_state()
@@ -261,6 +282,16 @@ def sort_plugins(
         db.load_masterlist(str(masterlist_path))
         _log("Loaded masterlist (no prelude found).")
         warnings.append("Prelude file not found — sorting may be less accurate.")
+
+    # Load userlist if provided and non-empty
+    if userlist_path is not None and userlist_path.is_file():
+        try:
+            content = userlist_path.read_text(encoding="utf-8")
+            if content.strip():
+                db.load_userlist(str(userlist_path))
+                _log(f"Loaded userlist: {userlist_path.name}")
+        except (ValueError, OSError) as e:
+            warnings.append(f"Userlist skipped: {e}")
 
     # Find plugin files on disk — check game Data dir AND staging mods
     data_dir = game_data_dir if game_data_dir is not None else game_path / "Data"
@@ -295,10 +326,10 @@ def sort_plugins(
     if unsortable:
         sorted_names.extend(unsortable)
 
-    # Count how many actually moved
+    # Count how many sortable plugins actually moved position
     moved = sum(
-        1 for i, name in enumerate(sorted_names)
-        if i >= len(plugin_names) or plugin_names[i] != name
+        1 for i, name in enumerate(sorted_names[:len(sortable)])
+        if i >= len(sortable) or sortable[i] != name
     )
 
     _log(f"Sort complete. {moved} plugin(s) changed position.")

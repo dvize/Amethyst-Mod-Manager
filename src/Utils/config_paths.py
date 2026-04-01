@@ -57,6 +57,17 @@ def get_loot_data_dir() -> Path:
     return d
 
 
+def get_loot_game_dir(game_id: str) -> Path:
+    """Return the per-game LOOT directory, creating it if needed.
+
+    Result: ~/.config/AmethystModManager/LOOT/<game_id>/
+    A global userlist.yaml placed here applies to all profiles of this game.
+    """
+    d = get_config_dir() / "LOOT" / game_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_profiles_dir() -> Path:
     """Return the root Profiles directory.
 

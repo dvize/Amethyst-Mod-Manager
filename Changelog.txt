@@ -1,3 +1,12 @@
+- v1.1.5
+- The manager can now install Wabbajack modlists
+- Added the ability for Loot to read userlist.yaml files, These can be placed in the profile folder next to plugins.txt as a per profile option or in .config/amethystmodmanager/loot/[gamename] as a global fallback
+- Added a Groups and Plugin rules button to the plugins panel. These can be used to create a userlist.yaml file that goes into the profiles folder
+- Added an Open button to the profile config tab to quickly open the profile folder for the selected profile
+- The bottom section of the plugins panel is now hidden for games that don't need it
+- The loot masterlists no longer downloads every time plugins are sorted. The masterlist re-downloads when the file is over 24h old
+- The manager can no longer install Wabbajack modlists (Happy April fools)
+
 - v1.1.4
 - Fix for users who could not download collection manifests from the main Nexus cdn
 - Fix for collections not enabling all mods after install if the application crashed part way through

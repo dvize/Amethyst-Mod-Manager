@@ -6,6 +6,7 @@ Browse/Tracked/Endorsed are shown in the Nexus overlay on the modlist panel.
 
 import json
 import os
+import re
 import subprocess
 import threading
 import tkinter as tk
@@ -44,6 +45,8 @@ from gui.install_mod import install_mod_from_archive
 from gui.mod_name_utils import _suggest_mod_names as suggest_mod_names
 from gui.downloads_panel import DownloadsPanel
 from gui.download_locations_overlay import DownloadLocationsOverlay
+from gui.loot_groups_overlay import LootGroupsOverlay
+from gui.loot_plugin_rules_overlay import LootPluginRulesOverlay
 from gui.ctk_components import CTkTreeview
 
 from Utils.config_paths import get_exe_args_path, get_game_config_dir, get_game_config_path
@@ -163,6 +166,7 @@ class PluginPanel(ctk.CTkFrame):
         self._plugin_paths: dict[str, "Path"] = {}   # plugin name.lower() → path on disk
         self._on_plugin_selected_cb = None  # callable(mod_name: str | None)
         self._on_mod_selected_cb = None     # callable() — notify mod panel a plugin was selected
+        self._on_plugin_row_selected_cb = None  # callable(plugin_name: str) — notify when a plugin row is selected
 
         # Missing masters detection
         self._missing_masters: dict[str, list[str]] = {}
@@ -238,6 +242,9 @@ class PluginPanel(ctk.CTkFrame):
         self._pool_check_marks: list[int] = []
         self._pool_lock_rects: list[int] = []
         self._pool_lock_marks: list[int] = []
+        self._pool_ul_dot: list[int] = []
+        self._userlist_plugins: set[str] = set()
+        self._plugin_group_map: dict[str, str] = {}  # plugin name lower → group name
         self._predraw_after_id: str | None = None
         self._marker_strip_after_id: str | None = None
 
@@ -2414,6 +2421,78 @@ class PluginPanel(ctk.CTkFrame):
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._download_locations_overlay = panel
 
+    def _open_loot_groups_overlay(self):
+        """Show the LOOT groups overlay over the modlist panel."""
+        self._close_loot_groups_overlay()
+        ul_path = self._get_userlist_path()
+        if ul_path is None:
+            self._log("No active profile — cannot configure groups.")
+            return
+        mod_panel = getattr(self.winfo_toplevel(), "_mod_panel", None)
+        if mod_panel is None:
+            self._log("Cannot find modlist panel.")
+            return
+        panel = LootGroupsOverlay(
+            mod_panel,
+            userlist_path=ul_path,
+            parse_userlist=self._parse_userlist,
+            write_userlist=self._write_userlist,
+            on_close=self._close_loot_groups_overlay,
+            on_saved=self._refresh_userlist_set,
+        )
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        panel.lift()
+        self._loot_groups_overlay = panel
+
+    def _close_loot_groups_overlay(self):
+        panel = getattr(self, "_loot_groups_overlay", None)
+        if panel:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        self._loot_groups_overlay = None
+
+    def _open_loot_plugin_rules_overlay(self):
+        """Show the LOOT plugin rules overlay over the modlist panel."""
+        self._close_loot_plugin_rules_overlay()
+        ul_path = self._get_userlist_path()
+        if ul_path is None:
+            self._log("No active profile — cannot configure plugin rules.")
+            return
+        mod_panel = getattr(self.winfo_toplevel(), "_mod_panel", None)
+        if mod_panel is None:
+            self._log("Cannot find modlist panel.")
+            return
+        plugin_names = [e.name for e in self._plugin_entries]
+        sel_name = ""
+        if hasattr(self, "_sel_idx") and 0 <= self._sel_idx < len(self._plugin_entries):
+            sel_name = self._plugin_entries[self._sel_idx].name
+        panel = LootPluginRulesOverlay(
+            mod_panel,
+            plugin_names=plugin_names,
+            userlist_path=ul_path,
+            parse_userlist=self._parse_userlist,
+            write_userlist=self._write_userlist,
+            selected_plugin=sel_name,
+            on_close=self._close_loot_plugin_rules_overlay,
+            on_saved=self._refresh_userlist_set,
+        )
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        panel.lift()
+        self._loot_plugin_rules_overlay = panel
+        self._on_plugin_row_selected_cb = panel.set_selected_plugin
+
+    def _close_loot_plugin_rules_overlay(self):
+        panel = getattr(self, "_loot_plugin_rules_overlay", None)
+        if panel:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        self._loot_plugin_rules_overlay = None
+        self._on_plugin_row_selected_cb = None
+
     def _close_download_locations_overlay(self):
         """Destroy the download locations overlay."""
         panel = getattr(self, "_download_locations_overlay", None)
@@ -2512,6 +2591,7 @@ class PluginPanel(ctk.CTkFrame):
         toolbar = ctk.CTkFrame(tab, fg_color=BG_PANEL, corner_radius=0, height=36)
         toolbar.grid(row=3, column=0, sticky="ew")
         toolbar.grid_propagate(False)
+        self._loot_toolbar = toolbar
 
         ctk.CTkButton(
             toolbar, text="Sort Plugins", width=110, height=30,
@@ -2519,6 +2599,20 @@ class PluginPanel(ctk.CTkFrame):
             text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
             command=self._sort_plugins_loot,
         ).pack(side="left", padx=8, pady=8)
+
+        ctk.CTkButton(
+            toolbar, text="Groups", width=80, height=30,
+            fg_color="#1e4d7a", hover_color="#2a6aab",
+            text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
+            command=self._open_loot_groups_overlay,
+        ).pack(side="left", padx=(0, 8), pady=8)
+
+        ctk.CTkButton(
+            toolbar, text="Plugin Rules", width=100, height=30,
+            fg_color="#1e4d7a", hover_color="#2a6aab",
+            text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
+            command=self._open_loot_plugin_rules_overlay,
+        ).pack(side="left", padx=(0, 8), pady=8)
 
         self._plugin_counter_label = ctk.CTkLabel(
             toolbar, text="", font=_theme.FONT_SMALL, text_color=TEXT_DIM,
@@ -2547,6 +2641,106 @@ class PluginPanel(ctk.CTkFrame):
             evt.widget.icursor(tk.END)
             return "break"
         _psearch_entry.bind("<Control-a>", _psearch_select_all)
+
+        # Userlist inline panel (hidden until triggered)
+        self._userlist_panel_plugin: str = ""
+        self._userlist_panel_idx: int = -1
+        ul_panel = tk.Frame(tab, bg=BG_HEADER, highlightthickness=0)
+        ul_panel.grid(row=5, column=0, sticky="ew")
+        ul_panel.grid_remove()  # hidden by default
+        self._ul_panel = ul_panel
+
+        tk.Frame(ul_panel, bg=BORDER, height=1).pack(side="top", fill="x")
+
+        ul_inner = tk.Frame(ul_panel, bg=BG_HEADER)
+        ul_inner.pack(fill="x", padx=8, pady=(6, 2))
+        ul_inner.grid_columnconfigure(1, weight=1)
+
+        _lkw = dict(bg=BG_HEADER, fg=TEXT_DIM, font=("Segoe UI", _theme.FS10))
+        _ekw = dict(bg=BG_DEEP, fg=TEXT_MAIN, insertbackground=TEXT_MAIN,
+                    relief="flat", font=("Segoe UI", _theme.FS10),
+                    highlightthickness=1, highlightbackground=BORDER)
+
+        tk.Label(ul_inner, text="After:", **_lkw).grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+        self._ul_after_var = tk.StringVar()
+        tk.Entry(ul_inner, textvariable=self._ul_after_var, **_ekw).grid(
+            row=0, column=1, sticky="ew", pady=2)
+
+        tk.Label(ul_inner, text="Before:", **_lkw).grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+        self._ul_before_var = tk.StringVar()
+        tk.Entry(ul_inner, textvariable=self._ul_before_var, **_ekw).grid(
+            row=1, column=1, sticky="ew", pady=2)
+
+        tk.Label(ul_inner, text="Separate multiple plugins with  |", **_lkw).grid(
+            row=2, column=1, sticky="w", pady=(0, 2))
+
+        btn_frame = tk.Frame(ul_panel, bg=BG_HEADER)
+        btn_frame.pack(fill="x", padx=8, pady=(2, 6))
+
+        self._ul_name_label = tk.Label(
+            btn_frame, text="", bg=BG_HEADER, fg=TEXT_DIM,
+            font=("Segoe UI", _theme.FS10), anchor="w",
+        )
+        self._ul_name_label.pack(side="left")
+
+        ctk.CTkButton(
+            btn_frame, text="Cancel", width=70, height=24,
+            font=_theme.FONT_SMALL, fg_color=BG_DEEP,
+            hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._ul_cancel,
+        ).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(
+            btn_frame, text="Save", width=70, height=24,
+            font=_theme.FONT_SMALL, fg_color=ACCENT,
+            hover_color=ACCENT_HOV, text_color="white",
+            command=self._ul_save,
+        ).pack(side="right")
+
+        # Group assignment inline panel (hidden until triggered)
+        self._group_panel_plugins: list[str] = []
+        grp_panel = tk.Frame(tab, bg=BG_HEADER, highlightthickness=0)
+        grp_panel.grid(row=6, column=0, sticky="ew")
+        grp_panel.grid_remove()
+        self._grp_panel = grp_panel
+
+        tk.Frame(grp_panel, bg=BORDER, height=1).pack(side="top", fill="x")
+
+        grp_inner = tk.Frame(grp_panel, bg=BG_HEADER)
+        grp_inner.pack(fill="x", padx=8, pady=(6, 2))
+        grp_inner.grid_columnconfigure(1, weight=1)
+
+        tk.Label(grp_inner, text="Group:", **_lkw).grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+        self._grp_var = tk.StringVar(value="default")
+        self._grp_menu = ctk.CTkOptionMenu(
+            grp_inner, variable=self._grp_var, values=["default"],
+            font=_theme.FONT_SMALL,
+            fg_color=BG_DEEP, button_color=ACCENT, button_hover_color=ACCENT_HOV,
+            dropdown_fg_color=BG_PANEL, dropdown_text_color=TEXT_MAIN,
+            text_color=TEXT_MAIN, height=26,
+        )
+        self._grp_menu.grid(row=0, column=1, sticky="ew", pady=2)
+
+        grp_btn_frame = tk.Frame(grp_panel, bg=BG_HEADER)
+        grp_btn_frame.pack(fill="x", padx=8, pady=(2, 6))
+
+        self._grp_name_label = tk.Label(
+            grp_btn_frame, text="", bg=BG_HEADER, fg=TEXT_DIM,
+            font=("Segoe UI", _theme.FS10), anchor="w",
+        )
+        self._grp_name_label.pack(side="left")
+
+        ctk.CTkButton(
+            grp_btn_frame, text="Cancel", width=70, height=24,
+            font=_theme.FONT_SMALL, fg_color=BG_DEEP,
+            hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._grp_cancel,
+        ).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(
+            grp_btn_frame, text="Save", width=70, height=24,
+            font=_theme.FONT_SMALL, fg_color=ACCENT,
+            hover_color=ACCENT_HOV, text_color="white",
+            command=self._grp_save,
+        ).pack(side="right")
 
         self._create_pool()
 
@@ -2633,6 +2827,11 @@ class PluginPanel(ctk.CTkFrame):
                 )
             self._pool_lock_rects.append(lk_rect)
             self._pool_lock_marks.append(lk_mark)
+
+            ul_dot = c.create_oval(0, -200, 0, -200,
+                                   fill="white", outline="", state="hidden")
+            self._pool_ul_dot.append(ul_dot)
+
             def _lk_release(e, slot=s):
                 self._on_pool_lock_toggle(slot)
                 return "break"
@@ -2755,6 +2954,15 @@ class PluginPanel(ctk.CTkFrame):
         plugin_names = [e.name for e in unlocked_entries]
         enabled_set = {e.name for e in unlocked_entries if e.enabled}
 
+        active_profile_dir = getattr(game, "_active_profile_dir", None)
+        _profile_ul = (active_profile_dir / "userlist.yaml") if active_profile_dir else None
+        if _profile_ul and _profile_ul.is_file():
+            userlist_path = _profile_ul
+        else:
+            from Utils.config_paths import get_loot_game_dir
+            _global_ul = get_loot_game_dir(game.game_id) / "userlist.yaml"
+            userlist_path = _global_ul if _global_ul.is_file() else None
+
         try:
             result = loot_sort(
                 plugin_names=plugin_names,
@@ -2767,6 +2975,7 @@ class PluginPanel(ctk.CTkFrame):
                 game_id=game.game_id,
                 masterlist_url=game.loot_masterlist_url,
                 game_data_dir=game.get_vanilla_plugins_path() if hasattr(game, "get_vanilla_plugins_path") else None,
+                userlist_path=userlist_path,
             )
         except RuntimeError as e:
             self._log(f"LOOT sort failed: {e}")
@@ -2821,8 +3030,8 @@ class PluginPanel(ctk.CTkFrame):
         idx_w = scaled(50) + scaled(14)
         lock_w = scaled(28)
         flags_w = scaled(50)
-        flags_x = max(scaled(80), w - idx_w - lock_w - flags_w)
         cb_col_w = scaled(28)
+        flags_x = max(scaled(80), w - idx_w - lock_w - flags_w)
         self._pcol_x = [scaled(4), scaled(4) + cb_col_w, flags_x, flags_x + flags_w, flags_x + flags_w + lock_w]
 
     def _update_plugin_header(self, w: int):
@@ -3021,6 +3230,17 @@ class PluginPanel(ctk.CTkFrame):
 
     def _refresh_plugins_tab(self) -> None:
         """Reload plugin entries from plugins.txt and redraw."""
+        try:
+            topbar = self.winfo_toplevel()._topbar
+            game = _GAMES.get(topbar._game_var.get())
+            loot_enabled = getattr(game, "loot_sort_enabled", False) if game else False
+        except Exception:
+            loot_enabled = False
+        if hasattr(self, "_loot_toolbar"):
+            if loot_enabled:
+                self._loot_toolbar.grid()
+            else:
+                self._loot_toolbar.grid_remove()
         self._refresh_framework_banners()
         self._sel_idx = -1
         self._psel_set = set()
@@ -3132,6 +3352,7 @@ class PluginPanel(ctk.CTkFrame):
             self._save_plugins()
 
         self._apply_plugin_search_filter()
+        self._refresh_userlist_set()
         self._predraw()
 
     def _save_plugins(self) -> None:
@@ -3235,9 +3456,10 @@ class PluginPanel(ctk.CTkFrame):
                 has_missing = entry.name in self._missing_masters
                 has_late = entry.name in self._late_masters
                 has_vmm = entry.name in self._version_mismatch_masters
+                has_ul = entry.name.lower() in self._userlist_plugins
                 flags_x0 = self._pcol_x[2]
                 flags_x1 = self._pcol_x[3]
-                active_flags = [f for f in [has_missing, has_late, has_vmm] if f]
+                active_flags = [f for f in [has_missing, has_late, has_vmm, has_ul] if f]
                 n_flags = len(active_flags)
                 flags_step = (flags_x1 - flags_x0) // (n_flags + 1) if n_flags else 0
                 _flag_pos = iter(
@@ -3267,6 +3489,16 @@ class PluginPanel(ctk.CTkFrame):
                         c.itemconfigure(vmm_warn_id, state="normal")
                     else:
                         c.itemconfigure(vmm_warn_id, state="hidden")
+
+                ul_dot_id = self._pool_ul_dot[s] if s < len(self._pool_ul_dot) else None
+                if ul_dot_id is not None:
+                    if has_ul:
+                        cx = next(_flag_pos)
+                        r = scaled(3)
+                        c.coords(ul_dot_id, cx - r, y_mid - r, cx + r, y_mid + r)
+                        c.itemconfigure(ul_dot_id, state="normal")
+                    else:
+                        c.itemconfigure(ul_dot_id, state="hidden")
 
                 self._pool_data_idx[s] = actual_idx
 
@@ -3311,6 +3543,8 @@ class PluginPanel(ctk.CTkFrame):
                     c.itemconfigure(self._pool_late_warn[s], state="hidden")
                 if self._pool_vmm_warn[s] is not None:
                     c.itemconfigure(self._pool_vmm_warn[s], state="hidden")
+                if s < len(self._pool_ul_dot):
+                    c.itemconfigure(self._pool_ul_dot[s], state="hidden")
                 c.itemconfigure(self._pool_check_rects[s], state="hidden")
                 c.itemconfigure(self._pool_check_marks[s], state="hidden")
                 c.itemconfigure(self._pool_lock_rects[s], state="hidden")
@@ -3562,6 +3796,12 @@ class PluginPanel(ctk.CTkFrame):
                 parts.append("Masters loaded after this plugin:\n" + "\n".join(f"  - {m}" for m in late))
             if vmm:
                 parts.append("Version mismatched masters:\n" + "\n".join(f"  - {m}" for m in vmm))
+            if entry.name.lower() in self._userlist_plugins:
+                ul_msg = "This plugin is managed by userlist.yaml"
+                grp = self._plugin_group_map.get(entry.name.lower())
+                if grp:
+                    ul_msg += f"\nGroup: {grp}"
+                parts.append(ul_msg)
             if parts:
                 screen_x = event.x_root
                 screen_y = event.y_root
@@ -3661,6 +3901,8 @@ class PluginPanel(ctk.CTkFrame):
 
         self._sel_idx = idx
         self._psel_set = {idx}
+        if self._on_plugin_row_selected_cb is not None and 0 <= idx < len(self._plugin_entries):
+            self._on_plugin_row_selected_cb(self._plugin_entries[idx].name)
         # Only allow drag start if not locked and no search filter active
         if not self._is_plugin_locked(idx) and self._plugin_filtered_indices is None:
             self._drag_idx = idx
@@ -3772,6 +4014,306 @@ class PluginPanel(ctk.CTkFrame):
 
         self._show_plugin_context_menu(event.x_root, event.y_root, toggleable)
 
+    # ------------------------------------------------------------------
+    # Userlist helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_userlist_set(self) -> None:
+        """Reload the set of plugin names present in userlist.yaml."""
+        ul_path = self._get_userlist_path()
+        if ul_path and ul_path.is_file():
+            data = self._parse_userlist(ul_path)
+            self._userlist_plugins = {
+                e["name"].lower() for e in data["plugins"] if e.get("name")
+            }
+            self._plugin_group_map = {
+                e["name"].lower(): e["group"]
+                for e in data["plugins"]
+                if e.get("name") and e.get("group") and e["group"] != "default"
+            }
+        else:
+            self._userlist_plugins = set()
+            self._plugin_group_map = {}
+
+    def _get_userlist_path(self) -> Path | None:
+        game = _GAMES.get(self.winfo_toplevel()._topbar._game_var.get())
+        active_dir = getattr(game, "_active_profile_dir", None) if game else None
+        return (active_dir / "userlist.yaml") if active_dir else None
+
+    @staticmethod
+    def _parse_userlist(path: Path) -> dict:
+        """Parse a minimal LOOT userlist.yaml into {'plugins': [...], 'groups': [...]}."""
+        result: dict = {"plugins": [], "groups": []}
+        if not path.is_file():
+            return result
+        text = path.read_text(encoding="utf-8")
+        # Split into top-level sections; collect raw block per plugin/group entry
+        current_section: str | None = None
+        current_block: list[str] = []
+
+        def _flush_block(section, block):
+            if not block:
+                return
+            raw = "\n".join(block)
+            entry: dict = {}
+            # name — first line is "  - name: 'Foo.esp'" or "- name: 'Foo.esp'"
+            m = re.match(r"^[\s\-]*name:\s*['\"]?(.*?)['\"]?\s*$", block[0])
+            if m:
+                entry["name"] = m.group(1)
+            # scalar fields: group
+            for line in block:
+                mg = re.match(r"^\s*group:\s*['\"]?(.*?)['\"]?\s*$", line)
+                if mg:
+                    entry["group"] = mg.group(1)
+            # list fields: before, after
+            for field in ("before", "after"):
+                pat = re.compile(r"^\s*" + field + r":\s*$")
+                inline = re.compile(r"^\s*" + field + r":\s*\[(.+)\]\s*$")
+                items: list[str] = []
+                in_list = False
+                for line in block:
+                    if inline.match(line):
+                        raw_items = inline.match(line).group(1)
+                        items = [i.strip().strip("'\"") for i in raw_items.split(",") if i.strip()]
+                        break
+                    if pat.match(line):
+                        in_list = True
+                        continue
+                    if in_list:
+                        if re.match(r"^\s+\w[\w_]*\s*:", line):
+                            # A new key at the same or lower indent — end of this list
+                            in_list = False
+                        else:
+                            item_m = re.match(r"^\s*-\s*['\"]?(.*?)['\"]?\s*$", line)
+                            if item_m:
+                                items.append(item_m.group(1))
+                if items:
+                    # Deduplicate while preserving order
+                    seen_items: list[str] = []
+                    for item in items:
+                        if item.lower() not in {s.lower() for s in seen_items}:
+                            seen_items.append(item)
+                    entry[field] = seen_items
+            if entry.get("name"):
+                result[section].append(entry)
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped == "plugins:":
+                if current_section:
+                    _flush_block(current_section, current_block)
+                current_section = "plugins"
+                current_block = []
+            elif stripped == "groups:":
+                if current_section:
+                    _flush_block(current_section, current_block)
+                current_section = "groups"
+                current_block = []
+            elif stripped.startswith("- name:") and current_section:
+                if current_block:
+                    _flush_block(current_section, current_block)
+                current_block = [line]
+            elif current_section and (line.startswith("  ") or line.startswith("\t")):
+                current_block.append(line)
+
+        if current_section and current_block:
+            _flush_block(current_section, current_block)
+
+        return result
+
+    @staticmethod
+    def _write_userlist(path: Path, data: dict):
+        """Write a userlist dict back to YAML format."""
+        lines = []
+
+        def _quote(s: str) -> str:
+            return f"'{s}'"
+
+        plugins = data.get("plugins", [])
+        groups = data.get("groups", [])
+
+        if plugins:
+            lines.append("plugins:")
+            for entry in plugins:
+                lines.append(f"  - name: {_quote(entry['name'])}")
+                for field in ("before", "after"):
+                    items = entry.get(field, [])
+                    if items:
+                        lines.append(f"    {field}:")
+                        for item in items:
+                            lines.append(f"      - {_quote(item)}")
+                if entry.get("group"):
+                    lines.append(f"    group: {_quote(entry['group'])}")
+
+        if groups:
+            if lines:
+                lines.append("")
+            lines.append("groups:")
+            for entry in groups:
+                lines.append(f"  - name: {_quote(entry['name'])}")
+                after_items = entry.get("after", [])
+                if after_items:
+                    lines.append(f"    after:")
+                    for item in after_items:
+                        lines.append(f"      - {_quote(item)}")
+
+        tmp = path.with_suffix(".yaml.tmp")
+        if lines:
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        else:
+            # Nothing left — remove the file so libloot doesn't choke on an empty document
+            tmp.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+
+    def _add_plugin_to_userlist(self, plugin_name: str, idx: int):
+        """Show the inline userlist panel pre-populated for this plugin."""
+        ul_path = self._get_userlist_path()
+        if ul_path is None:
+            self._log("No active profile — cannot edit userlist.")
+            return
+
+        data = self._parse_userlist(ul_path)
+        existing_entry = next(
+            (e for e in data["plugins"] if e.get("name", "").lower() == plugin_name.lower()),
+            None,
+        )
+
+        # Always derive before/after from current load order position;
+        # preserve saved group if there's an existing entry.
+        entries = self._plugin_entries
+        after_plugin  = entries[idx - 1].name if idx > 0 else ""
+        before_plugin = entries[idx + 1].name if idx + 1 < len(entries) else ""
+
+        self._ul_after_var.set(after_plugin)
+        self._ul_before_var.set(before_plugin)
+        self._ul_name_label.configure(text=plugin_name)
+        self._userlist_panel_plugin = plugin_name
+        self._userlist_panel_idx = idx
+        self._ul_panel.grid()
+
+    @staticmethod
+    def _ul_parse_list(val: str) -> list[str]:
+        return [p.strip() for p in val.split("|") if p.strip()]
+
+    def _ul_save(self):
+        plugin_name = self._userlist_panel_plugin
+        ul_path = self._get_userlist_path()
+        if not plugin_name or ul_path is None:
+            self._ul_cancel()
+            return
+
+        data = self._parse_userlist(ul_path)
+        data["plugins"] = [
+            e for e in data["plugins"]
+            if e.get("name", "").lower() != plugin_name.lower()
+        ]
+
+        # Preserve existing group when only updating before/after
+        existing = next(
+            (e for e in data["plugins"] if e.get("name", "").lower() == plugin_name.lower()),
+            {},
+        )
+        entry: dict = {"name": plugin_name}
+        before = self._ul_parse_list(self._ul_before_var.get())
+        after  = self._ul_parse_list(self._ul_after_var.get())
+        if after:
+            entry["after"] = after
+        if before:
+            entry["before"] = before
+        entry["group"] = existing.get("group") or "default"
+        data["plugins"].append(entry)
+
+        ul_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_userlist(ul_path, data)
+        self._log(f"Userlist updated: {plugin_name}")
+        self._refresh_userlist_set()
+        self._predraw()
+        self._ul_cancel()
+
+    def _ul_cancel(self):
+        self._userlist_panel_plugin = ""
+        self._userlist_panel_idx = -1
+        self._ul_panel.grid_remove()
+
+    def _add_plugins_to_group(self, plugin_names: list[str]):
+        """Show the inline group assignment panel for one or more plugins."""
+        ul_path = self._get_userlist_path()
+        if ul_path is None:
+            self._log("No active profile — cannot assign group.")
+            return
+
+        data = self._parse_userlist(ul_path) if ul_path.is_file() else {"plugins": [], "groups": []}
+        groups = [g["name"] for g in data.get("groups", []) if g.get("name")]
+        if "default" not in groups:
+            groups.insert(0, "default")
+
+        # Use current group of first plugin as default selection
+        first = next(
+            (e for e in data["plugins"] if e.get("name", "").lower() == plugin_names[0].lower()),
+            {},
+        )
+        current_group = first.get("group", "default")
+
+        self._grp_menu.configure(values=groups)
+        self._grp_var.set(current_group if current_group in groups else groups[0])
+        label = plugin_names[0] if len(plugin_names) == 1 else f"{len(plugin_names)} plugins"
+        self._grp_name_label.configure(text=label)
+        self._group_panel_plugins = plugin_names
+        self._grp_panel.grid()
+
+    def _grp_save(self):
+        plugin_names = getattr(self, "_group_panel_plugins", [])
+        ul_path = self._get_userlist_path()
+        if not plugin_names or ul_path is None:
+            self._grp_cancel()
+            return
+
+        group = self._grp_var.get()
+        data = self._parse_userlist(ul_path) if ul_path.is_file() else {"plugins": [], "groups": []}
+        names_lower = {n.lower() for n in plugin_names}
+
+        for plugin_name in plugin_names:
+            existing = next(
+                (e for e in data["plugins"] if e.get("name", "").lower() == plugin_name.lower()),
+                None,
+            )
+            data["plugins"] = [
+                e for e in data["plugins"]
+                if e.get("name", "").lower() != plugin_name.lower()
+            ]
+            entry = dict(existing) if existing else {"name": plugin_name}
+            entry["name"] = plugin_name
+            entry["group"] = group
+            data["plugins"].append(entry)
+
+        ul_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_userlist(ul_path, data)
+        self._log(f"Group assigned: {len(plugin_names)} plugin(s) → {group}")
+        self._refresh_userlist_set()
+        self._predraw()
+        self._grp_cancel()
+
+    def _grp_cancel(self):
+        self._group_panel_plugins = []
+        self._grp_panel.grid_remove()
+
+    def _remove_plugin_from_userlist(self, plugin_name: str):
+        self._remove_plugins_from_userlist([plugin_name])
+
+    def _remove_plugins_from_userlist(self, plugin_names: list[str]):
+        """Remove one or more plugin entries from userlist.yaml."""
+        ul_path = self._get_userlist_path()
+        if ul_path is None:
+            return
+        lower = {n.lower() for n in plugin_names}
+        data = self._parse_userlist(ul_path)
+        data["plugins"] = [e for e in data["plugins"] if e.get("name", "").lower() not in lower]
+        self._write_userlist(ul_path, data)
+        self._log(f"Removed from userlist: {len(plugin_names)} plugin(s)")
+        self._refresh_userlist_set()
+        self._predraw()
+
     def _show_plugin_context_menu(self, x: int, y: int, toggleable: list[int]):
         """Custom popup context menu for the plugin panel."""
         popup = tk.Toplevel(self._pcanvas)
@@ -3802,11 +4344,27 @@ class PluginPanel(ctk.CTkFrame):
                            lambda idxs=toggleable: self._enable_selected_plugins(idxs)))
             items.append(("Disable plugin",
                            lambda idxs=toggleable: self._disable_selected_plugins(idxs)))
+            plugin_name = self._plugin_entries[toggleable[0]].name
+            plugin_idx = toggleable[0]
+            if plugin_name.lower() not in self._userlist_plugins:
+                items.append(("Add to userlist...",
+                               lambda n=plugin_name, i=plugin_idx: self._add_plugin_to_userlist(n, i)))
+            items.append(("Add to group...",
+                           lambda n=plugin_name: self._add_plugins_to_group([n])))
+            if plugin_name.lower() in self._userlist_plugins:
+                items.append(("Remove from userlist",
+                               lambda n=plugin_name: self._remove_plugin_from_userlist(n)))
         else:
             items.append((f"Enable selected ({count})",
                            lambda idxs=toggleable: self._enable_selected_plugins(idxs)))
             items.append((f"Disable selected ({count})",
                            lambda idxs=toggleable: self._disable_selected_plugins(idxs)))
+            names = [self._plugin_entries[i].name for i in toggleable]
+            items.append(("Add selected to group...",
+                           lambda ns=names: self._add_plugins_to_group(ns)))
+            if any(n.lower() in self._userlist_plugins for n in names):
+                items.append(("Remove selected from userlist",
+                               lambda ns=names: self._remove_plugins_from_userlist(ns)))
 
         for label, cmd in items:
             btn = tk.Label(

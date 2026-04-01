@@ -5598,3 +5598,109 @@ class CollectionContinueInstallDialog(tk.Frame):
     def _on_cancel(self):
         self._on_done(None)
 
+
+class _UserlistEntryDialog(ctk.CTkToplevel):
+    """Dialog to configure a plugin's userlist.yaml entry (before/after/group)."""
+
+    def __init__(self, parent, plugin_name: str, existing: dict):
+        """
+        existing: dict with optional keys 'before', 'after', 'group'
+                  where before/after are lists of str and group is str.
+        """
+        super().__init__(parent, fg_color=BG_DEEP)
+        self.title("Add to Userlist")
+        self.geometry("460x300")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.after(100, self._make_modal)
+
+        self._plugin_name = plugin_name
+        self._existing = existing
+        self.result: dict | None = None
+        self._build()
+
+    def _make_modal(self):
+        try:
+            self.grab_set()
+            self.focus_set()
+        except Exception:
+            pass
+
+    def _build(self):
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self, text=f"Userlist entry: {self._plugin_name}",
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 2))
+
+        ctk.CTkLabel(
+            self, text="Separate multiple plugin names with commas.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+
+        def _row(parent, row, label, var):
+            ctk.CTkLabel(
+                parent, text=label, font=FONT_NORMAL,
+                text_color=TEXT_DIM, anchor="w", width=60,
+            ).grid(row=row, column=0, sticky="w", padx=(16, 4), pady=3)
+            ctk.CTkEntry(
+                parent, textvariable=var, font=FONT_NORMAL,
+                fg_color=BG_PANEL, text_color=TEXT_MAIN, border_color=BORDER,
+            ).grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=3)
+
+        fields = ctk.CTkFrame(self, fg_color="transparent")
+        fields.grid(row=2, column=0, sticky="ew")
+        fields.grid_columnconfigure(1, weight=1)
+
+        before_list = self._existing.get("before", [])
+        after_list  = self._existing.get("after",  [])
+        group_val   = self._existing.get("group",  "")
+
+        self._before_var = tk.StringVar(value=", ".join(before_list))
+        self._after_var  = tk.StringVar(value=", ".join(after_list))
+        self._group_var  = tk.StringVar(value=group_val)
+
+        _row(fields, 0, "Before:", self._before_var)
+        _row(fields, 1, "After:",  self._after_var)
+        _row(fields, 2, "Group:",  self._group_var)
+
+        # Button bar
+        bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=44)
+        bar.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        bar.grid_propagate(False)
+        ctk.CTkFrame(bar, fg_color=BORDER, height=1, corner_radius=0).pack(side="top", fill="x")
+        ctk.CTkButton(
+            bar, text="Cancel", width=80, height=28, font=FONT_NORMAL,
+            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
+            command=self._on_cancel,
+        ).pack(side="right", padx=(4, 12), pady=8)
+        ctk.CTkButton(
+            bar, text="Save", width=80, height=28, font=FONT_NORMAL,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            command=self._on_ok,
+        ).pack(side="right", padx=4, pady=8)
+
+    def _parse_list(self, var: tk.StringVar) -> list[str]:
+        raw = var.get().strip()
+        if not raw:
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def _on_ok(self):
+        entry: dict = {}
+        before = self._parse_list(self._before_var)
+        after  = self._parse_list(self._after_var)
+        group  = self._group_var.get().strip() or "default"
+        if before:
+            entry["before"] = before
+        if after:
+            entry["after"] = after
+        entry["group"] = group
+        self.result = entry
+        self.destroy()
+
+    def _on_cancel(self):
+        self.destroy()
+
