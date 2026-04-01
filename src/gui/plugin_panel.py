@@ -32,6 +32,7 @@ from gui.theme import (
     BORDER,
     TEXT_DIM,
     TEXT_MAIN,
+    TEXT_OK,
     TEXT_SEP,
     plugin_mod,
     scaled,
@@ -1710,6 +1711,7 @@ class PluginPanel(ctk.CTkFrame):
         self._ini_files_tree.column("#0", minwidth=150, stretch=True)
         self._ini_files_tree.column("mod", minwidth=120, stretch=True)
         self._ini_files_tree.tag_configure("mod_highlight", background=plugin_mod, foreground=TEXT_MAIN)
+        self._ini_files_tree.tag_configure("game_folder", foreground=TEXT_OK)
 
         self._ini_marker_strip = tk.Canvas(
             list_frame, bg=BG_DEEP, bd=0, highlightthickness=0,
@@ -1815,6 +1817,23 @@ class PluginPanel(ctk.CTkFrame):
                 continue
             ini_entries.append((rel_path, mod_name, full_path))
 
+        # Also scan the game folder for vanilla ini/json files (not hardlinks/symlinks).
+        game_path = self._game.get_game_path() if self._game and hasattr(self._game, "get_game_path") else None
+        if game_path and Path(game_path).is_dir():
+            game_root = Path(game_path)
+            for fpath in game_root.rglob("*"):
+                if fpath.suffix.lower() not in self._INI_JSON_EXTENSIONS:
+                    continue
+                try:
+                    st = fpath.stat()
+                except OSError:
+                    continue
+                # Skip symlinks and hardlinks (deployed files have nlink > 1)
+                if fpath.is_symlink() or st.st_nlink > 1:
+                    continue
+                rel = fpath.relative_to(game_root).as_posix()
+                ini_entries.append((rel, "Game Folder", fpath))
+
         self._ini_files_entries = sorted(ini_entries, key=lambda t: (t[0].lower(), t[1].lower()))
         self._apply_ini_search_filter()
 
@@ -1851,7 +1870,12 @@ class PluginPanel(ctk.CTkFrame):
                 self._ini_files_tree.insert("", "end", text="(no ini/json files in filemap)", values=("",))
             return
         for rel_path, mod_name, _ in self._ini_files_displayed:
-            tags = ("mod_highlight",) if mod_name == self._highlighted_ini_mod else ()
+            if mod_name == self._highlighted_ini_mod:
+                tags = ("mod_highlight",)
+            elif mod_name == "Game Folder":
+                tags = ("game_folder",)
+            else:
+                tags = ()
             self._ini_files_tree.insert("", "end", text=Path(rel_path).name, values=(mod_name,), tags=tags)
         self._draw_ini_marker_strip()
 
@@ -1868,7 +1892,12 @@ class PluginPanel(ctk.CTkFrame):
             if i >= len(displayed):
                 break
             _, mod_name, _ = displayed[i]
-            tags = ("mod_highlight",) if self._highlighted_ini_mod and mod_name == self._highlighted_ini_mod else ()
+            if self._highlighted_ini_mod and mod_name == self._highlighted_ini_mod:
+                tags = ("mod_highlight",)
+            elif mod_name == "Game Folder":
+                tags = ("game_folder",)
+            else:
+                tags = ()
             self._ini_files_tree.item(iid, tags=tags)
 
     def _draw_ini_marker_strip(self):
