@@ -129,7 +129,7 @@ from gui.mod_files_overlay import ModFilesOverlay
 from Nexus.nexus_meta import build_meta_from_download, ensure_installed_stamp, read_meta, write_meta
 from Nexus.nexus_download import delete_archive_and_sidecar
 from Utils.config_paths import get_download_cache_dir
-from Utils.ui_config import load_column_widths, save_column_widths, load_column_order, save_column_order, load_normalize_folder_case
+from Utils.ui_config import load_column_widths, save_column_widths, load_column_order, save_column_order, load_normalize_folder_case, load_sort_state, save_sort_state
 from Nexus.nexus_update_checker import check_for_updates
 
 
@@ -438,8 +438,7 @@ class ModListPanel(ctk.CTkFrame):
 
         # Column sorting (visual only — never touches modlist.txt)
         # _sort_column: None or one of "name", "installed", "flags", "conflicts", "priority"
-        self._sort_column: str | None = None
-        self._sort_ascending: bool = True
+        self._sort_column, self._sort_ascending = load_sort_state()
 
         # Column resize overrides: col index (1–6) → width in px
         # When set, _layout_columns uses this instead of auto-calculated width.
@@ -1848,6 +1847,11 @@ class ModListPanel(ctk.CTkFrame):
         _FONT_RADIO = ("Segoe UI", _theme.FS13, "bold")
         _FONT_STAR = ("Segoe UI", _theme.FS11)
 
+        # Indices currently being dragged — suppress _sel_set highlight for these
+        # so the blue box only shows at the current drag position, not the origin.
+        _dragging = (set(self._drag_sel_indices) if self._drag_sel_indices
+                     else ({self._drag_idx} if self._drag_idx >= 0 else set()))
+
         canvas_top = int(c.canvasy(0))
         canvas_h = c.winfo_height()
 
@@ -1964,7 +1968,7 @@ class ModListPanel(ctk.CTkFrame):
                     is_overwrite   = (entry.name == OVERWRITE_NAME)
                     is_root_folder = (entry.name == ROOT_FOLDER_NAME)
                     is_synthetic   = is_overwrite or is_root_folder
-                    is_sel_row = (i in self._sel_set)
+                    is_sel_row = (i in self._sel_set and i not in _dragging) or (i == self._drag_idx)
 
                     custom_color = None
                     if is_overwrite:
@@ -2198,7 +2202,7 @@ class ModListPanel(ctk.CTkFrame):
 
                 else:
                     # --- Regular mod row ---
-                    is_sel = (i in self._sel_set) or (i == self._drag_idx)
+                    is_sel = (i in self._sel_set and i not in _dragging) or (i == self._drag_idx)
                     if is_sel:
                         bg = BG_SELECT
                     elif entry.name == self._highlighted_mod:
@@ -2719,6 +2723,7 @@ class ModListPanel(ctk.CTkFrame):
         else:
             self._sort_column = sort_key
             self._sort_ascending = True
+        save_sort_state(self._sort_column, self._sort_ascending)
         self._update_header(self._canvas_w)
         self._invalidate_derived_caches()
         self._redraw()
@@ -3369,7 +3374,9 @@ class ModListPanel(ctk.CTkFrame):
             if self._drag_sel_indices:
                 self._drag_sel_indices = list(range(insert_at, insert_at + len(self._drag_block)))
                 self._sel_set = set(self._drag_sel_indices)
-                self._sel_idx = insert_at
+            else:
+                self._sel_set = set(range(insert_at, insert_at + len(self._drag_block)))
+            self._sel_idx = insert_at
         else:
             entry = self._entries.pop(self._drag_idx)
             var   = self._check_vars.pop(self._drag_idx)
