@@ -1644,6 +1644,7 @@ class ProtonToolsPanel(ctk.CTkFrame):
         ctk.CTkButton(inner, text="Install d3dcompiler_47",         command=self._run_install_d3dcompiler_47, **btn_cfg).pack(pady=(0, 6))
         ctk.CTkButton(inner, text="Install .NET …",                 command=self._run_install_dotnet,  **btn_cfg).pack(pady=(0, 6))
         ctk.CTkButton(inner, text="Open game folder",               command=self._open_game_folder,    **btn_cfg).pack(pady=(0, 6))
+        ctk.CTkButton(inner, text="Wine DLL Overrides",            command=self._open_wine_dll_overrides, **btn_cfg).pack(pady=(0, 6))
 
     def _get_proton_env(self):
         from Utils.steam_finder import (
@@ -1921,6 +1922,26 @@ class ProtonToolsPanel(ctk.CTkFrame):
         panel = _DotNetVersionPanel(container, on_pick=_on_version_picked)
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         panel.lift()
+
+    def _open_wine_dll_overrides(self):
+        app = self.winfo_toplevel()
+        show_fn = getattr(app, "show_wine_dll_panel", None)
+        game = self._game
+        log = self._log
+        if show_fn:
+            self._on_done(self)
+            app.after(10, lambda: show_fn(game, log))
+        else:
+            from gui.wine_dll_overrides_panel import WineDllOverridesPanel
+            self._on_done(self)
+            try:
+                parent = app._plugin_panel_container
+            except AttributeError:
+                parent = app
+            panel = WineDllOverridesPanel(parent, game, log,
+                                          on_done=lambda p: p.place_forget() or p.destroy())
+            panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+            panel.lift()
 
     def _on_close(self):
         self._on_done(self)

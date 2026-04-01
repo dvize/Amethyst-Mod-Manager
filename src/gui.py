@@ -1428,6 +1428,22 @@ class App(ctk.CTk):
     def hide_proton_panel(self):
         self._hide_plugin_overlay("_proton_panel")
 
+    # -- Wine DLL Overrides panel --------------------------------------------
+
+    def show_wine_dll_panel(self, game, log_fn):
+        self._ensure_plugin_panel_visible()
+        from gui.wine_dll_overrides_panel import WineDllOverridesPanel
+        self._show_plugin_overlay(
+            "_wine_dll_panel",
+            lambda: WineDllOverridesPanel(
+                self._plugin_panel_container, game, log_fn,
+                on_done=lambda p: self._hide_plugin_overlay("_wine_dll_panel"),
+            ),
+        )
+
+    def hide_wine_dll_panel(self):
+        self._hide_plugin_overlay("_wine_dll_panel")
+
     # -- Wizard panel --------------------------------------------------------
 
     def show_wizard_panel(self, game, log_fn):

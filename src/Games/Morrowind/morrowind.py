@@ -16,7 +16,6 @@ from pathlib import Path
 from Games.base_game import BaseGame, WizardTool
 from Utils.deploy import (
     LinkMode,
-    apply_wine_dll_overrides,
     cleanup_custom_deploy_dirs,
     deploy_core,
     deploy_filemap,
@@ -317,9 +316,10 @@ class Morrowind(BaseGame):
                         _renamed += 1
         _log(f"  Renamed {_renamed} file(s).")
 
-        if self._prefix_path and self.wine_dll_overrides:
+        if self._prefix_path and self._prefix_path.is_dir():
             _log("Step 5: Applying Wine DLL overrides ...")
-            apply_wine_dll_overrides(self._prefix_path, self.wine_dll_overrides, log_fn=_log)
+            from Utils.wine_dll_config import deploy_game_wine_dll_overrides
+            deploy_game_wine_dll_overrides(self.name, self._prefix_path, self.wine_dll_overrides, log_fn=_log)
 
         _log("Step 6: Updating Morrowind.ini [Game Files] and setting plugin mtimes ...")
         from Games.Morrowind.morrowind_ini import update_morrowind_ini

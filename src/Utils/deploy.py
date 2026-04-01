@@ -2506,3 +2506,82 @@ def apply_wine_dll_overrides(
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def remove_wine_dll_overrides(
+    prefix_path: Path,
+    dlls: "list[str] | set[str]",
+    log_fn=None,
+) -> None:
+    """Remove Wine DLL override entries from the Proton prefix's user.reg.
+
+    *dlls* is a collection of DLL names whose ``[Software\\\\Wine\\\\DllOverrides]``
+    entries should be deleted.  Entries not present in the file are silently
+    skipped.  The file is written atomically.
+    """
+    _log = log_fn or (lambda _: None)
+
+    if not dlls:
+        return
+
+    dlls_lower = {d.lower() for d in dlls}
+
+    # Accept either the pfx/ directory directly or its parent
+    if not (prefix_path / "user.reg").is_file() and (prefix_path / "pfx" / "user.reg").is_file():
+        prefix_path = prefix_path / "pfx"
+    user_reg = prefix_path / "user.reg"
+    if not user_reg.is_file():
+        _log(f"Warning: user.reg not found at {user_reg}; skipping DLL override removal.")
+        return
+
+    try:
+        text = user_reg.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        _log(f"Warning: could not read user.reg: {exc}")
+        return
+
+    lines = text.splitlines(keepends=True)
+    section_header = "[Software\\\\Wine\\\\DllOverrides]"
+
+    section_start: int | None = None
+    section_end: int | None = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower().startswith(section_header.lower()):
+            section_start = i
+        elif section_start is not None and stripped.startswith("["):
+            section_end = i
+            break
+
+    if section_start is None:
+        return  # section doesn't exist, nothing to remove
+
+    body_start = section_start + 1
+    body_end = section_end if section_end is not None else len(lines)
+    key_lines = lines[body_start:body_end]
+
+    new_key_lines = []
+    for kline in key_lines:
+        stripped = kline.strip()
+        if stripped.startswith('"'):
+            # Extract the key name between the first pair of quotes
+            end_quote = stripped.find('"', 1)
+            if end_quote > 1:
+                key_name = stripped[1:end_quote].lower()
+                if key_name in dlls_lower:
+                    _log(f"  DLL override removed: {stripped[1:end_quote]}")
+                    continue  # drop this line
+        new_key_lines.append(kline)
+
+    lines[body_start:body_end] = new_key_lines
+
+    tmp = user_reg.with_suffix(".reg.tmp")
+    try:
+        tmp.write_text("".join(lines), encoding="utf-8")
+        tmp.replace(user_reg)
+    except OSError as exc:
+        _log(f"Warning: could not write user.reg: {exc}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
