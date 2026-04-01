@@ -2514,8 +2514,18 @@ class ModListPanel(ctk.CTkFrame):
         """Return entry indices that match the current filter, collapsed state, and column sort."""
         # Step 1: basic visibility (filter or collapse)
         if self._filter_text:
-            base = [i for i, e in enumerate(self._entries)
-                    if self._filter_text in e.name.lower()]
+            ft = self._filter_text
+            # Include mods that match AND separators that own at least one matching mod.
+            matched_mods = {i for i, e in enumerate(self._entries)
+                            if not e.is_separator and ft in e.name.lower()}
+            base = []
+            for i, e in enumerate(self._entries):
+                if e.is_separator:
+                    blk = self._sep_block_range(i)
+                    if any(j in matched_mods for j in blk if j != i):
+                        base.append(i)
+                elif i in matched_mods:
+                    base.append(i)
         elif not self._collapsed_seps:
             base = list(range(len(self._entries)))
         else:
