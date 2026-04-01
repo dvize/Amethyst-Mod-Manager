@@ -166,86 +166,86 @@ class App(ctk.CTk):
         super().__init__(fg_color=BG_DEEP)
         self.withdraw()  # hide until fully built; splash covers during load
 
-        # --- Splash screen (child of this root so images share the same Tk) --
-        _SPLASH_BG = "#1a1a2e"
-        self._splash: tk.Toplevel | None = tk.Toplevel(self)
-        self._splash.withdraw()  # hide until geometry is set to prevent flash at 0,0
-        self._splash.overrideredirect(True)
-        self._splash.configure(bg=_SPLASH_BG)
+        # --- Splash screen (transparent GTK subprocess) --------------------
+        self._splash_proc: subprocess.Popen | None = None
         _logo_path = Path(__file__).parent / "icons" / "Logo.png"
-        self._splash_logo_img = None
-        if _logo_path.is_file():
-            try:
-                from PIL import Image as _PILImage, ImageTk as _PILImageTk
-                _pil = _PILImage.open(str(_logo_path)).convert("RGBA")
-                # Composite logo onto the dark bg so alpha edges blend correctly
-                _bg = _PILImage.new("RGBA", _pil.size, _SPLASH_BG)
-                _bg.paste(_pil, mask=_pil.split()[3])
-                self._splash_logo_img = _PILImageTk.PhotoImage(_bg.convert("RGB"))
-            except Exception:
-                self._splash_logo_img = tk.PhotoImage(file=str(_logo_path))
-            tk.Label(self._splash, image=self._splash_logo_img,
-                     bg=_SPLASH_BG, bd=0).pack()
-        else:
-            tk.Label(self._splash, text="Loading…", bg=_SPLASH_BG, fg="white",
-                     font=("sans-serif", 18)).pack(padx=40, pady=40)
-        self._splash.update_idletasks()
-        _sw = self._splash.winfo_reqwidth()
-        _sh = self._splash.winfo_reqheight()
-        # Centre on the monitor containing the mouse pointer.
-        # On multi-monitor setups winfo_screenwidth returns the combined virtual
-        # desktop width; we use the pointer position + monitor list to find the
-        # right monitor.  Several query paths are tried in order.
-        def _monitor_rect_for_pointer():
-            """Return (mon_x, mon_y, mon_w, mon_h) for the monitor under the pointer."""
-            try:
-                import re as _re, subprocess as _sp
-                _px = self._splash.winfo_pointerx()
-                _py = self._splash.winfo_pointery()
-
-                # --- Try xrandr (XWayland / X11) ---
+        _splash_script = Path(__file__).parent / "splash_gtk.py"
+        if _logo_path.is_file() and _splash_script.is_file():
+            # Read PNG dimensions from header to compute centred position
+            def _png_size(_p):
                 try:
-                    out = _sp.check_output(["xrandr", "--query"], text=True, timeout=2)
-                    for _m in _re.finditer(r"(\d+)x(\d+)\+(\d+)\+(\d+)", out):
-                        _mw, _mh, _mx, _my = (int(g) for g in _m.groups())
-                        if _mx <= _px < _mx + _mw and _my <= _py < _my + _mh:
-                            return _mx, _my, _mw, _mh
+                    import struct
+                    with open(_p, 'rb') as _f:
+                        _f.read(16)  # skip sig (8) + IHDR chunk length (4) + 'IHDR' (4)
+                        return struct.unpack('>II', _f.read(8))
+                except Exception:
+                    return 0, 0
+
+            _iw, _ih = _png_size(_logo_path)
+            # Centre on the monitor containing the mouse pointer.
+            # On multi-monitor setups winfo_screenwidth returns the combined virtual
+            # desktop width; we use the pointer position + monitor list to find the
+            # right monitor.  Several query paths are tried in order.
+            def _monitor_rect_for_pointer():
+                """Return (mon_x, mon_y, mon_w, mon_h) for the monitor under the pointer."""
+                try:
+                    import re as _re, subprocess as _sp
+                    _px = self.winfo_pointerx()
+                    _py = self.winfo_pointery()
+
+                    # --- Try xrandr (XWayland / X11) ---
+                    try:
+                        out = _sp.check_output(["xrandr", "--query"], text=True, timeout=2)
+                        for _m in _re.finditer(r"(\d+)x(\d+)\+(\d+)\+(\d+)", out):
+                            _mw, _mh, _mx, _my = (int(g) for g in _m.groups())
+                            if _mx <= _px < _mx + _mw and _my <= _py < _my + _mh:
+                                return _mx, _my, _mw, _mh
+                    except Exception:
+                        pass
+
+                    # --- Try wlr-randr (wlroots/Sway) ---
+                    try:
+                        out = _sp.check_output(["wlr-randr"], text=True, timeout=2)
+                        # Lines: "  1920x1080 px, ..." preceded by position line "  ...at 1920,0"
+                        _blocks = _re.findall(
+                            r"(\d+)x(\d+) px.*?at (\d+),(\d+)", out, _re.DOTALL)
+                        for _mw, _mh, _mx, _my in (
+                                (int(a), int(b), int(c), int(d)) for a, b, c, d in _blocks):
+                            if _mx <= _px < _mx + _mw and _my <= _py < _my + _mh:
+                                return _mx, _my, _mw, _mh
+                    except Exception:
+                        pass
+
+                    # --- Heuristic: if screen is wider than tall, assume side-by-side monitors ---
+                    _sw_total = self.winfo_screenwidth()
+                    _sh_total = self.winfo_screenheight()
+                    if _sw_total > _sh_total * 1.5:
+                        # Guess monitor width as half the virtual width
+                        _mw = _sw_total // 2
+                        _mx = (_px // _mw) * _mw
+                        return _mx, 0, _mw, _sh_total
+
                 except Exception:
                     pass
+                return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
 
-                # --- Try wlr-randr (wlroots/Sway) ---
-                try:
-                    out = _sp.check_output(["wlr-randr"], text=True, timeout=2)
-                    # Lines: "  1920x1080 px, ..." preceded by position line "  ...at 1920,0"
-                    _blocks = _re.findall(
-                        r"(\d+)x(\d+) px.*?at (\d+),(\d+)", out, _re.DOTALL)
-                    for _mw, _mh, _mx, _my in (
-                            (int(a), int(b), int(c), int(d)) for a, b, c, d in _blocks):
-                        if _mx <= _px < _mx + _mw and _my <= _py < _my + _mh:
-                            return _mx, _my, _mw, _mh
-                except Exception:
-                    pass
-
-                # --- Heuristic: if screen is wider than tall, assume side-by-side monitors ---
-                _sw_total = self.winfo_screenwidth()
-                _sh_total = self.winfo_screenheight()
-                if _sw_total > _sh_total * 1.5:
-                    # Guess monitor width as half the virtual width
-                    _mw = _sw_total // 2
-                    _mx = (_px // _mw) * _mw
-                    return _mx, 0, _mw, _sh_total
-
+            _mrx, _mry, _mrw, _mrh = _monitor_rect_for_pointer()
+            _sx = _mrx + (_mrw - _iw) // 2 if _iw else _mrx + _mrw // 2
+            _sy = _mry + (_mrh - _ih) // 2 if _ih else _mry + _mrh // 2
+            try:
+                _splash_env = os.environ.copy()
+                # Force X11 backend so Gtk.WindowType.POPUP sets override_redirect
+                # at the X11 level — under the Wayland backend this flag is ignored
+                # and KWin adds decorations regardless.
+                _splash_env['GDK_BACKEND'] = 'x11'
+                self._splash_proc = subprocess.Popen(
+                    [sys.executable, str(_splash_script), str(_logo_path), str(_sx), str(_sy)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=_splash_env,
+                )
             except Exception:
                 pass
-            return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
-
-        _mrx, _mry, _mrw, _mrh = _monitor_rect_for_pointer()
-        _sx = _mrx + (_mrw - _sw) // 2
-        _sy = _mry + (_mrh - _sh) // 2
-        self._splash.geometry(f"{_sw}x{_sh}+{_sx}+{_sy}")
-        self._splash.deiconify()  # show only after geometry is set — no flash at 0,0
-        self._splash.update()
-        # ---------------------------------------------------------------------
+        # -------------------------------------------------------------------
 
         init_fonts(self)
         # Restore saved window size/position, or use default
@@ -310,12 +310,12 @@ class App(ctk.CTk):
     # -- Splash screen ------------------------------------------------------
 
     def _finish_splash(self):
-        if self._splash is not None:
+        if self._splash_proc is not None:
             try:
-                self._splash.destroy()
+                self._splash_proc.terminate()
             except Exception:
                 pass
-            self._splash = None
+            self._splash_proc = None
         self.update_idletasks()
         self.deiconify()
 

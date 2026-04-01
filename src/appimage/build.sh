@@ -108,6 +108,54 @@ else
     echo "  WARNING: bsdtar not found on build system — skipping"
 fi
 
+# ── Step 4e: Bundle PyGObject (gi) for transparent GTK splash ────────
+# python-gobject can't be pip-installed; we copy the compiled .so files and
+# their GLib/GObject shared library deps from the build system instead.
+# The splash script falls back gracefully if these are missing at runtime.
+echo "=== Bundling PyGObject (gi) for transparent splash ==="
+PYTHON_SITE="${APPDIR}/opt/python3.13/lib/python3.13/site-packages"
+# Find the system gi package
+GI_SYSTEM_PATH="$(python3 -c "import gi; import os; print(os.path.dirname(gi.__file__))" 2>/dev/null || true)"
+if [ -n "$GI_SYSTEM_PATH" ] && [ -d "$GI_SYSTEM_PATH" ]; then
+    cp -r "$GI_SYSTEM_PATH" "$PYTHON_SITE/gi"
+    echo "  Copied gi from: $GI_SYSTEM_PATH"
+    # Also copy cairo Python bindings if available
+    CAIRO_SYSTEM_PATH="$(python3 -c "import site; import os; [print(os.path.join(p,'cairo')) for p in site.getsitepackages() if os.path.isdir(os.path.join(p,'cairo'))]" 2>/dev/null | head -1 || true)"
+    if [ -n "$CAIRO_SYSTEM_PATH" ] && [ -d "$CAIRO_SYSTEM_PATH" ]; then
+        cp -r "$CAIRO_SYSTEM_PATH" "$PYTHON_SITE/cairo"
+        echo "  Copied cairo from: $CAIRO_SYSTEM_PATH"
+    fi
+    # Bundle the GLib/GObject/GIO/GTK shared libraries that gi needs
+    for lib in libglib-2.0 libgobject-2.0 libgio-2.0 libgmodule-2.0 \
+               libgdk_pixbuf-2.0 libgtk-3 libgdk-3 libatk-1.0 \
+               libpango-1.0 libpangocairo-1.0 libpangoft2-1.0 \
+               libcairo libcairo-gobject libcairo-script-interpreter \
+               libffi libpcre2-8 libgthread-2.0 libharfbuzz libepoxy; do
+        so="$(ldconfig -p 2>/dev/null | grep "^\s*${lib}\.so\." | head -1 | awk '{print $NF}')"
+        if [ -n "$so" ] && [ -f "$so" ]; then
+            if cp -n "$so" "${APPDIR}/usr/lib/" 2>/dev/null; then
+                echo "  Bundled: $(basename "$so")"
+            fi
+        fi
+    done
+    # Bundle GIR typelib files so gi.require_version works
+    TYPELIB_DIRS="/usr/lib/x86_64-linux-gnu/girepository-1.0 /usr/lib/girepository-1.0"
+    for tdir in $TYPELIB_DIRS; do
+        if [ -d "$tdir" ]; then
+            mkdir -p "${APPDIR}/usr/lib/girepository-1.0"
+            for typelib in Gtk-3.0.typelib Gdk-3.0.typelib GLib-2.0.typelib \
+                           GObject-2.0.typelib Gio-2.0.typelib GdkPixbuf-2.0.typelib \
+                           Pango-1.0.typelib PangoCairo-1.0.typelib cairo-1.0.typelib; do
+                [ -f "$tdir/$typelib" ] && cp -n "$tdir/$typelib" "${APPDIR}/usr/lib/girepository-1.0/" && \
+                    echo "  Bundled typelib: $typelib"
+            done
+            break
+        fi
+    done
+else
+    echo "  WARNING: python3-gi not found on build system — GTK splash will be skipped at runtime"
+fi
+
 # ── Step 5: Copy application code ────────────────────────────────────
 echo "=== Copying application code ==="
 APP_DIR="${APPDIR}/usr/app"
@@ -116,6 +164,7 @@ mkdir -p "$APP_DIR"
 cp "${PROJECT_DIR}/gui.py" "$APP_DIR/"
 cp "${PROJECT_DIR}/cli.py" "$APP_DIR/"
 cp "${PROJECT_DIR}/version.py" "$APP_DIR/"
+cp "${PROJECT_DIR}/splash_gtk.py" "$APP_DIR/" 2>/dev/null || true
 cp "${PROJECT_DIR}/../Changelog.txt" "$APP_DIR/" 2>/dev/null || true
 
 for dir in gui Utils Games LOOT Nexus icons wizards wrappers; do

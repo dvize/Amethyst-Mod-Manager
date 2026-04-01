@@ -9,6 +9,9 @@ PYTHON_PREFIX="${APPDIR}/opt/python3.13"
 export APPIMAGE_ORIGINAL_LD_LIBRARY_PATH="${LD_LIBRARY_PATH}"
 export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
 
+# GObject introspection typelibs (for PyGObject / transparent GTK splash)
+export GI_TYPELIB_PATH="${APPDIR}/usr/lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+
 # Bundled binaries (7zzs, etc.)
 export PATH="${APPDIR}/usr/bin:${PATH}"
 
