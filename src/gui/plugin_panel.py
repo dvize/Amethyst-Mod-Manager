@@ -1628,6 +1628,14 @@ class PluginPanel(ctk.CTkFrame):
 
     _INI_JSON_EXTENSIONS = frozenset({".ini", ".json"})
 
+    @staticmethod
+    def _ini_display_name(rel_path: str) -> str:
+        """Return '<parent>/<filename>' when the file is nested, else just '<filename>'."""
+        p = Path(rel_path)
+        if p.parent != Path("."):
+            return f"{p.parent.name}/{p.name}"
+        return p.name
+
     def _build_ini_files_tab(self):
         """Build the Ini Files tab: list of ini/json files with search and marker strip."""
         tab = self._tabs.tab("Ini Files")
@@ -1882,7 +1890,7 @@ class PluginPanel(ctk.CTkFrame):
                 tags = ("game_folder",)
             else:
                 tags = ()
-            self._ini_files_tree.insert("", "end", text=Path(rel_path).name, values=(mod_name,), tags=tags)
+            self._ini_files_tree.insert("", "end", text=self._ini_display_name(rel_path), values=(mod_name,), tags=tags)
         self._draw_ini_marker_strip()
 
     def _on_ini_marker_strip_resize(self, _event=None):
