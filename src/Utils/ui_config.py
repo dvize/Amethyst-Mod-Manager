@@ -270,6 +270,39 @@ def save_column_order(order: list[int]) -> None:
         parser.write(f)
 
 
+def load_sort_state() -> tuple[str | None, bool]:
+    """Load saved sort column and direction from amethyst.ini.
+    Returns (sort_column, ascending) where sort_column is None if no sort is active."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return None, True
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        col = parser.get(_COLUMNS_SECTION, "sort_column", fallback=None)
+        if col == "none":
+            col = None
+        asc = parser.get(_COLUMNS_SECTION, "sort_ascending", fallback="true").lower() == "true"
+        return col, asc
+    except Exception:
+        return None, True
+
+
+def save_sort_state(sort_column: str | None, ascending: bool) -> None:
+    """Persist sort column and direction to amethyst.ini."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _COLUMNS_SECTION not in parser:
+        parser[_COLUMNS_SECTION] = {}
+    parser[_COLUMNS_SECTION]["sort_column"] = sort_column if sort_column is not None else "none"
+    parser[_COLUMNS_SECTION]["sort_ascending"] = "true" if ascending else "false"
+    with path.open("w") as f:
+        parser.write(f)
+
+
 def load_window_geometry() -> str | None:
     """Load saved window geometry string (WxH+X+Y) from amethyst.ini."""
     path = get_ui_config_path()
