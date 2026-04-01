@@ -1,3 +1,14 @@
+- v1.1.6
+- Free users can now install collections. Each mod will open in the browser, you have to manually download these but the manager will auto detect the archive file and install it. There is also an auto open next mod option so you can just click download as they appear in the browser.
+- Searching for a mod in the modlist now keeps it's separator shown
+- Fixed the open button in profile settings
+- Check updates now works on disabled mods
+- Mods with disabled files via the mod files tab now show a flag
+- The column sort state now saves and persists when reloading the application
+- The ini files tab now shows ini/json files in the game folder, highlighted in green
+- Added a winedll override button the proton window, Here wine dll overrides can be quickly added/removed in the configured prefix.
+- The splash screen is now transparent
+
 - v1.1.5
 - The manager can now install Wabbajack modlists
 - Added the ability for Loot to read userlist.yaml files, These can be placed in the profile folder next to plugins.txt as a per profile option or in .config/amethystmodmanager/loot/[gamename] as a global fallback
