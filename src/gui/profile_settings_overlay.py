@@ -7,6 +7,8 @@ from __future__ import annotations
 import shutil
 import threading
 import tkinter as tk
+
+from Utils.xdg import xdg_open
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -263,10 +265,9 @@ class ProfileSettingsOverlay(tk.Frame):
         self._rename_entry = None
 
     def _open_profile_folder(self, profile: str):
-        import subprocess
         folder = self._get_profile_dir(profile)
         folder.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(["xdg-open", str(folder)])
+        xdg_open(folder)
 
     def _do_rename(self):
         if self._rename_entry is None or self._rename_target is None:
