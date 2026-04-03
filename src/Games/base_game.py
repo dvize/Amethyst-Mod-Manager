@@ -883,6 +883,14 @@ class BaseGame(ABC):
         except (OSError, ValueError):
             return "default"
 
+    def get_deploy_active(self) -> bool:
+        """Return True if mods are currently deployed to the game folder."""
+        try:
+            data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            return bool(data.get("deploy_active", False))
+        except (OSError, ValueError):
+            return False
+
     def save_last_deployed_profile(self, profile_name: str) -> None:
         """Persist profile_name as the last successfully deployed profile."""
         try:
@@ -892,6 +900,23 @@ class BaseGame(ABC):
             except (OSError, ValueError):
                 data = {}
             data["last_deployed"] = profile_name
+            data["deploy_active"] = True
+            self._deploy_state_file.write_text(
+                json.dumps(data, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def clear_deploy_active(self) -> None:
+        """Mark mods as no longer deployed to the game folder (e.g. after a restore)."""
+        try:
+            self._deploy_state_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            data["deploy_active"] = False
             self._deploy_state_file.write_text(
                 json.dumps(data, indent=2),
                 encoding="utf-8",

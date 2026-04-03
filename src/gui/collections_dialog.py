@@ -3518,6 +3518,7 @@ class CollectionDetailDialog(tk.Frame):
                 profiles = _profiles_for_game(game.name)
                 topbar._profile_menu.configure(values=profiles)
                 topbar._profile_var.set(profiles[0])
+                topbar._update_profile_menu_color()
                 topbar._reload_mod_panel()
         except Exception as exc:
             self._log(f"Cancel: failed to switch profile: {exc}")

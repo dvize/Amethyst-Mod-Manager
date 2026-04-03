@@ -165,6 +165,7 @@ class TopBar(ctk.CTkFrame):
             command=self._on_profile_change
         )
         self._profile_menu.pack(side="left", padx=(0, 4))
+        self.after_idle(self._update_profile_menu_color)
 
         # ── Collections button (row 1, right of profile dropdown) ────────────
         _collections_icon = load_icon("collection.png", size=(30, 30))
@@ -354,11 +355,35 @@ class TopBar(ctk.CTkFrame):
             dlg = _ProtonToolsDialog(self.winfo_toplevel(), game, self._log)
             self.winfo_toplevel().wait_window(dlg)
 
+    def _update_profile_menu_color(self):
+        """Color the profile dropdown green when the selected profile is deployed."""
+        game_obj = _gh._GAMES.get(self._game_var.get())
+        deployed = (
+            game_obj is not None
+            and game_obj.get_deploy_active()
+            and game_obj.get_last_deployed_profile() == self._profile_var.get()
+        )
+        if deployed:
+            self._profile_menu.configure(
+                fg_color="#1e3a1e",
+                button_color="#2d7a2d",
+                button_hover_color="#3a9a3a",
+                text_color="white",
+            )
+        else:
+            self._profile_menu.configure(
+                fg_color=BG_HEADER,
+                button_color=ACCENT,
+                button_hover_color=ACCENT_HOV,
+                text_color=TEXT_MAIN,
+            )
+
     def _on_profile_change(self, value: str):
         self._log(f"Profile: {value}")
         game = _gh._GAMES.get(self._game_var.get())
         if game:
             game.save_last_active_profile(value)
+        self._update_profile_menu_color()
         self._reload_mod_panel()
 
     def _on_wizard(self):
@@ -405,6 +430,7 @@ class TopBar(ctk.CTkFrame):
         self._profile_var.set(last if last in profiles else profiles[0])
         self._update_wizard_visibility()
         self._check_collections_visibility()
+        self._update_profile_menu_color()
         self._reload_mod_panel()
 
     def _reload_mod_panel(self):
@@ -488,6 +514,7 @@ class TopBar(ctk.CTkFrame):
             profiles = _profiles_for_game(game_name)
             self._profile_menu.configure(values=profiles)
             self._profile_var.set(name)
+            self._update_profile_menu_color()
             self._reload_mod_panel()
 
         app._mod_panel.show_new_profile_bar(_on_create)
@@ -507,6 +534,7 @@ class TopBar(ctk.CTkFrame):
             if self._profile_var.get() == old_name:
                 self._profile_var.set(new_name)
                 self._reload_mod_panel()
+            self._update_profile_menu_color()
 
         def _on_removed(name: str):
             profiles = _profiles_for_game(game_name)
@@ -514,6 +542,7 @@ class TopBar(ctk.CTkFrame):
             if self._profile_var.get() == name:
                 self._profile_var.set(profiles[0])
                 self._reload_mod_panel()
+            self._update_profile_menu_color()
 
         def _on_profiles_changed():
             profiles = _profiles_for_game(game_name)
@@ -592,6 +621,7 @@ class TopBar(ctk.CTkFrame):
         profiles = _profiles_for_game(game_name)
         self._profile_menu.configure(values=profiles)
         self._profile_var.set(profiles[0])
+        self._update_profile_menu_color()
         self._reload_mod_panel()
 
     def _on_add_game(self):
@@ -646,6 +676,7 @@ class TopBar(ctk.CTkFrame):
             game_obj = _gh._GAMES.get(result)
             last_profile = game_obj.get_last_active_profile() if game_obj else "default"
             self._profile_var.set(last_profile if last_profile in new_profiles else new_profiles[0])
+            self._update_profile_menu_color()
             self._reload_mod_panel()
             return
 
@@ -665,6 +696,7 @@ class TopBar(ctk.CTkFrame):
                     game_obj = _gh._GAMES.get(result)
                     last_profile = game_obj.get_last_active_profile() if game_obj else "default"
                     self._profile_var.set(last_profile if last_profile in new_profiles else new_profiles[0])
+                    self._update_profile_menu_color()
                     self._reload_mod_panel()
 
         if self._show_reconfigure_panel_fn:
@@ -939,6 +971,7 @@ class TopBar(ctk.CTkFrame):
                 )
                 self.after(0, lambda: self._set_deploy_buttons_enabled(True))
                 self.after(0, self._reload_mod_panel)
+                self.after(0, self._update_profile_menu_color)
                 self.after(1500, status_bar.clear_progress)
 
         self._set_deploy_buttons_enabled(False)
@@ -994,6 +1027,8 @@ class TopBar(ctk.CTkFrame):
                 self.after(0, self._reload_mod_panel)
                 self.after(1500, status_bar.clear_progress)
                 if _success[0]:
+                    game.clear_deploy_active()
+                    self.after(0, self._update_profile_menu_color)
                     self.after(0, lambda: _show_mod_notification(self, f"{game_name} Restored", state="success"))
 
         self._set_deploy_buttons_enabled(False)
