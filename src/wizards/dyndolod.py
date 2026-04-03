@@ -595,7 +595,7 @@ class _DynDOLODBaseWizard(ctk.CTkFrame):
 # ---------------------------------------------------------------------------
 
 class TexGenWizard(_DynDOLODBaseWizard):
-    _wizard_title  = "Run TexGen"
+    _wizard_title  = "TexGen"
     _exe_name      = _TEXGEN_EXE
     _output_dir    = _TEXGEN_OUT_DIR
     _delete_prompt = (
@@ -606,7 +606,7 @@ class TexGenWizard(_DynDOLODBaseWizard):
 
 
 class DynDOLODWizard(_DynDOLODBaseWizard):
-    _wizard_title  = "Run DynDOLOD"
+    _wizard_title  = "DynDOLOD"
     _exe_name      = _DYNDOLOD_EXE
     _output_dir    = _DYNDOLOD_OUT_DIR
     _delete_prompt = (
@@ -617,7 +617,7 @@ class DynDOLODWizard(_DynDOLODBaseWizard):
 
 
 class xLODGenWizard(_DynDOLODBaseWizard):
-    _wizard_title  = "Run xLODGen"
+    _wizard_title  = "xLODGen"
     _exe_name      = _XLODGEN_EXE
     _output_dir    = _XLODGEN_OUT_DIR
     _app_dir       = _XLODGEN_APP_DIR
