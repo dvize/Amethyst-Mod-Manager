@@ -4,6 +4,8 @@ Profile Settings overlay — manage profiles (rename/remove) over the modlist pa
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import threading
 import tkinter as tk
@@ -193,6 +195,13 @@ class ProfileSettingsOverlay(tk.Frame):
                 btn_frame, text="Open", width=60, height=28, font=FONT_SMALL,
                 fg_color=BG_HOVER, hover_color=ACCENT_HOV, text_color=TEXT_MAIN,
                 command=lambda p=profile: self._open_profile_folder(p),
+            ).pack(side="left", padx=(0, 6))
+
+            # Steam Command button
+            ctk.CTkButton(
+                btn_frame, text="Steam Cmd", width=90, height=28, font=FONT_SMALL,
+                fg_color="#1a3a5c", hover_color="#1c5998", text_color="white",
+                command=lambda p=profile: self._show_steam_command(p),
             ).pack(side="left", padx=(0, 6))
 
             # Remove button (disabled for default)
@@ -498,6 +507,78 @@ class ProfileSettingsOverlay(tk.Frame):
         self._populate_list()
         if self._on_profiles_changed:
             self._on_profiles_changed()
+
+    # ------------------------------------------------------------------
+    # Steam Command
+    # ------------------------------------------------------------------
+
+    def _show_steam_command(self, profile: str):
+        """Show a dialog with the CLI + Steam launch command for this profile."""
+        game = _gh._GAMES.get(self._game_name)
+        game_id = getattr(game, "game_id", self._game_name) if game else self._game_name
+        steam_id = getattr(game, "steam_id", "") if game else ""
+
+        appimage_path = os.environ.get("APPIMAGE", "")
+        flatpak_id = os.environ.get("FLATPAK_ID", "")
+        if appimage_path:
+            deploy_cmd = f"{shlex.quote(appimage_path)} deploy {shlex.quote(game_id)} {shlex.quote(profile)}"
+        elif flatpak_id:
+            deploy_cmd = f"flatpak run --command=amethyst-mod-manager-cli {shlex.quote(flatpak_id)} deploy {shlex.quote(game_id)} {shlex.quote(profile)}"
+        else:
+            deploy_cmd = f"amethyst-mod-manager-cli deploy {shlex.quote(game_id)} {shlex.quote(profile)}"
+
+        cmd = deploy_cmd
+        if steam_id:
+            cmd += f" && steam 'steam://rungameid/{steam_id}'"
+
+        win = tk.Toplevel(self.winfo_toplevel())
+        win.title("Steam Launch Command")
+        win.configure(bg=BG_DEEP)
+        win.resizable(True, False)
+        win.geometry("900x190")
+        win.transient(self.winfo_toplevel())
+        win.update_idletasks()
+        win.grab_set()
+
+        tk.Label(
+            win, text=f"Steam launch command for '{profile}':",
+            font=FONT_BOLD, fg=TEXT_MAIN, bg=BG_DEEP,
+        ).pack(anchor="w", padx=16, pady=(14, 2))
+
+        tk.Label(
+            win,
+            text="Paste this as a non-Steam game launch option, or use it in a desktop shortcut.",
+            font=FONT_SMALL, fg=TEXT_DIM, bg=BG_DEEP, justify="left",
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        entry_var = tk.StringVar(value=cmd)
+        entry = tk.Entry(
+            win, textvariable=entry_var, font=FONT_NORMAL,
+            fg=TEXT_MAIN, bg=BG_PANEL, readonlybackground=BG_PANEL,
+            relief="flat", state="readonly", insertbackground=TEXT_MAIN,
+        )
+        entry.pack(fill="x", padx=16, ipady=5)
+
+        btn_frame = tk.Frame(win, bg=BG_DEEP)
+        btn_frame.pack(anchor="w", padx=16, pady=(10, 14))
+
+        copy_btn = ctk.CTkButton(
+            btn_frame, text="Copy", width=80, height=30, font=FONT_BOLD,
+            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
+            command=lambda: [
+                win.clipboard_clear(),
+                win.clipboard_append(cmd),
+                copy_btn.configure(text="Copied!"),
+                win.after(1500, lambda: copy_btn.configure(text="Copy")),
+            ],
+        )
+        copy_btn.pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_frame, text="Close", width=80, height=30, font=FONT_BOLD,
+            fg_color=BG_HOVER, hover_color="#555", text_color=TEXT_MAIN,
+            command=win.destroy,
+        ).pack(side="left")
 
     def _do_close(self):
         if self._on_close:
