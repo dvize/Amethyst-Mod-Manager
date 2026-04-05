@@ -46,35 +46,35 @@ from gui.theme import (
 # FomodDialog
 # ---------------------------------------------------------------------------
 
-class FomodDialog(ctk.CTkToplevel):
+class FomodDialog(ctk.CTkFrame):
     """
-    Modal FOMOD installer wizard.
+    Inline FOMOD installer wizard, placed as a full-cover overlay on a parent
+    container (typically App._mod_panel_container).
 
-    Usage:
-        dialog = FomodDialog(parent, config, mod_root)
-        parent.wait_window(dialog)
-        result = dialog.result  # dict or None
+    Usage (background thread):
+        container = getattr(parent_window, '_mod_panel_container', parent_window)
+        def on_done(result):   # result is dict or None
+            ...
+        panel = FomodDialog(container, config, mod_root, on_done=on_done)
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        panel.lift()
 
     result is None if cancelled, or
         {step_name: {group_name: [plugin_name, ...]}} if finished.
     """
 
-    DIALOG_WIDTH  = 940
-    DIALOG_HEIGHT = 640
     IMAGE_WIDTH   = 300
     IMAGE_HEIGHT  = 210
 
-    def __init__(self, parent: ctk.CTk, config: ModuleConfig,
+    def __init__(self, parent, config: ModuleConfig,
                  mod_root: str,
                  installed_files: set[str] | None = None,
                  active_files: set[str] | None = None,
                  saved_selections: dict[str, dict[str, list[str]]] | None = None,
-                 selections_path=None):
-        super().__init__(parent, fg_color=BG_DEEP)
-        self.title(f"FOMOD Installer — {config.name or 'Mod'}")
-        self.geometry(f"{self.DIALOG_WIDTH}x{self.DIALOG_HEIGHT}")
-        self.resizable(True, True)
-        self.minsize(700, 500)
+                 selections_path=None,
+                 on_done=None):
+        super().__init__(parent, fg_color=BG_DEEP, corner_radius=0)
+        self._on_done = on_done or (lambda r: None)
 
         # State
         self._config        = config
@@ -95,11 +95,6 @@ class FomodDialog(ctk.CTkToplevel):
         self._current_image_path: Optional[str] = None
         self.result: Optional[dict] = None
 
-        # Make modal (deferred so window is viewable before grab)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        self.after(100, self._make_modal)
-
         self._build_ui()
         self._refresh_visible_steps()
         if self._visible_steps:
@@ -107,14 +102,6 @@ class FomodDialog(ctk.CTkToplevel):
         else:
             # No steps — treat as instant finish
             self._on_finish()
-
-    def _make_modal(self):
-        """Grab input focus once the window is viewable."""
-        try:
-            self.grab_set()
-            self.focus_set()
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # UI construction
@@ -408,9 +395,11 @@ class FomodDialog(ctk.CTkToplevel):
                     return
                 canvas.yview("scroll", direction, "units")
 
-        self.bind_all("<Button-4>", _on_scroll, add="+")
-        self.bind_all("<Button-5>", _on_scroll, add="+")
-        self.bind_all("<MouseWheel>", _on_scroll, add="+")
+        # CTkBaseClass blocks bind_all on frames; bind on the toplevel window instead.
+        root = self.winfo_toplevel()
+        root.bind_all("<Button-4>", _on_scroll, add="+")
+        root.bind_all("<Button-5>", _on_scroll, add="+")
+        root.bind_all("<MouseWheel>", _on_scroll, add="+")
 
     def _bind_scroll_children(self):
         pass  # Handled globally by _setup_scroll_binding
@@ -620,41 +609,69 @@ class FomodDialog(ctk.CTkToplevel):
             self._show_lightbox(self._current_image_path)
 
     def _show_lightbox(self, full_path: str):
-        """Open a resizable window showing the image at its natural size."""
+        """Show the image as a full-cover overlay on the mod-panel container."""
         try:
             pil_img = PilImage.open(full_path)
         except Exception:
             return
 
-        # Fit to 45% of screen
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        max_w = int(screen_w * 0.45)
-        max_h = int(screen_h * 0.45)
+        # Find the same container this dialog lives in
+        container = self.master
+
+        overlay = ctk.CTkFrame(container, fg_color=BG_DEEP, corner_radius=0)
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+        overlay.grid_rowconfigure(0, weight=0)
+        overlay.grid_rowconfigure(1, weight=1)
+        overlay.grid_columnconfigure(0, weight=1)
+
+        # ── top bar with filename + close button ──────────────────────
+        top_bar = ctk.CTkFrame(overlay, fg_color=BG_HEADER, corner_radius=0, height=40)
+        top_bar.grid(row=0, column=0, sticky="ew")
+        top_bar.grid_propagate(False)
+        top_bar.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            top_bar, text=os.path.basename(full_path),
+            font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w"
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=8)
+
+        ctk.CTkButton(
+            top_bar, text="✕", width=32, height=28,
+            font=FONT_NORMAL, fg_color=BG_HEADER, hover_color=BG_HOVER,
+            text_color=TEXT_MAIN, corner_radius=4,
+            command=overlay.destroy
+        ).grid(row=0, column=1, padx=(4, 8), pady=6)
+
+        # ── image area ────────────────────────────────────────────────
+        img_frame = ctk.CTkFrame(overlay, fg_color=BG_DEEP, corner_radius=0)
+        img_frame.grid(row=1, column=0, sticky="nsew")
+        img_frame.grid_rowconfigure(0, weight=1)
+        img_frame.grid_columnconfigure(0, weight=1)
+
+        # Scale to fill available space while keeping aspect ratio;
+        # use the container's current size as the budget.
+        container.update_idletasks()
+        avail_w = max(container.winfo_width() - 4, 200)
+        avail_h = max(container.winfo_height() - 44, 200)  # subtract top bar
         orig_w, orig_h = pil_img.size
-        scale = min(max_w / orig_w, max_h / orig_h, 1.0)
-        win_w = max(1, int(orig_w * scale))
-        win_h = max(1, int(orig_h * scale))
-
-        win = ctk.CTkToplevel(self)
-        win.title(os.path.basename(full_path))
-        win.geometry(f"{win_w}x{win_h}")
-        win.resizable(True, True)
-        win.transient(self)
-        win.after(100, lambda: win.grab_set())
-
-        # Close on click or Escape
-        win.bind("<Escape>", lambda _e: win.destroy())
+        scale = min(avail_w / orig_w, avail_h / orig_h, 1.0)
+        disp_w = max(1, int(orig_w * scale))
+        disp_h = max(1, int(orig_h * scale))
 
         img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img,
-                           size=(win_w, win_h))
-        lbl = ctk.CTkLabel(win, text="", image=img, fg_color=BG_DEEP,
-                           cursor="hand2")
-        lbl.pack(fill="both", expand=True)
-        lbl.bind("<Button-1>", lambda _e: win.destroy())
-
+                           size=(disp_w, disp_h))
+        lbl = ctk.CTkLabel(img_frame, text="", image=img,
+                           fg_color=BG_DEEP, cursor="hand2")
+        lbl.grid(row=0, column=0)
+        lbl.bind("<Button-1>", lambda _e: overlay.destroy())
         # Keep reference so GC doesn't collect it
-        win._img = img
+        overlay._img = img
+
+        # Close on Escape via the root window
+        root = self.winfo_toplevel()
+        _esc_id = root.bind("<Escape>", lambda _e: overlay.destroy(), add="+")
+        overlay.bind("<Destroy>", lambda _e: root.unbind("<Escape>", _esc_id))
 
     def _clear_image(self):
         """Detach any image from the label before releasing CTkImage references."""
@@ -875,8 +892,8 @@ class FomodDialog(ctk.CTkToplevel):
         # resolve_files() understands this format; load_step() accepts both
         # index-keyed (new) and name-keyed (old on-disk JSON) as saved_selections.
         self.result = dict(self._all_selections)
-        self.grab_release()
         self.destroy()
+        self._on_done(self.result)
 
     def _on_reset(self):
         """Delete the saved selections file and restart the wizard from step 0 with defaults."""
@@ -898,5 +915,5 @@ class FomodDialog(ctk.CTkToplevel):
 
     def _on_cancel(self):
         self.result = None
-        self.grab_release()
         self.destroy()
+        self._on_done(None)

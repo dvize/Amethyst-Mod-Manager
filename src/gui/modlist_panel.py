@@ -3391,13 +3391,24 @@ class ModListPanel(ctk.CTkFrame):
             blk_size = len(block) if is_block else 1
             drag_set = set(range(idx, idx + blk_size))
             first_drag = idx
-        # Count non-drag vis entries before the first dragged entry (in display order)
-        start_slot = 0
-        for ei in vis:
-            if ei == first_drag:
-                break
-            if ei not in drag_set:
-                start_slot += 1
+        # Count non-drag vis entries before the first dragged entry (in display order).
+        # When a non-priority sort was just cleared the entry's natural-order position
+        # may be far off-screen.  Anchor the drag slot to the cursor's canvas Y so
+        # the entry appears directly under the cursor from the first drag event.
+        _non_inverted_sort_cleared = (
+            self._drag_saved_sort_column is not None
+            and self._drag_reordered_snapshot is None
+        )
+        if _non_inverted_sort_cleared:
+            vis_no_drag_count = sum(1 for ei in vis if ei not in drag_set)
+            start_slot = max(0, min(int(start_y / self.ROW_H), vis_no_drag_count))
+        else:
+            start_slot = 0
+            for ei in vis:
+                if ei == first_drag:
+                    break
+                if ei not in drag_set:
+                    start_slot += 1
         self._drag_start_slot = start_slot
         self._drag_slot = start_slot
 

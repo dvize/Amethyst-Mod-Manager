@@ -91,13 +91,32 @@ def _show_fomod_dialog_on_main(parent_window, config, mod_root,
                                installed_files: set, active_files: set,
                                saved_selections, selections_path,
                                result_holder: list, done_event: threading.Event) -> None:
-    _run_dialog_on_main(parent_window,
-                        lambda p: FomodDialog(p, config, mod_root,
-                                             installed_files=installed_files,
-                                             active_files=active_files,
-                                             saved_selections=saved_selections,
-                                             selections_path=selections_path),
-                        result_holder, done_event, result_attr="result")
+    """Run on main thread. Creates a FomodDialog overlay on the mod-panel container."""
+    import traceback as _tb
+    try:
+        container = getattr(parent_window, '_mod_panel_container', None) or parent_window
+
+        def on_done(result):
+            result_holder[0] = result
+            done_event.set()
+
+        panel = FomodDialog(container, config, mod_root,
+                            installed_files=installed_files,
+                            active_files=active_files,
+                            saved_selections=saved_selections,
+                            selections_path=selections_path,
+                            on_done=on_done)
+        try:
+            if panel.winfo_exists():
+                panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+                panel.lift()
+                panel.focus_set()
+        except Exception:
+            _tb.print_exc()
+    except Exception:
+        _tb.print_exc()
+        result_holder[0] = None
+        done_event.set()
 
 
 def _show_mod_notification(parent_window, message: str, state: str = "success") -> None:
@@ -1017,14 +1036,30 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 if clear_progress_fn is not None:
                     clear_progress_fn()
                 if threading.current_thread() is threading.main_thread():
-                    dialog = FomodDialog(parent_window, config, mod_root,
-                                         installed_files=installed_files,
-                                         active_files=active_files,
-                                         saved_selections=saved_selections,
-                                         selections_path=sel_path)
-                    if dialog.winfo_exists():
-                        parent_window.wait_window(dialog)
-                    dialog_result = dialog.result
+                    import tkinter as tk
+                    container = getattr(parent_window, '_mod_panel_container', None) or parent_window
+                    _done_var = tk.BooleanVar(value=False)
+                    _result_holder: list = [None]
+
+                    def _on_done(result):
+                        _result_holder[0] = result
+                        _done_var.set(True)
+
+                    panel = FomodDialog(container, config, mod_root,
+                                        installed_files=installed_files,
+                                        active_files=active_files,
+                                        saved_selections=saved_selections,
+                                        selections_path=sel_path,
+                                        on_done=_on_done)
+                    try:
+                        if panel.winfo_exists():
+                            panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+                            panel.lift()
+                            panel.focus_set()
+                            parent_window.wait_variable(_done_var)
+                    except Exception:
+                        import traceback as _tb; _tb.print_exc()
+                    dialog_result = _result_holder[0]
                 else:
                     with _interactive_dialog_lock:
                         result_holder = [None]
