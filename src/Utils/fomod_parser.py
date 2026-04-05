@@ -361,8 +361,12 @@ def detect_fomod(extracted_root: str) -> Optional[tuple[str, str]]:
         try:
             for child in d.iterdir():
                 if child.is_dir() and child.name.lower() == "fomod":
-                    config = child / "ModuleConfig.xml"
-                    if config.is_file():
+                    # Case-insensitive search for ModuleConfig.xml on Linux
+                    config = next(
+                        (f for f in child.iterdir() if f.name.lower() == "moduleconfig.xml"),
+                        None,
+                    )
+                    if config is not None and config.is_file():
                         return str(d), str(config)
         except PermissionError:
             pass
