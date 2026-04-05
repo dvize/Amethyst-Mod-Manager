@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from Games.base_game import BaseGame
-from Utils.deploy import LinkMode, load_per_mod_strip_prefixes, load_separator_deploy_paths, expand_separator_deploy_paths, expand_separator_raw_deploy, _resolve_nocase
+from Utils.deploy import LinkMode, load_per_mod_strip_prefixes, load_separator_deploy_paths, expand_separator_deploy_paths, expand_separator_raw_deploy, _resolve_nocase, _write_deploy_snapshot, _move_runtime_files, _FILEMAP_SNAPSHOT_NAME
 from Utils.modlist import read_modlist
 from Utils.config_paths import get_profiles_dir
 from Utils.steam_finder import find_prefix
@@ -410,6 +410,14 @@ class UE5Game(BaseGame):
         manifest_path = self.get_profile_root() / _DEPLOYED_MANIFEST
         manifest_path.write_text("\n".join(manifest), encoding="utf-8")
 
+        # Snapshot the game root so restore() can identify runtime-generated files
+        # (saves, shader cache, config files written by the game after launch).
+        snapshot_path = self.get_profile_root() / _FILEMAP_SNAPSHOT_NAME
+        try:
+            _write_deploy_snapshot(game_path, snapshot_path, log_fn=_log)
+        except Exception as exc:
+            _log(f"  WARN: could not write deploy snapshot: {exc}")
+
         backed_msg = f", {backed_up} vanilla file(s) backed up" if backed_up else ""
         _log(f"Deploy complete. {linked} file(s) placed{backed_msg}, {skipped} skipped.")
 
@@ -477,6 +485,20 @@ class UE5Game(BaseGame):
         if not manifest_path.is_file():
             _log("Restore: no deployed manifest found — nothing to remove.")
             return
+
+        # Move runtime-generated files (saves, shader cache, etc.) to overwrite/
+        # before removing deployed files, using the snapshot taken at deploy time.
+        snapshot_path = self.get_profile_root() / _FILEMAP_SNAPSHOT_NAME
+        overwrite_dir = self.get_effective_overwrite_path()
+        if snapshot_path.is_file():
+            _log("  Scanning game root for runtime-generated files ...")
+            overwrite_dir.mkdir(parents=True, exist_ok=True)
+            moved_rt = _move_runtime_files(game_path, snapshot_path, overwrite_dir, _log)
+            _log(f"  Moved {moved_rt} runtime-generated file(s) to overwrite/.")
+            try:
+                snapshot_path.unlink()
+            except OSError:
+                pass
 
         lines = [
             l.strip() for l in manifest_path.read_text(encoding="utf-8").splitlines()
