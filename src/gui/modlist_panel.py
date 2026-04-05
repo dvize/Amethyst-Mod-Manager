@@ -3165,7 +3165,8 @@ class ModListPanel(ctk.CTkFrame):
                     return
                 # If this separator is part of an existing multi-selection, preserve
                 # it so the whole selection drags together (same as non-separator path).
-                if idx in self._sel_set and len(self._sel_set) > 1:
+                _sep_is_locked = self._sep_locks.get(self._entries[idx].name, False)
+                if idx in self._sel_set and len(self._sel_set) > 1 and not _sep_is_locked:
                     self._activate_drag(idx, cy, False, [])
                     self._redraw()
                     return
