@@ -2130,11 +2130,12 @@ class PluginPanel(ctk.CTkFrame):
 
         # Load file list from mod index
         files: dict[str, str] = {}   # rel_key → rel_str
+        full_index = None
         if self._mod_files_index_path is not None:
             from Utils.filemap import read_mod_index
-            index = read_mod_index(self._mod_files_index_path)
-            if index and mod_name in index:
-                normal, root = index[mod_name]
+            full_index = read_mod_index(self._mod_files_index_path)
+            if full_index and mod_name in full_index:
+                normal, root = full_index[mod_name]
                 files.update(normal)
                 files.update(root)
 
@@ -2142,6 +2143,35 @@ class PluginPanel(ctk.CTkFrame):
             self._mf_tree.insert("", "end", text="  (no files found — try refreshing)", tags=("dim",))
             self._mf_tree.tag_configure("dim", foreground=TEXT_DIM)
             return
+
+        # Build conflict lookup sets from filemap.txt and full mod index.
+        # filemap_winner: rel_key_lower → winning mod name
+        # contested_keys: rel_keys provided by 2+ mods
+        filemap_winner: dict[str, str] = {}
+        contested_keys: set[str] = set()
+        if self._mod_files_index_path is not None:
+            _fm_path = self._mod_files_index_path.parent / "filemap.txt"
+            if _fm_path.is_file():
+                try:
+                    for _line in _fm_path.read_text(encoding="utf-8").splitlines():
+                        if "\t" in _line:
+                            _rk, _mn = _line.split("\t", 1)
+                            filemap_winner[_rk.lower()] = _mn
+                except Exception:
+                    pass
+        if full_index is not None:
+            _key_count: dict[str, int] = {}
+            for _mn, (_norm, _root) in full_index.items():
+                for _k in _norm:
+                    _key_count[_k] = _key_count.get(_k, 0) + 1
+                for _k in _root:
+                    _key_count[_k] = _key_count.get(_k, 0) + 1
+            contested_keys = {_k for _k, _c in _key_count.items() if _c > 1}
+
+        # Configure conflict highlight tags
+        self._mf_tree.tag_configure("dim", foreground=TEXT_DIM)
+        self._mf_tree.tag_configure("conflict_win",  foreground="#4caf50")
+        self._mf_tree.tag_configure("conflict_lose", foreground="#f44336")
 
         # Build tree structure
         tree_dict: dict = {}
@@ -2151,6 +2181,14 @@ class PluginPanel(ctk.CTkFrame):
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
             node.setdefault("__files__", []).append((parts[-1], rel_key))
+
+        def _conflict_tag(rel_key: str) -> str | None:
+            if rel_key not in contested_keys:
+                return None
+            winner = filemap_winner.get(rel_key.lower())
+            if winner is None:
+                return None
+            return "conflict_win" if winner == mod_name else "conflict_lose"
 
         def insert_node(parent_id, name, subtree, depth=0):
             iid = self._mf_tree.insert(
@@ -2165,10 +2203,12 @@ class PluginPanel(ctk.CTkFrame):
                 insert_node(iid, child, subtree[child], depth + 1)
             for fname, rel_key in sorted(subtree.get("__files__", [])):
                 checked = rel_key not in excluded_keys
+                tag = _conflict_tag(rel_key)
                 leaf_iid = self._mf_tree.insert(
                     iid, "end",
                     text=fname,
                     values=(self._MF_CHECK if checked else self._MF_UNCHECK,),
+                    tags=(tag,) if tag else (),
                 )
                 self._mf_checked[leaf_iid] = checked
                 self._mf_iid_to_key[leaf_iid] = rel_key
@@ -2180,9 +2220,11 @@ class PluginPanel(ctk.CTkFrame):
         # Root-level files (unlikely but handle anyway)
         for fname, rel_key in sorted(tree_dict.get("__files__", [])):
             checked = rel_key not in excluded_keys
+            tag = _conflict_tag(rel_key)
             leaf_iid = self._mf_tree.insert(
                 "", "end", text=fname,
                 values=(self._MF_CHECK if checked else self._MF_UNCHECK,),
+                tags=(tag,) if tag else (),
             )
             self._mf_checked[leaf_iid] = checked
             self._mf_iid_to_key[leaf_iid] = rel_key
