@@ -2443,6 +2443,14 @@ class PluginPanel(ctk.CTkFrame):
                     # flat placement — just filename under dest
                     basename = rel_norm.split("/")[-1]
                     full_path = dest + "/" + basename if dest else basename
+                # Strip the game's deploy subfolder prefix so the resolved
+                # path is shown relative to that folder (matching how the
+                # filemap entries themselves are stored).
+                _mods_dir = getattr(game, "mods_dir", None)
+                if _mods_dir:
+                    _prefix = _mods_dir.rstrip("/") + "/"
+                    if full_path.lower().startswith(_prefix.lower()):
+                        full_path = full_path[len(_prefix):]
             else:
                 full_path = rel_norm
             resolved.append((full_path, mod_name))
@@ -4341,6 +4349,9 @@ class PluginPanel(ctk.CTkFrame):
         lines = []
 
         def _quote(s: str) -> str:
+            if "'" in s:
+                escaped = s.replace('"', '\\"')
+                return f'"{escaped}"'
             return f"'{s}'"
 
         plugins = data.get("plugins", [])

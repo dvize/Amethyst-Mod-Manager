@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
+from gui.path_utils import _to_wine_path
+
 if TYPE_CHECKING:
     from Games.base_game import BaseGame
 
@@ -43,10 +45,6 @@ FONT_NORMAL = ("Segoe UI", 14)
 FONT_BOLD   = ("Segoe UI", 14, "bold")
 
 _EXE_NAME = "Pandora Behaviour Engine+.exe"
-
-
-def _to_wine_path(p: Path) -> str:
-    return "Z:" + str(p).replace("/", "\\")
 
 
 def find_pandora_exe(game: "BaseGame") -> Path | None:
@@ -357,8 +355,8 @@ class PandoraWizard(ctk.CTkFrame):
         output_dir = staging / "Pandora"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        game_arg   = f'--tesv:{_to_wine_path(game_path)}'
-        output_arg = f'--output:{_to_wine_path(output_dir)}'
+        game_arg   = f'--tesv:{_to_wine_path(game_path, _prefix / "pfx" if _prefix else None)}'
+        output_arg = f'--output:{_to_wine_path(output_dir, _prefix / "pfx" if _prefix else None)}'
 
         self._log(f"Pandora Wizard: launching {exe} via Proton")
         self._log(f"  args: {game_arg}  {output_arg}")

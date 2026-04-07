@@ -252,6 +252,199 @@ def _fomod_choices_from_collection(choices: dict) -> "dict[str, dict[str, list[s
 
 
 # ---------------------------------------------------------------------------
+# Collection groups helper
+# ---------------------------------------------------------------------------
+
+def _apply_collection_groups(profile_dir: Path, collection_schema: dict, log_fn) -> None:
+    """Merge LOOT groups, group ordering rules, and plugin rules from collection.json
+    into userlist.yaml.
+
+    Writes:
+    - Group definitions (name + after ordering) from schema["groups"]
+    - Per-plugin rules: after, before, group from schema["plugins"]
+
+    Existing entries are overwritten with the collection's values so that
+    re-running (e.g. Reset Load Order) always reflects the author's intent.
+    """
+    plugin_rules_block: dict = collection_schema.get("pluginRules", {})
+    schema_groups: list[dict] = plugin_rules_block.get("groups", [])
+    schema_plugins: list[dict] = plugin_rules_block.get("plugins", [])
+
+    # Build lookup: lower(plugin_name) -> {group, after, before} from schema
+    plugin_rules: dict[str, dict] = {}
+    for p in schema_plugins:
+        name = p.get("name", "")
+        if not name:
+            continue
+        entry: dict = {"name": name}
+        if p.get("group"):
+            entry["group"] = p["group"]
+        if p.get("after"):
+            entry["after"] = list(p["after"])
+        if p.get("before"):
+            entry["before"] = list(p["before"])
+        if len(entry) > 1:  # has something beyond just name
+            plugin_rules[name.lower()] = entry
+
+    # Nothing to do if the collection defines no groups or plugin rules
+    if not schema_groups and not plugin_rules:
+        return
+
+    ul_path = profile_dir / "userlist.yaml"
+
+    # Minimal parse/write inline (mirrors PluginPanel._parse_userlist / _write_userlist)
+    def _parse(path: Path) -> dict:
+        result: dict = {"plugins": [], "groups": []}
+        if not path.is_file():
+            return result
+        text = path.read_text(encoding="utf-8")
+        current_section: str | None = None
+        current_block: list[str] = []
+
+        def _flush(section, block):
+            if not block:
+                return
+            entry: dict = {}
+            m = re.match(r"^[\s\-]*name:\s*['\"]?(.*?)['\"]?\s*$", block[0])
+            if m:
+                entry["name"] = m.group(1)
+            for line in block:
+                mg = re.match(r"^\s*group:\s*['\"]?(.*?)['\"]?\s*$", line)
+                if mg:
+                    entry["group"] = mg.group(1)
+            for field in ("before", "after"):
+                pat = re.compile(r"^\s*" + field + r":\s*$")
+                inline = re.compile(r"^\s*" + field + r":\s*\[(.+)\]\s*$")
+                items: list[str] = []
+                in_list = False
+                for line in block:
+                    inline_m = inline.match(line)
+                    if inline_m:
+                        raw_items = inline_m.group(1)
+                        items = [i.strip().strip("'\"") for i in raw_items.split(",") if i.strip()]
+                        break
+                    if pat.match(line):
+                        in_list = True
+                        continue
+                    if in_list:
+                        if re.match(r"^\s+\w[\w_]*\s*:", line):
+                            in_list = False
+                        else:
+                            item_m = re.match(r"^\s*-\s*['\"]?(.*?)['\"]?\s*$", line)
+                            if item_m:
+                                items.append(item_m.group(1))
+                if items:
+                    entry[field] = items
+            if entry.get("name"):
+                result[section].append(entry)
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped == "plugins:":
+                if current_section:
+                    _flush(current_section, current_block)
+                current_section = "plugins"
+                current_block = []
+            elif stripped == "groups:":
+                if current_section:
+                    _flush(current_section, current_block)
+                current_section = "groups"
+                current_block = []
+            elif stripped.startswith("- name:") and current_section:
+                if current_block:
+                    _flush(current_section, current_block)
+                current_block = [line]
+            elif current_section and (line.startswith("  ") or line.startswith("\t")):
+                current_block.append(line)
+        if current_section and current_block:
+            _flush(current_section, current_block)
+        return result
+
+    def _write(path: Path, data: dict) -> None:
+        def _q(s: str) -> str:
+            # Use double quotes if the value contains a single quote
+            if "'" in s:
+                escaped = s.replace('"', '\\"')
+                return f'"{escaped}"'
+            return f"'{s}'"
+        lines: list[str] = []
+        plugins = data.get("plugins", [])
+        groups = data.get("groups", [])
+        if plugins:
+            lines.append("plugins:")
+            for entry in plugins:
+                lines.append(f"  - name: {_q(entry['name'])}")
+                for field in ("before", "after"):
+                    items = entry.get(field, [])
+                    if items:
+                        lines.append(f"    {field}:")
+                        for item in items:
+                            lines.append(f"      - {_q(item)}")
+                if entry.get("group"):
+                    lines.append(f"    group: {_q(entry['group'])}")
+        if groups:
+            if lines:
+                lines.append("")
+            lines.append("groups:")
+            for entry in groups:
+                lines.append(f"  - name: {_q(entry['name'])}")
+                after_items = entry.get("after", [])
+                if after_items:
+                    lines.append("    after:")
+                    for item in after_items:
+                        lines.append(f"      - {_q(item)}")
+        tmp = path.with_suffix(".yaml.tmp")
+        if lines:
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.replace(path)
+
+    try:
+        data = _parse(ul_path)
+
+        # Merge groups — add any that don't already exist
+        existing_group_names = {g["name"].lower() for g in data["groups"]}
+        added_groups = 0
+        for sg in schema_groups:
+            gname = sg.get("name", "")
+            if not gname or gname.lower() in existing_group_names:
+                continue
+            g_entry: dict = {"name": gname}
+            after = sg.get("after", [])
+            if after:
+                g_entry["after"] = list(after)
+            data["groups"].append(g_entry)
+            existing_group_names.add(gname.lower())
+            added_groups += 1
+
+        # Auto-create groups referenced by plugins but missing from the groups section
+        for rule in plugin_rules.values():
+            gname = rule.get("group", "")
+            if gname and gname.lower() not in existing_group_names:
+                data["groups"].append({"name": gname})
+                existing_group_names.add(gname.lower())
+                added_groups += 1
+
+        # Merge plugin rules — overwrite existing entries for collection plugins
+        existing_plugins: dict[str, dict] = {e["name"].lower(): e for e in data["plugins"]}
+        for plugin_lower, rule in plugin_rules.items():
+            if plugin_lower in existing_plugins:
+                existing_plugins[plugin_lower].update(rule)
+            else:
+                new_entry = dict(rule)
+                data["plugins"].append(new_entry)
+                existing_plugins[plugin_lower] = new_entry
+
+        ul_path.parent.mkdir(parents=True, exist_ok=True)
+        _write(ul_path, data)
+        log_fn(
+            f"Collection install: wrote {added_groups} group(s) and "
+            f"{len(plugin_rules)} plugin rule(s) to userlist.yaml."
+        )
+    except Exception as exc:
+        log_fn(f"Collection install: failed to write groups/rules to userlist.yaml: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # CollectionCard widget
 # ---------------------------------------------------------------------------
 
@@ -2379,35 +2572,37 @@ class CollectionDetailDialog(tk.Frame):
         # Also skipped when appending — existing plugin order is preserved.
         #
         # Strategy:
-        #   1. Run LOOT over (vanilla + collection plugins) so libloot can
-        #      pin vanilla ESMs/ESPs to their correct positions.
-        #   2. Extract the vanilla prefix from LOOT's sorted result
-        #      (entries that are NOT in the collection's plugin list).
-        #   3. Apply the collection author's load order on top:
-        #      final = vanilla_prefix (LOOT-ordered) + author's mod order.
-        #   This mirrors exactly what "Reset Load Order" does at runtime.
+        #   1. Write all plugin rules (after/before/group) and group definitions
+        #      from collection.json into userlist.yaml.
+        #   2. Run LOOT over all plugins (vanilla + collection) so it can apply
+        #      those rules and pin vanilla ESMs to their correct positions.
+        #      LOOT's full sorted result becomes the final load order.
+        #   3. Fallback (LOOT unavailable): vanilla prefix (alphabetical) +
+        #      author's flat plugin list.
         # ------------------------------------------------------------------
         schema_plugins: list[dict] = collection_schema.get("plugins", [])
         if schema_plugins and overwrite_existing is None:
             try:
-                # Author's original plugin order from collection.json
                 author_entries = [
                     PluginEntry(name=p.get("name", ""), enabled=p.get("enabled", True))
                     for p in schema_plugins if p.get("name", "")
                 ]
                 author_lower = {e.name.lower() for e in author_entries}
 
-                # Always fetch vanilla map — needed for exclusion from plugins.txt
                 vanilla_map = _vanilla_plugins_for_game(self._game)  # lower -> orig
                 plugins_include_vanilla = getattr(self._game, "plugins_include_vanilla", False)
                 vanilla_lower: set[str] = set() if plugins_include_vanilla else set(vanilla_map.keys())
 
-                # Step 4a: LOOT sort to establish correct vanilla positions
-                loot_vanilla_prefix: list[PluginEntry] = []
+                # Step 4a: Write plugin rules and groups to userlist.yaml so
+                # LOOT can apply them in the sort below.
+                _apply_collection_groups(profile_dir, collection_schema, self._log)
+
+                # Step 4b: Run LOOT over all plugins using the userlist rules.
+                final_entries: list[PluginEntry] = []
                 loot_enabled = getattr(self._game, "loot_sort_enabled", False)
                 if loot_enabled and _loot_available():
                     try:
-                        _set_status("Running LOOT sort to order vanilla plugins…")
+                        _set_status("Running LOOT sort to apply collection load order…")
                         _ext_order = {".esm": 0, ".esp": 1, ".esl": 2}
                         vanilla_prepend = [
                             PluginEntry(name=orig, enabled=True)
@@ -2433,21 +2628,31 @@ class CollectionDetailDialog(tk.Frame):
                                 self._game.get_vanilla_plugins_path()
                                 if hasattr(self._game, "get_vanilla_plugins_path") else None
                             ),
+                            userlist_path=profile_dir / "userlist.yaml",
                         )
-                        # Extract LOOT-ordered vanilla entries (not in author's list)
-                        loot_vanilla_prefix = [
+                        final_entries = [
                             PluginEntry(name=n, enabled=name_to_enabled.get(n, True))
                             for n in loot_result.sorted_names
-                            if n.lower() not in author_lower
                         ]
                         self._log(
-                            f"Collection install: LOOT sort placed {len(loot_vanilla_prefix)} vanilla plugin(s)."
+                            f"Collection install: LOOT sort produced {len(final_entries)} plugin(s)."
                         )
                     except Exception as loot_exc:
-                        self._log(f"Collection install: LOOT sort skipped — {loot_exc}")
+                        self._log(f"Collection install: LOOT sort failed — {loot_exc}; falling back to flat list.")
 
-                # Step 4b: Apply author's load order — vanilla prefix (LOOT) + author's mod order
-                final_entries = loot_vanilla_prefix + author_entries
+                # Fallback: vanilla prefix + author's flat list
+                if not final_entries:
+                    _ext_order = {".esm": 0, ".esp": 1, ".esl": 2}
+                    vanilla_prefix = [
+                        PluginEntry(name=orig, enabled=True)
+                        for low, orig in sorted(
+                            vanilla_map.items(),
+                            key=lambda kv: (_ext_order.get(Path(kv[0]).suffix, 9), kv[0]),
+                        )
+                        if low not in author_lower
+                    ]
+                    final_entries = vanilla_prefix + author_entries
+
                 star_prefix = getattr(self._game, "plugins_use_star_prefix", True)
                 write_plugins(
                     plugins_path,
@@ -2456,8 +2661,7 @@ class CollectionDetailDialog(tk.Frame):
                 )
                 write_loadorder(plugins_path.parent / "loadorder.txt", final_entries)
                 self._log(
-                    f"Collection install: wrote plugins.txt ({len(author_entries)} mod plugins, "
-                    f"{len(loot_vanilla_prefix)} vanilla prefix)."
+                    f"Collection install: wrote plugins.txt ({len(final_entries)} plugin(s))."
                 )
             except Exception as exc:
                 self._log(f"Collection install: failed to write plugins.txt: {exc}")
@@ -3392,7 +3596,9 @@ class CollectionDetailDialog(tk.Frame):
                     self._log(f"Manual install: failed to write modlist.txt: {exc}")
 
         # ------------------------------------------------------------------
-        # Step 7: Write plugins.txt / loadorder.txt from collection.json
+        # Step 7: Write plugins.txt / loadorder.txt from collection.json.
+        # Same strategy as _run_install step 4: write userlist rules first,
+        # then run LOOT so it applies them, fall back to flat list if needed.
         # ------------------------------------------------------------------
         schema_plugins: list[dict] = collection_schema.get("plugins", [])
         if schema_plugins and overwrite_existing is None:
@@ -3406,7 +3612,11 @@ class CollectionDetailDialog(tk.Frame):
                 plugins_include_vanilla = getattr(self._game, "plugins_include_vanilla", False)
                 vanilla_lower: set[str] = set() if plugins_include_vanilla else set(vanilla_map.keys())
 
-                loot_vanilla_prefix: list[PluginEntry] = []
+                # Step 7a: Write plugin rules and groups to userlist.yaml
+                _apply_collection_groups(profile_dir, collection_schema, self._log)
+
+                # Step 7b: Run LOOT using those rules
+                final_entries: list[PluginEntry] = []
                 loot_enabled = getattr(self._game, "loot_sort_enabled", False)
                 if loot_enabled and _loot_available():
                     try:
@@ -3435,16 +3645,31 @@ class CollectionDetailDialog(tk.Frame):
                                 self._game.get_vanilla_plugins_path()
                                 if hasattr(self._game, "get_vanilla_plugins_path") else None
                             ),
+                            userlist_path=profile_dir / "userlist.yaml",
                         )
-                        loot_vanilla_prefix = [
+                        final_entries = [
                             PluginEntry(name=n, enabled=name_to_enabled.get(n, True))
                             for n in loot_result.sorted_names
-                            if n.lower() not in author_lower
                         ]
+                        self._log(
+                            f"Manual install: LOOT sort produced {len(final_entries)} plugin(s)."
+                        )
                     except Exception as exc:
-                        self._log(f"Manual install: LOOT sort failed: {exc}")
+                        self._log(f"Manual install: LOOT sort failed: {exc}; falling back to flat list.")
 
-                final_entries = loot_vanilla_prefix + author_entries
+                # Fallback: vanilla prefix + author's flat list
+                if not final_entries:
+                    _ext_order = {".esm": 0, ".esp": 1, ".esl": 2}
+                    vanilla_prefix = [
+                        PluginEntry(name=orig, enabled=True)
+                        for low, orig in sorted(
+                            vanilla_map.items(),
+                            key=lambda kv: (_ext_order.get(Path(kv[0]).suffix, 9), kv[0]),
+                        )
+                        if low not in author_lower
+                    ]
+                    final_entries = vanilla_prefix + author_entries
+
                 star_prefix = getattr(self._game, "plugins_star_prefix", False)
                 write_plugins(
                     profile_dir / "plugins.txt",
@@ -3452,6 +3677,9 @@ class CollectionDetailDialog(tk.Frame):
                     star_prefix=star_prefix,
                 )
                 write_loadorder(profile_dir / "loadorder.txt", final_entries)
+                self._log(
+                    f"Manual install: wrote plugins.txt ({len(final_entries)} plugin(s))."
+                )
             except Exception as exc:
                 self._log(f"Manual install: failed to write plugins.txt: {exc}")
 
@@ -3516,6 +3744,10 @@ class CollectionDetailDialog(tk.Frame):
         self._update_reset_btn_visibility()
         self._update_open_missing_btn_visibility()
         self._update_install_btn_state()
+
+        # Schedule LOOT sort to run AFTER the filemap rebuild triggered by
+        # _switch_to_profile has reconciled plugins.txt against disk.
+        self._schedule_loot_after_filemap()
 
     def _on_pause_install(self):
         """Called when the Pause button in the overlay is clicked."""
@@ -4111,6 +4343,9 @@ class CollectionDetailDialog(tk.Frame):
                 except Exception as exc:
                     self._log(f"Reset load order: failed to write plugins.txt: {exc}")
 
+            # Re-apply LOOT groups and plugin-group assignments from collection.json
+            _apply_collection_groups(profile_dir, cj, self._log)
+
             msg = (
                 f"Load order reset — {len(ordered)} mods ordered"
                 + (f", {len(unordered)} unmatched (placed at top)." if unordered else ".")
@@ -4122,24 +4357,49 @@ class CollectionDetailDialog(tk.Frame):
             self._log(f"Reset load order failed: {exc}")
             self.after(0, lambda: self._status_var.set(f"Reset failed: {exc}"))
 
-    def _refresh_panels_after_reset(self):
-        """Reload the modlist and plugin panels so they reflect the newly written files."""
+    def _schedule_loot_after_filemap(self):
+        """Wrap the filemap-rebuilt callback so LOOT sort runs once after the
+        next filemap rebuild reconciles plugins.txt against disk."""
         app = self._app_root
+        mod_panel = getattr(app, "_mod_panel", None)
+        pp = getattr(app, "_plugin_panel", None)
+        loot_enabled = getattr(self._game, "loot_sort_enabled", False)
+        if not (loot_enabled and _loot_available() and mod_panel is not None and pp is not None):
+            return
+        _orig_cb = mod_panel._on_filemap_rebuilt
+        # Guard against re-entrant scheduling: if the current callback is
+        # already one of our wrappers, don't wrap it again — the pending
+        # LOOT sort will fire on the next rebuild regardless.
+        if getattr(_orig_cb, "_is_loot_after_filemap_wrapper", False):
+            return
+
+        def _on_rebuilt_then_loot():
+            # Restore original callback first so this only fires once.
+            mod_panel._on_filemap_rebuilt = _orig_cb
+            # Run the normal filemap-rebuilt logic (prune/sync plugins, refresh tabs).
+            if _orig_cb:
+                _orig_cb()
+            # Now LOOT sort on the fully reconciled plugin list.
+            try:
+                if hasattr(pp, "_sort_plugins_loot"):
+                    self._status_var.set("Running LOOT sort…")
+                    pp._sort_plugins_loot()
+            except Exception as exc:
+                self._log(f"LOOT sort after filemap rebuild failed — {exc}")
+
+        _on_rebuilt_then_loot._is_loot_after_filemap_wrapper = True  # type: ignore[attr-defined]
+        mod_panel._on_filemap_rebuilt = _on_rebuilt_then_loot
+
+    def _refresh_panels_after_reset(self):
+        """Reload the modlist and plugin panels, then run LOOT sort on the
+        reconciled (disk-accurate) plugin list."""
+        self._schedule_loot_after_filemap()
         try:
-            mod_panel = getattr(app, "_mod_panel", None)
+            mod_panel = getattr(self._app_root, "_mod_panel", None)
             if mod_panel is not None:
                 mod_panel.reload_after_install()
         except Exception as exc:
             self._log(f"Reset load order: could not refresh mod panel: {exc}")
-        try:
-            pp = getattr(app, "_plugin_panel", None)
-            if pp is not None:
-                pp_path = getattr(pp, "_plugins_path", None)
-                pp_exts = getattr(pp, "_plugin_extensions", None)
-                if pp_path and pp_exts:
-                    pp.load_plugins(pp_path, pp_exts)
-        except Exception as exc:
-            self._log(f"Reset load order: could not refresh plugin panel: {exc}")
 
 
 # ---------------------------------------------------------------------------

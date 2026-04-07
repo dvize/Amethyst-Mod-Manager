@@ -194,9 +194,12 @@ class CTkAlert(ctk.CTkToplevel):
         # Fix width only so height can auto-size to content, then cap it
         self.geometry(f"{self.width}")
         self.update_idletasks()
-        req_h = self.winfo_reqheight()
+        # winfo_reqheight() returns scaled tk pixels; convert back to design
+        # units so CTkToplevel.geometry() doesn't double-scale the value.
+        scale = self._get_window_scaling() or 1
+        req_h = self.winfo_reqheight() / scale
         max_h = self.height * 2  # cap at 2× the design height
-        final_h = min(max(req_h, self.height), max_h)
+        final_h = int(min(max(req_h, self.height), max_h))
         self.geometry(f"{self.width}x{final_h}")
         self.update_idletasks()
         if parent is not None:
@@ -238,9 +241,11 @@ class CTkAlert(ctk.CTkToplevel):
             return
         if self.old_x is None or self.old_y is None:
             return
-        self.y = event.y_root - self.old_y
-        self.x = event.x_root - self.old_x
-        self.geometry(f'+{self.x}+{self.y}')
+        dx = event.x_root - self.old_x
+        dy = event.y_root - self.old_y
+        self.geometry(f'+{self.winfo_x() + dx}+{self.winfo_y() + dy}')
+        self.old_x = event.x_root
+        self.old_y = event.y_root
 
     def button_event(self, event=None):
         self.grab_release()

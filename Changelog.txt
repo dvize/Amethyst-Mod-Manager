@@ -1,3 +1,10 @@
+- v1.1.10
+- Collection installs now write a userlist.yaml to handle plugin load order, Including any group and plugin rules included in the collection.
+- Fixed nxm links within flatpaks
+- Added a lock to profile settings menu to prevent accidental deletion of profiles
+- Tweaked scaling of some alert windows 
+- Potential fix for users who could not open applications in wine/proton.
+
 - v1.1.9
 - Fixed meta.ini getting overwritten if another mod with the same name is installed.
 - The files in the mod files and data tab are now highlighted if they are winning/losing conflicts

@@ -7,6 +7,7 @@ import colorsys
 import json
 import os
 import re
+import sys
 import shutil
 import subprocess
 import threading
@@ -49,7 +50,7 @@ import gui.theme as _theme
 from gui.path_utils import _to_wine_path
 from Utils.config_paths import get_exe_args_path, get_profile_exe_args_path, get_custom_game_images_dir, get_vcredist_cache_path, get_dotnet_cache_dir, get_custom_games_dir
 from Utils.exe_args_builder import EXE_PROFILES
-from gui.ctk_components import CTkAlert, CTkLoader
+from gui.ctk_components import CTkAlert, CTkLoader, ICON_PATH
 from Utils.xdg import xdg_open, open_url
 
 
@@ -3550,53 +3551,77 @@ class _ReplaceModDialog(ctk.CTkToplevel):
     new_name: str | None — set when result == "rename"
     """
 
+    _WIDTH = 480
+    _HEIGHT = 180
+
     def __init__(self, parent, mod_name: str):
-        super().__init__(parent, fg_color=BG_DEEP)
-        self.title("Mod Already Exists")
+        self._parent_ref = parent
+        super().__init__(master=parent)
+        self.old_x = None
+        self.old_y = None
         self.resizable(False, False)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        self.after(100, self._make_modal)
+        self.overrideredirect(True)
+        if parent is not None:
+            self.transient(parent)
+        self.withdraw()
 
         self.result: str = "cancel"
         self.selected_files: set[str] | None = None
         self.new_name: str | None = None
-
         self._mod_name = mod_name
-        self._rename_frame: ctk.CTkFrame | None = None
-        self._rename_var: tk.StringVar | None = None
 
-        self._build(mod_name)
+        self.transparent_color = self._apply_appearance_mode(self.cget("fg_color"))
+        if sys.platform.startswith("win"):
+            self.attributes("-transparentcolor", self.transparent_color)
 
-    def _make_modal(self):
-        try:
-            self.grab_set()
-            self.focus_set()
-        except Exception:
-            pass
+        self.bg_color = self._apply_appearance_mode(
+            ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
 
-    def _build(self, mod_name: str):
+        self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self,
-            text=f"'{mod_name}' is already installed.",
-            font=FONT_BOLD,
-            text_color=TEXT_MAIN,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 4))
+        self._frame = ctk.CTkFrame(
+            self, corner_radius=5, width=self._WIDTH, border_width=1,
+            bg_color=self.transparent_color, fg_color=self.bg_color,
+        )
+        self._frame.grid(sticky="nsew")
+        self._frame.bind("<B1-Motion>", self._move_window)
+        self._frame.bind("<ButtonPress-1>", self._old_xy_set)
+        self._frame.grid_columnconfigure(0, weight=1)
+        self._frame.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(
-            self,
-            text="How would you like to handle the existing mod?",
-            font=FONT_NORMAL,
-            text_color=TEXT_DIM,
-            anchor="w",
-        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+        # Icons
+        _warn = _PilImage.open(ICON_PATH["warning"])
+        self._warn_icon = ctk.CTkImage(_warn, _warn, (30, 30))
+        _cl = _PilImage.open(ICON_PATH["close"][0])
+        _cl_d = _PilImage.open(ICON_PATH["close"][1])
+        self._close_icon = ctk.CTkImage(_cl, _cl_d, (20, 20))
 
-        # Rename row (hidden until "Rename" is clicked)
-        self._rename_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self._rename_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        # Title row
+        title_lbl = ctk.CTkLabel(
+            self._frame, text="  Mod Already Exists", font=("", 18),
+            image=self._warn_icon, compound="left",
+        )
+        title_lbl.grid(row=0, column=0, sticky="w", padx=15, pady=(12, 4))
+        title_lbl.bind("<B1-Motion>", self._move_window)
+        title_lbl.bind("<ButtonPress-1>", self._old_xy_set)
+
+        ctk.CTkButton(
+            self._frame, text="", image=self._close_icon, width=20, height=20,
+            hover=False, fg_color="transparent", command=self._on_cancel,
+        ).grid(row=0, column=1, sticky="ne", padx=10, pady=10)
+
+        # Body text
+        ctk.CTkLabel(
+            self._frame,
+            text=f"'{mod_name}' is already installed.\nHow would you like to handle the existing mod?",
+            justify="left", anchor="w",
+            wraplength=self._WIDTH - 40,
+        ).grid(row=1, column=0, padx=(20, 10), pady=(0, 6), sticky="new", columnspan=2)
+
+        # Rename row (collapsed by default)
+        self._rename_frame = ctk.CTkFrame(self._frame, fg_color="transparent")
+        self._rename_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 4))
         self._rename_frame.grid_columnconfigure(0, weight=1)
         self._rename_frame.grid_remove()
 
@@ -3616,53 +3641,107 @@ class _ReplaceModDialog(ctk.CTkToplevel):
             command=self._on_rename_confirm,
         ).grid(row=0, column=1)
 
-        bar_h = scaled(52)
-        bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=bar_h)
-        bar.grid(row=3, column=0, sticky="ew")
-        bar.grid_propagate(False)
-        ctk.CTkFrame(bar, fg_color=BORDER, height=1, corner_radius=0).pack(
-            side="top", fill="x"
-        )
-        btn_h = scaled(28)
-        btn_pady = scaled(12)
-        ctk.CTkButton(
-            bar, text="Cancel", width=scaled(90), height=btn_h, font=FONT_NORMAL,
-            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
-            command=self._on_cancel,
-        ).pack(side="right", padx=(scaled(4), scaled(12)), pady=btn_pady)
-        ctk.CTkButton(
-            bar, text="Rename", width=scaled(90), height=btn_h, font=FONT_NORMAL,
-            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
-            command=self._on_rename,
-        ).pack(side="right", padx=scaled(4), pady=btn_pady)
-        ctk.CTkButton(
-            bar, text="Replace Selected", width=scaled(130), height=btn_h, font=FONT_NORMAL,
-            fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
-            command=self._on_selected,
-        ).pack(side="right", padx=scaled(4), pady=btn_pady)
-        ctk.CTkButton(
-            bar, text="Replace All", width=scaled(100), height=btn_h, font=FONT_BOLD,
-            fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
-            command=self._on_all,
-        ).pack(side="right", padx=scaled(4), pady=btn_pady)
+        # Button row
+        btn_frame = ctk.CTkFrame(self._frame, fg_color="transparent")
+        btn_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(2, 10))
 
+        ctk.CTkButton(
+            btn_frame, text="Replace All", width=110,
+            text_color="white", command=self._on_all,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            btn_frame, text="Replace Selected", width=130, fg_color="transparent", border_width=1,
+            text_color=("black", "white"), command=self._on_selected,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            btn_frame, text="Rename", width=90, fg_color="transparent", border_width=1,
+            text_color=("black", "white"), command=self._on_rename,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            btn_frame, text="Cancel", width=90, fg_color="#c0392b", hover_color="#a93226",
+            text_color="white", command=self._on_cancel,
+        ).pack(side="left", padx=4)
+
+        self.bind("<Escape>", lambda _e: self._on_cancel())
+        self._center_and_show()
+
+    def _center_and_show(self):
+        parent = self._parent_ref
+        self.geometry(f"{self._WIDTH}")
         self.update_idletasks()
-        w, h = scaled(460), self.winfo_reqheight()
-        owner = self.master
-        x = owner.winfo_rootx() + (owner.winfo_width() - w) // 2
-        y = owner.winfo_rooty() + (owner.winfo_height() - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
+        # winfo_reqheight() returns scaled tk pixels; convert back to design
+        # units so CTkToplevel.geometry() doesn't double-scale the value.
+        scale = self._get_window_scaling() or 1
+        req_h = self.winfo_reqheight() / scale
+        final_h = int(max(req_h, self._HEIGHT))
+        self.geometry(f"{self._WIDTH}x{final_h}")
+        self.update_idletasks()
+        if parent is not None:
+            try:
+                top = parent.winfo_toplevel()
+                top.update_idletasks()
+                px = top.winfo_rootx()
+                py = top.winfo_rooty()
+                pw = top.winfo_width()
+                ph = top.winfo_height()
+                aw = self.winfo_width()
+                ah = self.winfo_height()
+                if aw <= 1:
+                    aw = scaled(self._WIDTH)
+                if ah <= 1:
+                    ah = scaled(final_h)
+                self.geometry(f"+{px + (pw - aw) // 2}+{py + (ph - ah) // 2}")
+            except Exception:
+                pass
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.after(50, self._grab)
+
+    def _grab(self):
+        try:
+            self.grab_set()
+            self.focus_set()
+        except Exception:
+            pass
+
+    def _old_xy_set(self, event):
+        self.old_x = event.x_root
+        self.old_y = event.y_root
+
+    def _move_window(self, event):
+        if self.old_x is None or self.old_y is None:
+            return
+        dx = event.x_root - self.old_x
+        dy = event.y_root - self.old_y
+        self.geometry(f"+{self.winfo_x() + dx}+{self.winfo_y() + dy}")
+        self.old_x = event.x_root
+        self.old_y = event.y_root
 
     def _on_rename(self):
         if self._rename_frame is None:
             return
         self._rename_frame.grid()
         self.update_idletasks()
-        w, h = scaled(460), self.winfo_reqheight()
-        owner = self.master
-        x = owner.winfo_rootx() + (owner.winfo_width() - w) // 2
-        y = owner.winfo_rooty() + (owner.winfo_height() - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
+        scale = self._get_window_scaling() or 1
+        req_h = self.winfo_reqheight() / scale
+        new_h = int(max(req_h, self._HEIGHT))
+        self.geometry(f"{self._WIDTH}x{new_h}")
+        self.update_idletasks()
+        parent = self._parent_ref
+        if parent is not None:
+            try:
+                top = parent.winfo_toplevel()
+                top.update_idletasks()
+                px = top.winfo_rootx()
+                py = top.winfo_rooty()
+                pw = top.winfo_width()
+                ph = top.winfo_height()
+                aw = self.winfo_width() or scaled(self._WIDTH)
+                ah = self.winfo_height() or scaled(new_h)
+                self.geometry(f"+{px + (pw - aw) // 2}+{py + (ph - ah) // 2}")
+            except Exception:
+                pass
         self._rename_entry.focus_set()
         self._rename_entry.select_range(0, "end")
 
