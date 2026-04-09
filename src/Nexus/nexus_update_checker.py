@@ -285,6 +285,19 @@ def check_for_updates(
             has_update: bool
             gql_version_backfilled = False
 
+            # --- Category gate: GraphQL returns only the mod-page version
+            # which typically tracks the latest MAIN file.  For mods
+            # installed from a different category (OPTIONAL, UPDATE, etc.)
+            # we need the file-level REST check so we can compare against
+            # files in the same category only.
+            if (
+                meta.file_category
+                and meta.file_category.upper() != "MAIN"
+                and meta.file_id > 0
+            ):
+                rest_fallback.setdefault(mod_id, []).append(meta)
+                continue
+
             # --- Path A: Nexus-native flag = True (trusted).
             # Only True is reliable — False can mean "author didn't bump the
             # page version" even when a new file exists.
@@ -381,8 +394,26 @@ def check_for_updates(
                         meta.version = _vf
                         version_backfilled = True
 
-                # Pick comparison target — same-name variants when possible.
-                if installed_file:
+                # Pick comparison target — only consider files in the
+                # same category (MAIN, OPTIONAL, etc.) so that e.g. a
+                # newer OPTIONAL file doesn't flag a MAIN install.
+                target_cat = (
+                    installed_file.category_name
+                    if installed_file
+                    else meta.file_category or ""
+                )
+                if target_cat:
+                    cat_matches = [
+                        f for f in files
+                        if f.category_name == target_cat
+                    ]
+                else:
+                    cat_matches = []
+
+                if cat_matches:
+                    latest = max(cat_matches, key=lambda f: f.uploaded_timestamp)
+                elif installed_file:
+                    # Fallback: match by display name if no category info
                     name_matches = [f for f in files if f.name == installed_file.name]
                     latest = max(name_matches, key=lambda f: f.uploaded_timestamp)
                 else:
