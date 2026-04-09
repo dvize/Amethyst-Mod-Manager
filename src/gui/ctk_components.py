@@ -729,6 +729,9 @@ _MENU_SEP_H = 4
 _MENU_PAD = 6
 _MENU_MIN_W = 160
 
+# Set to True to print context-menu lifecycle events to stdout
+_POPUP_DEBUG = False
+
 
 class CTkPopupMenu(ctk.CTkToplevel):
     """CTk-styled popup menu. Supports add_command() and add_separator() for context menus."""
@@ -755,6 +758,7 @@ class CTkPopupMenu(ctk.CTkToplevel):
         self.hidden = True
         self._content_height = _MENU_PAD * 2
         self._has_items = False
+        self._popup_gen = 0  # incremented each popup() call; lets deferred _check detect staleness
 
         self.configure(fg_color=_MENU_BG)
         if sys.platform.startswith("win"):
@@ -935,17 +939,36 @@ class CTkPopupMenu(ctk.CTkToplevel):
 
     def _on_item_click(self, command):
         if command is not None:
+            if _POPUP_DEBUG:
+                print(f"[PopupMenu] item clicked → calling _withdraw(), alive={self._alive[0]}")
             self._withdraw()
             command()
 
     def _on_focus_out(self, event=None):
         """Close menu when window loses focus (e.g. Alt-Tab). Deferred to avoid dismissing
         when focus moves to our own popup on first show."""
+        if _POPUP_DEBUG:
+            src = getattr(event, 'widget', '?') if event else '?'
+            print(f"[PopupMenu] _on_focus_out fired, alive={self._alive[0]}, event_widget={src}")
         if not self._alive[0]:
+            if _POPUP_DEBUG:
+                print(f"[PopupMenu] _on_focus_out: alive=False, ignoring")
             return
 
+        # Capture alive-generation at schedule time so a stale _check can
+        # detect that a new popup() call happened between schedule and fire.
+        _gen = self._popup_gen
+
         def _check():
+            if _POPUP_DEBUG:
+                print(f"[PopupMenu] _check: alive={self._alive[0]}, hidden={self.hidden}, "
+                      f"stale={_gen != self._popup_gen} (sched_gen={_gen}, cur_gen={self._popup_gen})")
             if not self._alive[0] or not self.winfo_exists():
+                return
+            # If popup() was called again since this _check was scheduled, bail out.
+            if _gen != self._popup_gen:
+                if _POPUP_DEBUG:
+                    print(f"[PopupMenu] _check: stale (gen {_gen} != {self._popup_gen}), ignoring")
                 return
             try:
                 if self._active_sub[0] is not None:
@@ -956,6 +979,8 @@ class CTkPopupMenu(ctk.CTkToplevel):
                         pass
 
                 f = self.focus_get()
+                if _POPUP_DEBUG:
+                    print(f"[PopupMenu] _check: focus_get()={f}")
                 if f is None:
                     # On Wayland/Hyprland, hovering child widgets can cause
                     # focus_get() to return None temporarily. Guard against
@@ -977,6 +1002,17 @@ class CTkPopupMenu(ctk.CTkToplevel):
                 while w:
                     if w == self or (self._active_sub[0] and w == self._active_sub[0]):
                         return
+                    # If focus is at the app's own root window the application
+                    # still has focus — don't dismiss from here.  Click-outside
+                    # dismissal is handled by _on_global_click.  This prevents
+                    # spurious dismissals on Wayland/X11 when the WM returns
+                    # focus to the root window instead of the new popup window.
+                    if self.master_window is not None:
+                        try:
+                            if w == self.master_window.winfo_toplevel():
+                                return
+                        except Exception:
+                            pass
                     try:
                         w = w.master
                     except Exception:
@@ -987,6 +1023,9 @@ class CTkPopupMenu(ctk.CTkToplevel):
         self.after(50, _check)
 
     def _on_global_click(self, event):
+        if _POPUP_DEBUG:
+            print(f"[PopupMenu] _on_global_click: alive={self._alive[0]}, hidden={self.hidden}, "
+                  f"btn={event.num}, widget={event.widget}")
         if not self._alive[0]:
             return
         if not self.winfo_exists():
@@ -1006,9 +1045,22 @@ class CTkPopupMenu(ctk.CTkToplevel):
                     return
             except Exception:
                 pass
+        # Grace period: drop stale/replayed ButtonPress events that arrive
+        # shortly after popup() was called.  These occur when a dialog that
+        # was clicked to close replays its dismiss-click onto the window below
+        # (common on X11/Wayland after a CTkToplevel is destroyed).
+        import time as _time
+        if (_time.monotonic() - getattr(self, '_popup_time', 0)) < 0.15:
+            if _POPUP_DEBUG:
+                print(f"[PopupMenu] _on_global_click: within grace period, ignoring btn={event.num}")
+            return
         self._withdraw()
 
     def _withdraw(self):
+        import traceback as _tb
+        if _POPUP_DEBUG:
+            print(f"[PopupMenu] _withdraw() called, alive was {self._alive[0]}")
+            _tb.print_stack(limit=6)
         self._alive[0] = False
         self._close_active_sub()
         if self.winfo_exists():
@@ -1017,6 +1069,11 @@ class CTkPopupMenu(ctk.CTkToplevel):
 
     def popup(self, x=None, y=None):
         """Show the menu at screen coordinates (x, y). Uses cursor position if not provided."""
+        import time as _time
+        self._popup_time = _time.monotonic()
+        self._popup_gen += 1
+        if _POPUP_DEBUG:
+            print(f"[PopupMenu] popup() called at ({x}, {y}), alive={self._alive[0]}, hidden={self.hidden}, gen={self._popup_gen}")
         self._alive[0] = True
         self._close_active_sub()
         if self._has_items:
