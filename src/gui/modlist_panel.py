@@ -131,7 +131,7 @@ from gui.mod_files_overlay import ModFilesOverlay
 from Nexus.nexus_meta import build_meta_from_download, ensure_installed_stamp, read_meta, write_meta
 from Nexus.nexus_download import delete_archive_and_sidecar
 from Utils.config_paths import get_download_cache_dir
-from Utils.ui_config import load_column_widths, save_column_widths, load_column_order, save_column_order, load_normalize_folder_case, load_sort_state, save_sort_state
+from Utils.ui_config import load_column_widths, save_column_widths, load_column_order, save_column_order, load_normalize_folder_case, load_sort_state, save_sort_state, load_column_hidden, save_column_hidden
 from Nexus.nexus_update_checker import check_for_updates
 
 
@@ -181,6 +181,7 @@ def _scan_meta_flags_impl(entries: list, mods_dir: Path) -> dict:
     install_dates: dict[str, str] = {}
     install_datetimes: dict[str, datetime] = {}
     category_names: dict[str, str] = {}
+    mod_versions: dict[str, str] = {}
     fomod_mods: set[str] = set()
     today = datetime.now().date()
     for entry in entries:
@@ -216,6 +217,8 @@ def _scan_meta_flags_impl(entries: list, mods_dir: Path) -> dict:
                 install_datetimes[entry.name] = dt
             if meta.category_name:
                 category_names[entry.name] = meta.category_name
+            if meta.version:
+                mod_versions[entry.name] = meta.version
             if meta.is_fomod:
                 fomod_mods.add(entry.name)
         except Exception:
@@ -228,6 +231,7 @@ def _scan_meta_flags_impl(entries: list, mods_dir: Path) -> dict:
         "install_dates": install_dates,
         "install_datetimes": install_datetimes,
         "category_names": category_names,
+        "mod_versions": mod_versions,
         "fomod_mods": fomod_mods,
     }
 
@@ -250,7 +254,7 @@ class ModListPanel(ctk.CTkFrame):
     HEADERS = ["", "Mod Name", "Flags", "Conflicts", "Installed", "Priority"]
     # x-start of each logical column (checkbox, name, flags, conflicts, installed, priority)
     # Computed dynamically in _layout_columns(); defaults here.
-    _COL_X  = [4, 32, 0, 0, 0, 0]   # patched in _layout_columns
+    _COL_X  = [4, 32, 0, 0, 0, 0, 0, 0]   # patched in _layout_columns
 
     def __init__(self, parent, log_fn=None, call_threadsafe_fn=None):
         super().__init__(parent, fg_color=BG_PANEL, corner_radius=0)
@@ -372,6 +376,7 @@ class ModListPanel(ctk.CTkFrame):
         # Map mod name → install date display string
         self._install_dates: dict[str, str] = {}
         self._category_names: dict[str, str] = {}
+        self._mod_versions: dict[str, str] = {}
         self._fomod_mods: set[str] = set()
         # Map mod name → install datetime for sorting (parallel to _install_dates)
         self._install_datetimes: dict[str, datetime] = {}
@@ -465,6 +470,8 @@ class ModListPanel(ctk.CTkFrame):
 
         # Column reorder: list of data col indices (2-5) in left→right display order
         self._col_order: list[int] = load_column_order()
+        # Hidden columns: set of data col indices (2..7). Col 1 (name) is never hideable.
+        self._col_hidden: set[int] = load_column_hidden()
         # _col_pos: data col index → _COL_X/W slot index (computed in _layout_columns)
         self._col_pos: dict[int, int] = {2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
         # Header label drag-to-reorder state
@@ -496,6 +503,7 @@ class ModListPanel(ctk.CTkFrame):
         self._pool_category_text: list[int] = []     # text canvas item ids (category)
         self._pool_install_text: list[int] = []      # text canvas item ids (install date)
         self._pool_priority_text: list[int] = []     # text canvas item ids (priority)
+        self._pool_version_text: list[int] = []      # text canvas item ids (version)
         self._pool_sep_icon: list[int] = []          # image canvas item ids (collapse arrow)
         self._pool_sep_line_l: list[int] = []        # line canvas item ids (separator left line)
         self._pool_sep_line_r: list[int] = []        # line canvas item ids (separator right line)
@@ -654,6 +662,9 @@ class ModListPanel(ctk.CTkFrame):
         self._header_labels: list[ctk.CTkLabel] = []
         # Grey divider lines between columns — drag events bound directly to these
         self._header_dividers: list[tk.Frame] = []
+        # Column visibility menu button (created lazily in _update_header)
+        self._col_menu_btn: tk.Label | None = None
+        self._col_menu_popup: CTkPopupMenu | None = None
 
     def _build_canvas(self):
         frame = tk.Frame(self, bg=BG_DEEP, bd=0, highlightthickness=0)
@@ -1131,58 +1142,88 @@ class ModListPanel(ctk.CTkFrame):
         scale = min(1.4, max(0.5, canvas_w / scaled(700)))
         gap = scaled(10)
         scroll_gap = scaled(14)
+        # Extra right-side pad for the column-visibility menu button
+        menu_btn_pad = scaled(22)
         x0, x1 = scaled(4), scaled(32)
-        avail = canvas_w - x1 - gap * 6 - scroll_gap  # total for cols 1–6
+        hidden = self._col_hidden
+        # Number of visible cols among 2..7 (name col 1 is always visible)
+        visible_data_cols = [dc for dc in self._col_order if dc not in hidden]
+        n_visible = len(visible_data_cols)
+        # gaps: between name and col2, between subsequent visible cols, and before scrollbar
+        avail = canvas_w - x1 - gap * (n_visible + 1) - scroll_gap - menu_btn_pad
 
-        # Default proportional widths keyed by data-col index (1=name, 2=cat, 3=flags, 4=conf, 5=inst, 6=prio)
+        # Default proportional widths keyed by data-col index (1=name, 2=cat, 3=flags, 4=conf, 5=inst, 6=prio, 7=version)
         data_defaults = {
-            1: max(scaled(80), avail - scaled(int((130 + 56 + 95 + 100 + 72) * scale))),
+            1: max(scaled(80), avail - scaled(int((130 + 56 + 95 + 100 + 72 + 90) * scale))),
             2: scaled(int(130 * scale)),
             3: scaled(int(56 * scale)),
             4: scaled(int(95 * scale)),
             5: scaled(int(100 * scale)),
             6: scaled(int(72 * scale)),
+            7: scaled(int(90 * scale)),
         }
-        data_mins = {1: scaled(120), 2: scaled(95), 3: scaled(70), 4: scaled(95), 5: scaled(95), 6: scaled(80)}
+        data_mins = {1: scaled(120), 2: scaled(95), 3: scaled(70), 4: scaled(95), 5: scaled(95), 6: scaled(80), 7: scaled(80)}
 
         ov = self._col_w_override
-        # Width per data col
-        data_widths = {dc: max(data_mins[dc], ov.get(dc, data_defaults[dc])) for dc in range(1, 7)}
+        # Width per visible data col (name col 1 always included)
+        visible_dcs = [1] + visible_data_cols
+        data_widths = {dc: max(data_mins[dc], ov.get(dc, data_defaults[dc])) for dc in visible_dcs}
 
         # Scale all widths proportionally to fit available space exactly
-        total = sum(data_widths[dc] for dc in range(1, 7))
+        total = sum(data_widths[dc] for dc in visible_dcs)
         if total != avail and avail > 0:
             factor = avail / total
-            data_widths = {dc: max(data_mins[dc], int(data_widths[dc] * factor)) for dc in range(1, 7)}
+            data_widths = {dc: max(data_mins[dc], int(data_widths[dc] * factor)) for dc in visible_dcs}
             remainder = avail - sum(data_widths.values())
             data_widths[1] += remainder
 
-        # Build slot-ordered widths: slot 0=checkbox, 1=name, 2..6 follow _col_order
-        # _col_order holds data cols 2-6 in display order
-        slot_data = [0, 1] + self._col_order  # slot → data col (slot 0 unused by widths)
-        widths = [data_widths.get(slot_data[i + 1], 0) for i in range(6)]
-        # widths[0]=name, widths[1..5]=reordered cols
+        # Build slot-ordered widths: slot 0=checkbox, 1=name, then visible cols in order.
+        # Hidden cols get slot indices too, but with width=0 and x off-screen, so draw
+        # code that references them via _col_pos sees invisible geometry.
+        slot_data = [0, 1] + visible_data_cols  # slot → data col
+        # widths[0] = name (slot 1), widths[1..n_visible] = visible cols (slots 2..n_visible+1),
+        # remaining entries are 0 for dead/hidden slots.
+        widths = []
+        for i in range(7):
+            slot = i + 1  # _COL_W slot index
+            if slot < len(slot_data):
+                widths.append(data_widths.get(slot_data[slot], 0))
+            else:
+                widths.append(0)
 
         # Build _col_pos: data col → slot index in _COL_X/_COL_W
         self._col_pos = {1: 1}
-        for k, dc in enumerate(self._col_order):
-            self._col_pos[dc] = k + 2  # slots 2..6
+        for k, dc in enumerate(visible_data_cols):
+            self._col_pos[dc] = k + 2  # slots 2..(n_visible+1)
 
-        # Build x positions cleanly
+        # Build x positions for visible slots
         xs = [x0, x1]
-        for i in range(5):
+        for i in range(n_visible):
             xs.append(xs[-1] + widths[i] + gap)
-        # xs now: [x0, x1, x2, x3, x4, x5, x6]
+        # Pad remaining slots (for hidden cols) with a far off-screen sentinel
+        off_x = -99999
+        while len(xs) < 8:
+            xs.append(off_x)
+
+        # Hidden col slots: assign them slot indices past the visible ones, off-screen.
+        for k, dc in enumerate(self._col_order):
+            if dc in hidden:
+                slot = n_visible + 2  # shared off-screen slot (width 0, x off_x)
+                if slot >= 8:
+                    slot = 7
+                self._col_pos[dc] = slot
 
         self._COL_X = xs
         self._COL_W = [scaled(28)] + widths
         self._canvas_w = canvas_w
         self._name_col_right = x1 + widths[0] - scaled(4)
+        # Right edge of the last visible column (for placing the menu button).
+        self._last_col_right = xs[n_visible + 1] if n_visible > 0 else (x1 + widths[0])
 
     # Static sort key names by data-col index
-    _DATA_COL_SORT_KEYS = {1: "name", 2: "category", 3: "flags", 4: "conflicts", 5: "installed", 6: "priority"}
+    _DATA_COL_SORT_KEYS = {1: "name", 2: "category", 3: "flags", 4: "conflicts", 5: "installed", 6: "priority", 7: "version"}
     # Static titles by data-col index
-    _DATA_COL_TITLES = {0: "", 1: "Mod Name", 2: "Category", 3: "Flags", 4: "Conflicts", 5: "Installed", 6: "Priority"}
+    _DATA_COL_TITLES = {0: "", 1: "Mod Name", 2: "Category", 3: "Flags", 4: "Conflicts", 5: "Installed", 6: "Priority", 7: "Version"}
 
     def _update_header(self, canvas_w: int):
         try:
@@ -1190,16 +1231,26 @@ class ModListPanel(ctk.CTkFrame):
         except RecursionError:
             return
 
-        # Build slot-ordered metadata: slot 0=checkbox, 1=name, 2..6=reordered
-        slot_data_cols = [0, 1] + self._col_order
-        titles  = [self._DATA_COL_TITLES.get(slot_data_cols[i], "") for i in range(7)]
+        # Build slot-ordered metadata using only visible cols.
+        visible = [dc for dc in self._col_order if dc not in self._col_hidden]
+        slot_data_cols = [0, 1] + visible + [0] * (6 - len(visible))
+        titles  = [self._DATA_COL_TITLES.get(slot_data_cols[i], "") for i in range(8)]
         x_pos   = self._COL_X
-        anchors = ["center", "w", "center", "center", "center", "center", "center"]
+        anchors = ["center", "w", "center", "center", "center", "center", "center", "center"]
         widths  = self._COL_W
         for i, (title, x, anc, w) in enumerate(zip(titles, x_pos, anchors, widths)):
             dc = slot_data_cols[i]
+            # Slots past the last visible col have no real data col → hide any existing label.
+            is_dead_slot = (i >= 2 + len(visible))
+            if is_dead_slot:
+                if i < len(self._header_labels):
+                    try:
+                        self._header_labels[i].place_forget()
+                    except Exception:
+                        pass
+                continue
             sort_key = self._DATA_COL_SORT_KEYS.get(dc)
-            is_movable = dc in (2, 3, 4, 5, 6)
+            is_movable = dc in (2, 3, 4, 5, 6, 7)
             display = title
             if sort_key and sort_key == self._sort_column:
                 arrow = " ▲" if self._sort_ascending else " ▼"
@@ -1231,8 +1282,11 @@ class ModListPanel(ctk.CTkFrame):
         # Wider hit area (8px) with a visible 2px line centered inside.
         # Events are bound directly to dividers so header labels can't intercept.
         boundaries = self._COL_X[2:]  # skip x0 (checkbox) and x1 (name start)
+        n_visible_local = len(visible)
         for i, bx in enumerate(boundaries):
             col_idx = i + 1  # _COL_W index of the left column at this boundary
+            # Only place dividers for boundaries that sit between visible cols.
+            is_visible_boundary = (i < n_visible_local)
             if i < len(self._header_dividers):
                 div = self._header_dividers[i]
             else:
@@ -1252,22 +1306,46 @@ class ModListPanel(ctk.CTkFrame):
                 line.bind("<Double-Button-1>", lambda e, c=col_idx: self._on_divider_drag_reset(e, c))
                 line.configure(cursor="sb_h_double_arrow")
                 self._header_dividers.append(div)
-            div.place(x=bx - 4, y=0, width=8, height=scaled(28))
-            div.lift()  # raise above labels
+            if is_visible_boundary:
+                div.place(x=bx - 4, y=0, width=8, height=scaled(28))
+                div.lift()  # raise above labels
+            else:
+                try:
+                    div.place_forget()
+                except Exception:
+                    pass
+
+        # Column visibility menu button (far right of header)
+        if not hasattr(self, "_col_menu_btn") or self._col_menu_btn is None:
+            btn = tk.Label(
+                self._header, text="⋮",
+                font=("Segoe UI", _theme.FS12, "bold"),
+                fg=TEXT_SEP, bg=BG_HEADER, bd=0, cursor="hand2",
+            )
+            btn.bind("<Button-1>", lambda e: self._show_column_menu())
+            btn.bind("<Enter>", lambda e: btn.configure(fg=ACCENT))
+            btn.bind("<Leave>", lambda e: btn.configure(fg=TEXT_SEP))
+            self._col_menu_btn = btn
+        btn_w = scaled(20)
+        btn_x = max(0, canvas_w - btn_w - scaled(14))
+        self._col_menu_btn.place(x=btn_x, y=0, width=btn_w, height=scaled(28))
+        self._col_menu_btn.lift()
 
     # ------------------------------------------------------------------
     # Column resize drag (bound directly to divider widgets)
     # ------------------------------------------------------------------
 
     # Minimum widths per _COL_W index: 0=checkbox, 1=name, 2=cat, 3=flags, 4=conflicts, 5=installed, 6=priority
-    _COL_MIN_W = {1: 120, 2: 95, 3: 70, 4: 95, 5: 95, 6: 80}
+    _COL_MIN_W = {1: 120, 2: 95, 3: 70, 4: 95, 5: 95, 6: 80, 7: 80}
 
     def _slot_to_data_col(self, slot: int) -> int:
         """Convert a _COL_W/X slot index to the data-col index it currently holds."""
         if slot == 1:
             return 1
-        if 2 <= slot <= 6:
-            return self._col_order[slot - 2]
+        visible = [dc for dc in self._col_order if dc not in self._col_hidden]
+        idx = slot - 2
+        if 0 <= idx < len(visible):
+            return visible[idx]
         return slot
 
     def _on_divider_drag_start(self, event: tk.Event, col: int) -> None:
@@ -1275,9 +1353,11 @@ class ModListPanel(ctk.CTkFrame):
         self._col_drag_col = col
         self._col_drag_start_x = event.x_root
         # Snapshot widths and data-col keys for all resizable slots (1..6)
+        n_visible = len([dc for dc in self._col_order if dc not in self._col_hidden])
+        self._col_drag_max_slot = n_visible + 1  # last live slot (slot 1=name, 2..n_visible+1)
         self._col_drag_snap = {
             slot: (self._slot_to_data_col(slot), self._COL_W[slot])
-            for slot in range(1, 7)
+            for slot in range(1, self._col_drag_max_slot + 1)
         }
 
     def _on_header_col_drag_motion(self, event: tk.Event) -> None:
@@ -1288,8 +1368,9 @@ class ModListPanel(ctk.CTkFrame):
         snap = self._col_drag_snap
 
         # Slots to the left of divider and to the right
-        left_slots  = list(range(col, 0, -1))   # [col, col-1, ..., 1] — immediate-left first
-        right_slots = list(range(col + 1, 7))   # [col+1, ..., 6]
+        max_slot = getattr(self, "_col_drag_max_slot", 7)
+        left_slots  = list(range(col, 0, -1))              # [col, col-1, ..., 1]
+        right_slots = list(range(col + 1, max_slot + 1))   # only live slots
         def distribute(slots: list[int], budget: int) -> dict[int, int]:
             """Shrink/grow slots greedily. budget>0 grows first slot; budget<0 shrinks in order."""
             new_w: dict[int, int] = {}
@@ -1348,6 +1429,49 @@ class ModListPanel(ctk.CTkFrame):
         self._redraw()
 
     # ------------------------------------------------------------------
+    # Column visibility menu
+    # ------------------------------------------------------------------
+    def _show_column_menu(self) -> None:
+        """Popup menu to toggle column visibility. Persists to amethyst.ini."""
+        # Close any previous instance so rapid clicks don't leak popups.
+        prev = self._col_menu_popup
+        if prev is not None:
+            try:
+                prev.destroy()
+            except Exception:
+                pass
+            self._col_menu_popup = None
+        menu = CTkPopupMenu(self.winfo_toplevel(), width=200, title="")
+        self._col_menu_popup = menu
+        # Columns in current display order (2..7), name col (1) is never hideable.
+        for dc in self._col_order:
+            title = self._DATA_COL_TITLES.get(dc, f"Col {dc}")
+            visible = dc not in self._col_hidden
+            prefix = "☑  " if visible else "☐  "
+            menu.add_command(prefix + title, lambda d=dc: self._toggle_column_hidden(d))
+        try:
+            btn = self._col_menu_btn
+            x = btn.winfo_rootx()
+            y = btn.winfo_rooty() + btn.winfo_height()
+            menu.popup(x - 170, y)
+        except Exception:
+            menu.popup()
+
+    def _toggle_column_hidden(self, dc: int) -> None:
+        """Toggle a column's visibility and persist."""
+        if dc in self._col_hidden:
+            self._col_hidden.discard(dc)
+        else:
+            # Don't allow hiding every non-name column; keep at least one visible.
+            if len(self._col_hidden) + 1 >= len(self._col_order):
+                return
+            self._col_hidden.add(dc)
+        save_column_hidden(self._col_hidden)
+        self._layout_columns(self._canvas_w)
+        self._update_header(self._canvas_w)
+        self._redraw()
+
+    # ------------------------------------------------------------------
     # Column reorder drag (header label drag-to-move)
     # ------------------------------------------------------------------
 
@@ -1390,18 +1514,25 @@ class ModListPanel(ctk.CTkFrame):
         hdr_x = self._header.winfo_rootx()
         local_x = x_root - hdr_x
         target_slot = self._hdr_slot_at(local_x)
+        visible = [dc for dc in self._col_order if dc not in self._col_hidden]
+        slot_data_cols = [0, 1] + visible
         for k, lbl in enumerate(self._header_labels):
             slot = k  # label index = slot
-            dc = ([0, 1] + self._col_order)[slot] if slot < 7 else 0
-            is_movable = dc in (2, 3, 4, 5, 6)
+            dc = slot_data_cols[slot] if slot < len(slot_data_cols) else 0
+            is_movable = dc in (2, 3, 4, 5, 6, 7)
             if is_movable and slot == target_slot:
                 lbl.configure(bg="#3a3a5a")
             else:
                 lbl.configure(bg=BG_HEADER)
 
     def _hdr_slot_at(self, local_x: int) -> int:
-        """Return the slot index (2-6) at header local x, clamped to movable range."""
-        for slot in range(6, 1, -1):
+        """Return the slot index at header local x, clamped to visible movable range."""
+        visible = [dc for dc in self._col_order if dc not in self._col_hidden]
+        n_visible = len(visible)
+        if n_visible == 0:
+            return 2
+        max_slot = n_visible + 1  # slots 2..n_visible+1
+        for slot in range(max_slot, 1, -1):
             if local_x >= self._COL_X[slot]:
                 return slot
         return 2
@@ -1432,13 +1563,25 @@ class ModListPanel(ctk.CTkFrame):
         target_slot = self._hdr_slot_at(local_x)
         # Find source slot
         src_slot = self._col_pos.get(dc, -1)
-        if src_slot == target_slot or target_slot < 2 or target_slot > 6:
+        visible = [c for c in self._col_order if c not in self._col_hidden]
+        n_visible = len(visible)
+        if src_slot == target_slot or target_slot < 2 or target_slot > (n_visible + 1):
             return
-        # Swap in _col_order
+        # Swap within the visible list, then splice back into _col_order preserving hidden positions
         src_k = src_slot - 2
         tgt_k = target_slot - 2
-        order = list(self._col_order)
-        order[src_k], order[tgt_k] = order[tgt_k], order[src_k]
+        if src_k < 0 or src_k >= n_visible or tgt_k < 0 or tgt_k >= n_visible:
+            return
+        visible[src_k], visible[tgt_k] = visible[tgt_k], visible[src_k]
+        new_order: list[int] = []
+        vi = 0
+        for c in self._col_order:
+            if c in self._col_hidden:
+                new_order.append(c)
+            else:
+                new_order.append(visible[vi])
+                vi += 1
+        order = new_order
         self._col_order = order
         save_column_order(order)
         # Rebuild header labels so bindings use the new order
@@ -1682,6 +1825,7 @@ class ModListPanel(ctk.CTkFrame):
             self._install_dates.clear()
             self._install_datetimes.clear()
             self._category_names.clear()
+            self._mod_versions.clear()
             self._fomod_mods.clear()
             self._vis_dirty = True
             return
@@ -1713,6 +1857,7 @@ class ModListPanel(ctk.CTkFrame):
         self._install_dates = results["install_dates"]
         self._install_datetimes = results["install_datetimes"]
         self._category_names = results.get("category_names", {})
+        self._mod_versions = results.get("mod_versions", {})
         self._fomod_mods = results.get("fomod_mods", set())
         if self._filter_panel_open:
             self._refresh_filter_category_list()
@@ -1805,6 +1950,9 @@ class ModListPanel(ctk.CTkFrame):
             # Priority text
             prio_id = c.create_text(0, -200, text="", anchor="center", fill="",
                                     font=("Segoe UI", _theme.FS10), state="hidden")
+            # Version text
+            ver_id = c.create_text(0, -200, text="", anchor="center", fill="",
+                                   font=("Segoe UI", _theme.FS10), state="hidden")
             # Separator collapse icon
             sep_icon_id = c.create_image(0, -200, anchor="center", state="hidden")
             # Separator decorative lines (left and right of label)
@@ -1825,6 +1973,7 @@ class ModListPanel(ctk.CTkFrame):
             self._pool_category_text.append(cat_id)
             self._pool_install_text.append(inst_id)
             self._pool_priority_text.append(prio_id)
+            self._pool_version_text.append(ver_id)
             self._pool_sep_icon.append(sep_icon_id)
             self._pool_sep_line_l.append(sep_line_l)
             self._pool_sep_line_r.append(sep_line_r)
@@ -1901,6 +2050,7 @@ class ModListPanel(ctk.CTkFrame):
         _CONF_X = self._COL_X[_col_pos.get(4, 4)]; _CONF_W = self._COL_W[_col_pos.get(4, 4)]
         _INST_X = self._COL_X[_col_pos.get(5, 5)]; _INST_W = self._COL_W[_col_pos.get(5, 5)]
         _PRIO_X = self._COL_X[_col_pos.get(6, 6)]; _PRIO_W = self._COL_W[_col_pos.get(6, 6)]
+        _VER_X  = self._COL_X[_col_pos.get(7, 7)]; _VER_W  = self._COL_W[_col_pos.get(7, 7)]
 
         # Pre-compute font tuples (avoid re-creating inside the inner loop)
         _FONT_NAME = ("Segoe UI", _theme.FS11)
@@ -2191,6 +2341,7 @@ class ModListPanel(ctk.CTkFrame):
                     c.itemconfigure(self._pool_category_text[s], state="hidden")
                     c.itemconfigure(self._pool_install_text[s], state="hidden")
                     c.itemconfigure(self._pool_priority_text[s], state="hidden")
+                    c.itemconfigure(self._pool_version_text[s], state="hidden")
 
                     # Pool check widget — hidden for separators
                     c.itemconfigure(self._pool_cb_rect[s], state="hidden")
@@ -2448,6 +2599,20 @@ class ModListPanel(ctk.CTkFrame):
                                     text=str(priorities.get(i, "")), anchor="center",
                                     fill=TEXT_DIM, font=_FONT_SMALL, state="normal")
 
+                    # Version text
+                    version_text = self._mod_versions.get(entry.name, "")
+                    if version_text:
+                        ver_font = _FONT_SMALL
+                        ver_width = _VER_W - scaled(4)
+                        display_ver = _truncate_text_for_width(c, version_text, ver_font, ver_width)
+                        ver_cx = _VER_X + _VER_W // 2
+                        c.coords(self._pool_version_text[s], ver_cx, y_mid)
+                        c.itemconfigure(self._pool_version_text[s],
+                                        text=display_ver, anchor="center",
+                                        fill=TEXT_DIM, font=ver_font, state="normal")
+                    else:
+                        c.itemconfigure(self._pool_version_text[s], state="hidden")
+
                     # Enable/disable control (canvas-drawn)
                     # Bundle variants → radio circle (● / ○); normal mods → checkbox
                     if i < len(self._check_vars) and self._check_vars[i] is not None:
@@ -2500,6 +2665,7 @@ class ModListPanel(ctk.CTkFrame):
                 c.itemconfigure(self._pool_category_text[s], state="hidden")
                 c.itemconfigure(self._pool_install_text[s], state="hidden")
                 c.itemconfigure(self._pool_priority_text[s], state="hidden")
+                c.itemconfigure(self._pool_version_text[s], state="hidden")
                 c.itemconfigure(self._pool_sep_icon[s], state="hidden")
                 c.itemconfigure(self._pool_sep_line_l[s], state="hidden")
                 c.itemconfigure(self._pool_sep_line_r[s], state="hidden")
@@ -3018,6 +3184,19 @@ class ModListPanel(ctk.CTkFrame):
             return lambda i: priorities.get(i, 0)
         elif col == "category":
             return lambda i: (self._category_names.get(self._entries[i].name, "") or "\uffff").lower()
+        elif col == "version":
+            def _version_key(i):
+                v = self._mod_versions.get(self._entries[i].name, "")
+                if not v:
+                    return (1, ())
+                parts: list = []
+                for tok in v.replace("-", ".").split("."):
+                    try:
+                        parts.append((0, int(tok)))
+                    except ValueError:
+                        parts.append((1, tok.lower()))
+                return (0, tuple(parts))
+            return _version_key
         else:
             return lambda i: i
 
@@ -3035,7 +3214,7 @@ class ModListPanel(ctk.CTkFrame):
         # Sync overrides with the actual post-resize widths so future drags
         # start from the correct baseline (avoids adjacent columns jumping).
         if self._col_w_override:
-            for slot in range(1, 7):
+            for slot in range(1, 8):
                 dc = self._slot_to_data_col(slot)
                 if dc in self._col_w_override:
                     self._col_w_override[dc] = self._COL_W[slot]
@@ -3992,78 +4171,47 @@ class ModListPanel(ctk.CTkFrame):
         is_root_folder = self._entries[idx].name == ROOT_FOLDER_NAME
         is_synthetic = is_overwrite or is_root_folder
         _is_multi = len(self._sel_set) > 1 and idx in self._sel_set
-
-        if not _is_multi:
-            menu.add_command("Add separator above", lambda: self._add_separator(idx, above=True))
-            menu.add_command("Add separator below", lambda: self._add_separator(idx, above=False))
-        if self._modlist_path is not None and not is_synthetic and not _is_multi:
-            menu.add_command("Create empty mod below", lambda: self._create_empty_mod(idx))
         _is_bundle_sep = is_separator and self._is_bundle_separator(idx)
-        if is_separator and not is_synthetic:
-            if not _is_bundle_sep:
-                menu.add_command("Rename separator", lambda: self._rename_separator(idx))
-            menu.add_command("Change separator color", lambda: self._change_separator_color(idx))
-            if not _is_bundle_sep:
-                menu.add_command("Separator settings…", lambda: self._show_sep_settings(idx))
-            menu.add_command("Remove separator", lambda: self._remove_separator(idx))
-        elif not is_separator and not self._entries[idx].locked:
-            _is_bundle_var = self._entries[idx].bundle_name is not None
-            if not _is_bundle_var and not _is_multi:
-                menu.add_command("Rename mod", lambda: self._rename_mod(idx))
-                menu.add_command("Set priority…", lambda: self._set_priority(idx))
-            _remove_multi = [
-                i for i in sorted(self._sel_set)
-                if 0 <= i < len(self._entries)
-                and not self._entries[i].is_separator
-                and not self._entries[i].locked
-                and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
-            ] if len(self._sel_set) > 1 and idx in self._sel_set else []
-            if _remove_multi and self._modlist_path is not None:
-                menu.add_command(f"Remove mod ({len(_remove_multi)})",
-                    lambda rm=_remove_multi: self._remove_selected_mods(rm))
-            else:
-                menu.add_command("Remove mod", lambda: self._remove_mod(idx))
-            if not _is_bundle_var:
-                sep_names = [e.name for e in self._entries
-                             if e.is_separator and e.name != OVERWRITE_NAME
-                             and e.name != ROOT_FOLDER_NAME
-                             and e.display_name not in self._bundle_groups]
-                if sep_names:
-                    _multi_sel = [
-                        i for i in sorted(self._sel_set)
-                        if 0 <= i < len(self._entries)
-                        and not self._entries[i].is_separator
-                        and not self._entries[i].locked
-                        and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
-                        and self._entries[i].bundle_name is None
-                    ] if len(self._sel_set) > 1 and idx in self._sel_set else []
-                    if _multi_sel:
-                        menu.add_submenu(f"Move to separator ({len(_multi_sel)})",
-                            lambda ms=_multi_sel: self._show_separator_picker_multi(ms, sep_names,
-                                parent_dismiss=menu._withdraw, parent_popup=menu))
-                    else:
-                        menu.add_submenu("Move to separator",
-                            lambda: self._show_separator_picker(idx, sep_names,
-                                parent_dismiss=menu._withdraw, parent_popup=menu))
-            if ini_files and not _is_multi:
-                menu.add_submenu("INI files",
-                    lambda: self._show_ini_picker(ini_files,
-                        parent_dismiss=menu._withdraw, parent_popup=menu))
-            if plugin_files and not _is_multi:
-                mod_name_cap = self._entries[idx].name
-                menu.add_command("Disable Plugins…",
-                    lambda n=mod_name_cap, pf=plugin_files: self._show_disable_plugins_dialog(n, pf))
-            if mod_folder is not None and not _is_multi:
-                mod_name_cap = self._entries[idx].name
-                menu.add_command("Set deployment paths…",
-                    lambda: self._show_mod_strip_dialog(mod_name_cap, mod_folder))
+        _is_bundle_var = (not is_separator) and (self._entries[idx].bundle_name is not None)
+        _is_locked = (not is_separator) and self._entries[idx].locked
+        _mod_name = self._entries[idx].name
 
-        if mod_folder is not None and not _is_multi:
-            menu.add_command("Open folder", lambda: self._open_folder(mod_folder))
+        # Pre-compute multi-selection subsets
+        _remove_multi = [
+            i for i in sorted(self._sel_set)
+            if 0 <= i < len(self._entries)
+            and not self._entries[i].is_separator
+            and not self._entries[i].locked
+            and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
+        ] if _is_multi else []
 
-        # "Copy to profile" submenu — only for real mods, 2+ profiles
-        if (not is_separator and not is_synthetic
-                and self._modlist_path is not None and self._game is not None):
+        _multi_sel = [
+            i for i in sorted(self._sel_set)
+            if 0 <= i < len(self._entries)
+            and not self._entries[i].is_separator
+            and not self._entries[i].locked
+            and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
+            and self._entries[i].bundle_name is None
+        ] if _is_multi else []
+
+        sep_names = [e.name for e in self._entries
+                     if e.is_separator and e.name != OVERWRITE_NAME
+                     and e.name != ROOT_FOLDER_NAME
+                     and e.display_name not in self._bundle_groups]
+
+        toggleable = [
+            i for i in sorted(self._sel_set)
+            if 0 <= i < len(self._entries)
+            and not self._entries[i].is_separator
+            and not self._entries[i].locked
+            and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
+        ] if len(self._sel_set) > 1 else []
+
+        # Pre-compute profile data
+        _other_profiles: list[str] = []
+        _copy_mod_name: str | None = None
+        _copy_mod_names: list[str] = []
+        if not is_separator and not is_synthetic and self._modlist_path is not None and self._game is not None:
             _app = self.winfo_toplevel()
             _topbar = getattr(_app, "_topbar", None)
             _game_name = _topbar._game_var.get() if _topbar else ""
@@ -4079,40 +4227,28 @@ class ModListPanel(ctk.CTkFrame):
                         and not self._entries[i].is_separator
                         and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
                     ]
-                    if _copy_mod_names:
-                        menu.add_submenu(
-                            f"Copy to profile ({len(_copy_mod_names)})",
-                            lambda profs=_other_profiles, mns=_copy_mod_names: self._show_copy_to_profile_picker_multi(
-                                mns, profs, parent_dismiss=menu._withdraw, parent_popup=menu,
-                            ),
-                        )
                 else:
-                    _copy_mod_name = self._entries[idx].name
-                    menu.add_submenu(
-                        "Copy to profile",
-                        lambda profs=_other_profiles, mn=_copy_mod_name: self._show_copy_to_profile_picker(
-                            mn, profs, parent_dismiss=menu._withdraw, parent_popup=menu,
-                        ),
-                    )
+                    _copy_mod_name = _mod_name
 
+        # Pre-compute conflict status
+        conflict_status = CONFLICT_NONE
         if not _is_multi and (not is_separator or is_overwrite):
             conflict_status = (
-                self._conflict_map.get(self._entries[idx].name, CONFLICT_NONE)
+                self._conflict_map.get(_mod_name, CONFLICT_NONE)
                 if not is_overwrite
                 else (CONFLICT_WINS if self._overrides.get(OVERWRITE_NAME) else CONFLICT_NONE)
             )
-            if conflict_status != CONFLICT_NONE:
-                name_capture = self._entries[idx].name
-                menu.add_command("Show Conflicts",
-                    lambda: self._show_overwrites_dialog(name_capture))
 
+        # Pre-compute Nexus / meta info
+        _ctx_meta = None
+        nexus_url: str | None = None
+        _domain: str | None = None
+        _archive_path: Path | None = None
         if not is_separator and not is_synthetic and self._modlist_path is not None:
-            mod_name_capture = self._entries[idx].name
-            staging_root = self._staging_root
-            meta_path = staging_root / mod_name_capture / "meta.ini"
-            if meta_path.is_file():
+            _meta_path = self._staging_root / _mod_name / "meta.ini"
+            if _meta_path.is_file():
                 try:
-                    _ctx_meta = read_meta(meta_path)
+                    _ctx_meta = read_meta(_meta_path)
                     if _ctx_meta.mod_id > 0:
                         app = self.winfo_toplevel()
                         _cur_game = _GAMES.get(getattr(
@@ -4125,75 +4261,199 @@ class ModListPanel(ctk.CTkFrame):
                             else _ctx_meta.game_domain
                         )
                         nexus_url = f"https://www.nexusmods.com/{_domain}/mods/{_ctx_meta.mod_id}"
-                        if not _is_multi:
-                            menu.add_command("Open on Nexus",
-                                lambda u=nexus_url: self._open_nexus_page(u))
-                            menu.add_command("Change Version",
-                                lambda mn=mod_name_capture: self._update_nexus_mod(mn))
-                            if _ctx_meta.endorsed:
-                                menu.add_command("Abstain from Endorsement",
-                                    lambda: self._abstain_nexus_mod(mod_name_capture, _domain, _ctx_meta))
-                            else:
-                                menu.add_command("Endorse Mod",
-                                    lambda: self._endorse_nexus_mod(mod_name_capture, _domain, _ctx_meta))
-                    # Reinstall Mod — visible when the source archive is still in ~/Downloads
+                    # Reinstall Mod — visible when the source archive is still available
                     if not _is_multi and _ctx_meta.installation_file:
                         _xdg = os.environ.get("XDG_DOWNLOAD_DIR")
                         _dl_dir = Path(_xdg) if _xdg else Path.home() / "Downloads"
-                        _archive_path = _dl_dir / _ctx_meta.installation_file
-                        if _archive_path.is_file():
-                            menu.add_command("Reinstall Mod",
-                                lambda nc=mod_name_capture, ap=_archive_path: self._reinstall_mod(nc, ap))
+                        _search_dirs = [_dl_dir, get_download_cache_dir()]
+                        try:
+                            from gui.download_locations_overlay import load_extra_download_locations
+                            _search_dirs.extend(load_extra_download_locations())
+                        except Exception:
+                            pass
+                        _arc = _dl_dir / _ctx_meta.installation_file
+                        if not _arc.is_file():
+                            for _d in _search_dirs:
+                                _cand = Path(_d) / _ctx_meta.installation_file
+                                if _cand.is_file():
+                                    _arc = _cand
+                                    break
+                        if _arc.is_file():
+                            _archive_path = _arc
                 except Exception:
-                    pass
-            if not _is_multi and mod_name_capture in self._missing_reqs:
-                dep_names = self._missing_reqs_detail.get(mod_name_capture, [])
-                menu.add_command("Missing Requirements",
-                    lambda: self._show_missing_reqs(mod_name_capture, dep_names))
+                    _ctx_meta = None
 
-        if len(self._sel_set) > 1:
-            toggleable = [
-                i for i in sorted(self._sel_set)
-                if 0 <= i < len(self._entries)
-                and not self._entries[i].is_separator
-                and not self._entries[i].locked
-                and self._entries[i].name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME)
-            ]
-            if toggleable:
-                count = len(toggleable)
-                menu.add_command(f"Enable selected ({count})",
-                    lambda: self._enable_selected_mods(toggleable))
-                menu.add_command(f"Disable selected ({count})",
-                    lambda: self._disable_selected_mods(toggleable))
-                # Open Nexus pages for all selected mods that have a mod_id
-                if self._staging_root is not None:
-                    _nexus_urls: list[str] = []
-                    app = self.winfo_toplevel()
-                    _cur_game = _GAMES.get(getattr(
-                        getattr(app, "_topbar", None), "_game_var", tk.StringVar()).get(), None)
-                    for _ti in toggleable:
-                        _tname = self._entries[_ti].name
-                        _meta_path = self._staging_root / _tname / "meta.ini"
-                        if _meta_path.is_file():
-                            try:
-                                _tmeta = read_meta(_meta_path)
-                                if _tmeta.mod_id > 0:
-                                    _tdomain = (
-                                        _cur_game.nexus_game_domain
-                                        if _cur_game and _cur_game.nexus_game_domain
-                                        else _tmeta.nexus_page_url.split("/mods/")[0].rsplit("/", 1)[-1]
-                                        if "/mods/" in _tmeta.nexus_page_url
-                                        else _tmeta.game_domain
-                                    )
-                                    _nexus_urls.append(
-                                        f"https://www.nexusmods.com/{_tdomain}/mods/{_tmeta.mod_id}"
-                                    )
-                            except Exception:
-                                pass
-                    if _nexus_urls:
-                        _urls_cap = list(_nexus_urls)
-                        menu.add_command(f"Open on Nexus ({len(_urls_cap)})",
-                            lambda u=_urls_cap: self._open_nexus_pages(u))
+        # Pre-compute multi-select Nexus URLs
+        _nexus_urls: list[str] = []
+        if toggleable and self._staging_root is not None:
+            app = self.winfo_toplevel()
+            _cur_game = _GAMES.get(getattr(
+                getattr(app, "_topbar", None), "_game_var", tk.StringVar()).get(), None)
+            for _ti in toggleable:
+                _tname = self._entries[_ti].name
+                _tmeta_path = self._staging_root / _tname / "meta.ini"
+                if _tmeta_path.is_file():
+                    try:
+                        _tmeta = read_meta(_tmeta_path)
+                        if _tmeta.mod_id > 0:
+                            _tdomain = (
+                                _cur_game.nexus_game_domain
+                                if _cur_game and _cur_game.nexus_game_domain
+                                else _tmeta.nexus_page_url.split("/mods/")[0].rsplit("/", 1)[-1]
+                                if "/mods/" in _tmeta.nexus_page_url
+                                else _tmeta.game_domain
+                            )
+                            _nexus_urls.append(
+                                f"https://www.nexusmods.com/{_tdomain}/mods/{_tmeta.mod_id}"
+                            )
+                    except Exception:
+                        pass
+
+        # --- Menu items in alphabetical order ---
+
+        # Abstain from Endorsement
+        if (not is_separator and not is_synthetic and not _is_multi
+                and _ctx_meta is not None and _ctx_meta.mod_id > 0 and _ctx_meta.endorsed):
+            menu.add_command("Abstain from Endorsement",
+                lambda: self._abstain_nexus_mod(_mod_name, _domain, _ctx_meta))
+
+        # Add separator above / Add separator below
+        if not _is_multi:
+            menu.add_command("Add separator above", lambda: self._add_separator(idx, above=True))
+            menu.add_command("Add separator below", lambda: self._add_separator(idx, above=False))
+
+        # Change separator color
+        if is_separator and not is_synthetic:
+            menu.add_command("Change separator color", lambda: self._change_separator_color(idx))
+
+        # Change Version
+        if (not is_separator and not is_synthetic and not _is_multi
+                and _ctx_meta is not None and _ctx_meta.mod_id > 0):
+            menu.add_command("Change Version",
+                lambda mn=_mod_name: self._update_nexus_mod(mn))
+
+        # Copy to profile
+        if _other_profiles:
+            if _is_multi and _copy_mod_names:
+                menu.add_submenu(
+                    f"Copy to profile ({len(_copy_mod_names)})",
+                    lambda profs=_other_profiles, mns=_copy_mod_names: self._show_copy_to_profile_picker_multi(
+                        mns, profs, parent_dismiss=menu._withdraw, parent_popup=menu,
+                    ),
+                )
+            elif not _is_multi and _copy_mod_name:
+                menu.add_submenu(
+                    "Copy to profile",
+                    lambda profs=_other_profiles, mn=_copy_mod_name: self._show_copy_to_profile_picker(
+                        mn, profs, parent_dismiss=menu._withdraw, parent_popup=menu,
+                    ),
+                )
+
+        # Create empty mod below
+        if self._modlist_path is not None and not is_synthetic and not _is_multi:
+            menu.add_command("Create empty mod below", lambda: self._create_empty_mod(idx))
+
+        # Disable Plugins…
+        if not is_separator and not _is_locked and plugin_files and not _is_multi:
+            menu.add_command("Disable Plugins…",
+                lambda n=_mod_name, pf=plugin_files: self._show_disable_plugins_dialog(n, pf))
+
+        # Disable selected (n) / Enable selected (n)
+        if toggleable:
+            _count = len(toggleable)
+            menu.add_command(f"Disable selected ({_count})",
+                lambda: self._disable_selected_mods(toggleable))
+            menu.add_command(f"Enable selected ({_count})",
+                lambda: self._enable_selected_mods(toggleable))
+
+        # Endorse Mod
+        if (not is_separator and not is_synthetic and not _is_multi
+                and _ctx_meta is not None and _ctx_meta.mod_id > 0 and not _ctx_meta.endorsed):
+            menu.add_command("Endorse Mod",
+                lambda: self._endorse_nexus_mod(_mod_name, _domain, _ctx_meta))
+
+        # INI files
+        if not is_separator and not _is_locked and ini_files and not _is_multi:
+            menu.add_submenu("INI files",
+                lambda: self._show_ini_picker(ini_files,
+                    parent_dismiss=menu._withdraw, parent_popup=menu))
+
+        # Missing Requirements
+        if not is_separator and not is_synthetic and not _is_multi and _mod_name in self._missing_reqs:
+            dep_names = self._missing_reqs_detail.get(_mod_name, [])
+            menu.add_command("Missing Requirements",
+                lambda: self._show_missing_reqs(_mod_name, dep_names))
+
+        # Move to separator
+        if not is_separator and not _is_locked and not _is_bundle_var and sep_names:
+            if _multi_sel:
+                menu.add_submenu(f"Move to separator ({len(_multi_sel)})",
+                    lambda ms=_multi_sel: self._show_separator_picker_multi(ms, sep_names,
+                        parent_dismiss=menu._withdraw, parent_popup=menu))
+            else:
+                menu.add_submenu("Move to separator",
+                    lambda: self._show_separator_picker(idx, sep_names,
+                        parent_dismiss=menu._withdraw, parent_popup=menu))
+
+        # Open folder
+        if mod_folder is not None and not _is_multi:
+            menu.add_command("Open folder", lambda: self._open_folder(mod_folder))
+
+        # Open on Nexus (single)
+        if (not is_separator and not is_synthetic and not _is_multi
+                and _ctx_meta is not None and nexus_url):
+            menu.add_command("Open on Nexus",
+                lambda u=nexus_url: self._open_nexus_page(u))
+
+        # Open on Nexus (multi)
+        if _nexus_urls:
+            _urls_cap = list(_nexus_urls)
+            menu.add_command(f"Open on Nexus ({len(_urls_cap)})",
+                lambda u=_urls_cap: self._open_nexus_pages(u))
+
+        # Reinstall Mod
+        if (not is_separator and not is_synthetic and not _is_multi
+                and _ctx_meta is not None and _archive_path is not None):
+            menu.add_command("Reinstall Mod",
+                lambda nc=_mod_name, ap=_archive_path: self._reinstall_mod(nc, ap))
+
+        # Remove mod
+        if not is_separator and not _is_locked:
+            if _remove_multi and self._modlist_path is not None:
+                menu.add_command(f"Remove mod ({len(_remove_multi)})",
+                    lambda rm=_remove_multi: self._remove_selected_mods(rm))
+            else:
+                menu.add_command("Remove mod", lambda: self._remove_mod(idx))
+
+        # Remove separator
+        if is_separator and not is_synthetic:
+            menu.add_command("Remove separator", lambda: self._remove_separator(idx))
+
+        # Rename mod
+        if not is_separator and not _is_locked and not _is_bundle_var and not _is_multi:
+            menu.add_command("Rename mod", lambda: self._rename_mod(idx))
+
+        # Rename separator
+        if is_separator and not is_synthetic and not _is_bundle_sep:
+            menu.add_command("Rename separator", lambda: self._rename_separator(idx))
+
+        # Separator settings…
+        if is_separator and not is_synthetic and not _is_bundle_sep:
+            menu.add_command("Separator settings…", lambda: self._show_sep_settings(idx))
+
+        # Set deployment paths…
+        if not is_separator and not _is_locked and mod_folder is not None and not _is_multi:
+            menu.add_command("Set deployment paths…",
+                lambda: self._show_mod_strip_dialog(_mod_name, mod_folder))
+
+        # Set priority…
+        if not is_separator and not _is_locked and not _is_bundle_var and not _is_multi:
+            menu.add_command("Set priority…", lambda: self._set_priority(idx))
+
+        # Show Conflicts
+        if conflict_status != CONFLICT_NONE:
+            menu.add_command("Show Conflicts",
+                lambda: self._show_overwrites_dialog(_mod_name))
 
         menu.popup(x, y)
 
@@ -5761,19 +6021,12 @@ class ModListPanel(ctk.CTkFrame):
 
                 def _install_worker():
                     def _cleanup():
-                        delete_archive_and_sidecar(Path(result.file_path))
+                        from Utils.ui_config import load_clear_archive_after_install
+                        if load_clear_archive_after_install():
+                            delete_archive_and_sidecar(Path(result.file_path))
 
                     try:
-                        install_mod_from_archive(
-                            str(result.file_path), app, log_fn, game, mod_panel,
-                            on_installed=_cleanup,
-                            progress_fn=_extract_progress,
-                            clear_progress_fn=lambda: app.after(0, status_bar.clear_progress) if status_bar is not None else None)
-                    finally:
-                        if status_bar is not None:
-                            app.after(0, status_bar.clear_progress)
-                    try:
-                        new_meta = build_meta_from_download(
+                        prebuilt = build_meta_from_download(
                             game_domain=game_domain,
                             mod_id=meta.mod_id,
                             file_id=file_id,
@@ -5781,10 +6034,21 @@ class ModListPanel(ctk.CTkFrame):
                             mod_info=mod_info,
                             file_info=file_info,
                         )
-                        new_meta.has_update = False
-                        write_meta(meta_path, new_meta)
+                        prebuilt.has_update = False
                     except Exception as exc:
-                        log_fn(f"Nexus: Warning — could not update metadata: {exc}")
+                        log_fn(f"Nexus: Warning — could not build metadata: {exc}")
+                        prebuilt = None
+
+                    try:
+                        install_mod_from_archive(
+                            str(result.file_path), app, log_fn, game, mod_panel,
+                            prebuilt_meta=prebuilt,
+                            on_installed=_cleanup,
+                            progress_fn=_extract_progress,
+                            clear_progress_fn=lambda: app.after(0, status_bar.clear_progress) if status_bar is not None else None)
+                    finally:
+                        if status_bar is not None:
+                            app.after(0, status_bar.clear_progress)
                     app.after(0, mod_panel._scan_update_flags)
                     app.after(0, mod_panel._redraw)
                     log_fn(f"Nexus: {mod_name} updated successfully.")

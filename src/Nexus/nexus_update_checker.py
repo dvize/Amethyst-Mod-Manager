@@ -64,12 +64,76 @@ def _parse_install_date(meta: "NexusModMeta") -> Optional[datetime]:
     return None
 
 
-def _norm_version(v: str) -> str:
-    """Normalise a version string for comparison (strip whitespace and leading v/V)."""
-    v = v.strip().lower()
-    if v.startswith("v"):
-        v = v[1:]
-    return v
+import re
+
+_VERSION_PART_RE = re.compile(r"(\d+)|([a-z]+)", re.IGNORECASE)
+# Tokens that, when present anywhere in the version string, mark it as a
+# pre-release (so "1.2b" and "2.0-rc1" sort BEFORE "1.2" and "2.0").
+_PRERELEASE_TOKENS = ("alpha", "beta", "pre", "dev", "rc")
+
+
+def _parse_version(v: str) -> tuple | None:
+    """
+    Parse a version string into a comparable tuple.
+
+    Handles leading ``v``/``V``, mixed numeric/alpha segments, and common
+    separators (``.``, ``-``, ``_``).  Pre-release strings (``alpha``, ``beta``,
+    ``rc``, ``pre``, ``dev``, or a trailing single letter like ``1.2b``) are
+    ranked BELOW their release counterpart so ``1.2b < 1.2`` and
+    ``2.0-rc1 < 2.0``.
+
+    Returns ``None`` if no numeric component is found (unparseable).
+    """
+    if not v:
+        return None
+    s = v.strip().lower()
+    if s.startswith("v"):
+        s = s[1:].lstrip()
+    if not s:
+        return None
+
+    # Detect pre-release: either a known token, or a trailing single letter
+    # directly after digits (e.g. "1.2b", "1.0a").
+    is_prerelease = any(tok in s for tok in _PRERELEASE_TOKENS)
+    if not is_prerelease and re.search(r"\d[a-z]$", s):
+        is_prerelease = True
+
+    num_parts: list[int] = []
+    has_number = False
+    for segment in re.split(r"[.\-_+]", s):
+        if not segment:
+            continue
+        for num, _alpha in _VERSION_PART_RE.findall(segment):
+            if num:
+                num_parts.append(int(num))
+                has_number = True
+
+    if not has_number:
+        return None
+    # Release-rank: 1 for a final release, 0 for a pre-release. Compared AFTER
+    # the numeric parts so "1.2" > "1.2b" but "1.3b" > "1.2".
+    release_rank = 0 if is_prerelease else 1
+    return (tuple(num_parts), release_rank)
+
+
+def _version_is_newer(latest: str, installed: str) -> bool:
+    """
+    Return True if *latest* represents a strictly newer version than *installed*.
+
+    Both strings are parsed via ``_parse_version``.  If either is unparseable,
+    falls back to a case-insensitive string inequality (only flags "newer" when
+    the normalised strings differ — conservative).
+    """
+    lp = _parse_version(latest)
+    ip = _parse_version(installed)
+    if lp is not None and ip is not None:
+        return lp > ip
+    # Fallback: can't parse — only say "newer" if clearly different
+    ln = (latest or "").strip().lower().lstrip("v").strip()
+    iv = (installed or "").strip().lower().lstrip("v").strip()
+    if not ln or not iv:
+        return False
+    return ln != iv
 
 
 @dataclass
@@ -154,19 +218,23 @@ def check_for_updates(
     if enabled_only is not None:
         installed = [m for m in installed if m.mod_name in enabled_only]
 
-    # A mod is checkable if it has a file_id (exact comparison) OR a
-    # parseable install date (date-based comparison — no file_id needed).
+    # A mod is checkable if we have *any* way to compare it:
+    # - meta.version (version compare, Path B)
+    # - file_id     (REST lookup to get version, Path C)
+    # - install date (date compare, Path D)
     checkable = [
         m for m in installed
-        if m.file_id > 0 or _parse_install_date(m) is not None
+        if (m.version and m.version.strip())
+        or m.file_id > 0
+        or _parse_install_date(m) is not None
     ]
     skipped = len(installed) - len(checkable)
 
     _log(f"Checking {len(checkable)} Nexus mod(s) for updates"
-         f"{f' ({skipped} skipped — no mod ID or install date)' if skipped else ''}...")
+         f"{f' ({skipped} skipped — no version, file id, or install date)' if skipped else ''}...")
 
     if not checkable:
-        _log("No checkable mods found (need a modid plus a fileid or install date).")
+        _log("No checkable mods found (need a modid plus a version, file id, or install date).")
         return [], []
 
     # Determine the domain to use
@@ -194,9 +262,19 @@ def check_for_updates(
     gql_info: dict[int, NexusModUpdateInfo] = api.graphql_mod_update_info_batch(gql_ids)
 
     # -----------------------------------------------------------------------
-    # 3. Classify each mod: GraphQL date-path, REST fallback, or skip.
+    # 3. Classify each mod.  Priority order (matches user spec):
+    #    A. viewerUpdateAvailable == True  → trusted update, no REST.
+    #    B. meta.version present           → version-compare vs GraphQL
+    #                                        info.version, no REST.
+    #    C. meta.version missing, file_id  → REST to look up the installed
+    #                                        file's version, backfill
+    #                                        meta.version, then version-compare.
+    #    D. meta.version + file_id missing → date compare (GraphQL updatedAt
+    #                                        vs install_date), no REST.
+    #    E. nothing usable                 → skip.
+    #
+    # Only path C makes a REST call.
     # -----------------------------------------------------------------------
-    # Mods that need a REST get_mod_files call (file_id known, no install date)
     rest_fallback: dict[int, list[NexusModMeta]] = {}
 
     for mod_id, metas in by_mod_id.items():
@@ -204,28 +282,46 @@ def check_for_updates(
 
         for meta in metas:
             install_date = _parse_install_date(meta)
+            has_update: bool
+            gql_version_backfilled = False
 
-            # --- Path A: file-level comparison when we know the exact file_id.
-            # This is authoritative and must take precedence over date-based
-            # checks — a mod installed from a collection gets an install date
-            # of "now" even when the collection shipped an older file_id, so
-            # the updatedAt-vs-install-date path would miss real updates.
-            if meta.file_id > 0:
+            # --- Path A: Nexus-native flag = True (trusted).
+            # Only True is reliable — False can mean "author didn't bump the
+            # page version" even when a new file exists.
+            if info is not None and info.viewer_update_available is True:
+                has_update = True
+                if not meta.version and info.version:
+                    meta.version = info.version
+                    gql_version_backfilled = True
+
+            # --- Path B: version-compare using GraphQL data only.
+            elif meta.version and info is not None and info.version:
+                # If either side is unparseable and we have a file_id, fall
+                # through to the REST file_id check rather than silently
+                # trusting a fuzzy string compare.
+                if (
+                    meta.file_id > 0
+                    and (
+                        _parse_version(info.version) is None
+                        or _parse_version(meta.version) is None
+                    )
+                ):
+                    rest_fallback.setdefault(mod_id, []).append(meta)
+                    continue
+                has_update = _version_is_newer(info.version, meta.version)
+
+            # --- Path C: no meta.version but file_id known → need REST to
+            # look up the installed file's version before comparing.
+            elif not meta.version and meta.file_id > 0:
                 rest_fallback.setdefault(mod_id, []).append(meta)
                 continue
 
-            # --- Path B: Nexus-native flag (requires user to have tracked the mod)
-            if info is not None and info.viewer_update_available is not None:
-                has_update = info.viewer_update_available
-
-            # --- Path C: date comparison against GraphQL updatedAt
+            # --- Path D: no version, no file_id → date compare.
             elif info is not None and info.updated_at is not None and install_date is not None:
                 has_update = info.updated_at > install_date
-
-            # --- Path D: REST fallback via install-date comparison
-            elif install_date is not None:
-                rest_fallback.setdefault(mod_id, []).append(meta)
-                continue  # handled below
+                if not has_update and not meta.version and info.version:
+                    meta.version = info.version
+                    gql_version_backfilled = True
 
             else:
                 # No usable comparison data — skip
@@ -242,6 +338,7 @@ def check_for_updates(
                 _log=_log,
                 category_id=info.category_id if info else 0,
                 category_name=info.category_name if info else "",
+                version_backfilled=gql_version_backfilled,
             )
 
     if not gql_info:
@@ -263,43 +360,42 @@ def check_for_updates(
             if not files:
                 return
 
+            # Pick the "latest" file for version comparison.  Prefer matching
+            # the installed file's display name (same slot / variant) when we
+            # can identify it; otherwise fall back to the newest file overall.
+            newest_overall = max(files, key=lambda f: f.uploaded_timestamp)
+
             for meta in metas:
                 installed_file = (
                     next((f for f in files if f.file_id == meta.file_id), None)
                     if meta.file_id > 0
                     else None
                 )
-                installed_name = installed_file.name if installed_file else None
 
-                # Find candidates with the exact same display name (all versions of that file)
-                if installed_name:
-                    name_matches = [f for f in files if f.name == installed_name]
-                else:
-                    name_matches = []
+                # Backfill meta.version from the installed file record when missing.
+                # This is the whole reason we made the REST call.
+                version_backfilled = False
+                if installed_file and not meta.version:
+                    _vf = installed_file.version or installed_file.mod_version or ""
+                    if _vf:
+                        meta.version = _vf
+                        version_backfilled = True
 
-                if name_matches:
+                # Pick comparison target — same-name variants when possible.
+                if installed_file:
+                    name_matches = [f for f in files if f.name == installed_file.name]
                     latest = max(name_matches, key=lambda f: f.uploaded_timestamp)
                 else:
-                    # Can't identify the exact file — flag for browser fallback
-                    latest = max(files, key=lambda f: f.uploaded_timestamp) if files else None
+                    latest = newest_overall
 
-                if latest is None:
-                    continue
-
-                exact_name_match = bool(name_matches)
+                latest_ver = latest.version or latest.mod_version or ""
 
                 install_date = _parse_install_date(meta)
-                if meta.file_id > 0:
-                    # Exact file-ID comparison — authoritative when we know
-                    # which file the user has installed.  Preferred over
-                    # date comparison because a freshly-installed collection
-                    # mod has install_date == now but may ship an older file.
-                    latest_ver = _norm_version(latest.version or latest.mod_version or "")
-                    installed_ver = _norm_version(meta.version or "")
-                    same_version = latest_ver != "" and latest_ver == installed_ver
-                    has_update = latest.file_id != meta.file_id and not same_version
+                if meta.version:
+                    # Version compare — authoritative per user spec.
+                    has_update = _version_is_newer(latest_ver, meta.version)
                 elif install_date is not None:
-                    # Date comparison against the latest file's upload timestamp
+                    # No version even after REST lookup — date-compare fallback.
                     latest_upload = datetime.fromtimestamp(
                         latest.uploaded_timestamp, tz=timezone.utc
                     )
@@ -311,7 +407,7 @@ def check_for_updates(
                     _apply_update_result(
                         has_update, meta, mod_id, game_domain,
                         latest_version=latest.version or latest.mod_version or "",
-                        latest_file_id=latest.file_id if exact_name_match else 0,
+                        latest_file_id=latest.file_id if installed_file else 0,
                         latest_file_name=latest.file_name,
                         updates=updates,
                         staging_root=staging_root,
@@ -319,6 +415,7 @@ def check_for_updates(
                         _log=_log,
                         category_id=cat_id,
                         category_name=gql_mod_info.category_name if gql_mod_info else "",
+                        version_backfilled=version_backfilled,
                     )
 
         # Use batch files when GraphQL returned them; REST only for mods not in gql_info
@@ -380,6 +477,7 @@ def _apply_update_result(
     _log: Callable,
     category_id: int = 0,
     category_name: str = "",
+    version_backfilled: bool = False,
 ) -> None:
     """Record an update (or clear the flag) and persist to meta.ini."""
     if has_update:
@@ -422,6 +520,8 @@ def _apply_update_result(
                 changed = True
             if category_name and meta.category_name != category_name:
                 meta.category_name = category_name
+                changed = True
+            if version_backfilled:
                 changed = True
             if changed:
                 write_meta(staging_root / meta.mod_name / "meta.ini", meta)

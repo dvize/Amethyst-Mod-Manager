@@ -166,7 +166,9 @@ def install_nexus_mod_from_entry(app, api, game, mod_panel, log_fn, entry,
                         app.after(0, lambda d=done, t=total, p=phase: status_bar.set_progress(d, t, p, title="Extracting"))
 
                 def _cleanup():
-                    delete_archive_and_sidecar(Path(_archive_path))
+                    from Utils.ui_config import load_clear_archive_after_install
+                    if load_clear_archive_after_install():
+                        delete_archive_and_sidecar(Path(_archive_path))
 
                 def _install_worker():
                     try:

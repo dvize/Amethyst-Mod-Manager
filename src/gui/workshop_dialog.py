@@ -109,9 +109,7 @@ class VersionPickerOverlay(tk.Frame):
 
     _POOL  = 40
     _ROW_H = scaled(28)
-    # Column widths and x-offsets
-    _VCW = (180, 220)   # file-id/version col, name col
-    _VCX = (0, 180)
+    _COL0_FRAC = 0.40   # fraction of canvas width for the file-id/version column
 
     def __init__(
         self,
@@ -133,6 +131,9 @@ class VersionPickerOverlay(tk.Frame):
         self._pool_name:  list[int] = []   # file display name
         self._pool_slot:  list[int] = []
         self._canvas_w = 400
+        self._col0_x = 0
+        self._col1_x = int(400 * self._COL0_FRAC)
+        self._hdr_labels: list[tk.Label] = []
 
         self._font = font_sized("Segoe UI", 10)
 
@@ -156,14 +157,16 @@ class VersionPickerOverlay(tk.Frame):
             bg=BG_HEADER, fg=TEXT_MAIN, font=FONT_BOLD,
         ).pack(side="left", padx=8)
 
-        hdr = tk.Frame(self, bg=BG_HEADER, height=scaled(22))
-        hdr.pack(side="top", fill="x")
-        hdr.pack_propagate(False)
-        for text, cx in zip(("File ID — Version", "Name"), self._VCX):
-            tk.Label(
-                hdr, text=text, bg=BG_HEADER, fg=TEXT_MAIN,
+        self._hdr_frame = tk.Frame(self, bg=BG_HEADER, height=scaled(22))
+        self._hdr_frame.pack(side="top", fill="x")
+        self._hdr_frame.pack_propagate(False)
+        self._hdr_frame.bind("<Configure>", self._on_hdr_configure)
+        for text in ("File ID — Version", "Name"):
+            lbl = tk.Label(
+                self._hdr_frame, text=text, bg=BG_HEADER, fg=TEXT_MAIN,
                 font=FONT_BOLD, anchor="w",
-            ).place(x=cx + scaled(4), y=scaled(2), width=self._VCW[0] - scaled(4), height=scaled(18))
+            )
+            self._hdr_labels.append(lbl)
 
         body = tk.Frame(self, bg=BG_DEEP)
         body.pack(side="top", fill="both", expand=True)
@@ -197,9 +200,9 @@ class VersionPickerOverlay(tk.Frame):
         fn  = self._font
         for _ in range(self._POOL):
             bg  = c.create_rectangle(0, OFF, 0, OFF, fill=BG_DEEP, outline="", state="hidden")
-            lbl = c.create_text(self._VCX[0] + scaled(4), OFF, text="", anchor="w",
+            lbl = c.create_text(self._col0_x + scaled(4), OFF, text="", anchor="w",
                                 fill=TEXT_MAIN, font=fn, state="hidden")
-            nm  = c.create_text(self._VCX[1] + scaled(4), OFF, text="", anchor="w",
+            nm  = c.create_text(self._col1_x + scaled(4), OFF, text="", anchor="w",
                                 fill=TEXT_DIM,  font=fn, state="hidden")
             self._pool_bg.append(bg)
             self._pool_label.append(lbl)
@@ -233,7 +236,12 @@ class VersionPickerOverlay(tk.Frame):
         fi = 0
         for di in range(first_row, last_row):
             if di in showing:
-                self._apply_row_bg(showing[di], di)
+                s  = showing[di]
+                yc = di * self._ROW_H + self._ROW_H // 2
+                c.coords(self._pool_bg[s], 0, di * self._ROW_H, self._canvas_w, di * self._ROW_H + self._ROW_H)
+                c.coords(self._pool_label[s], self._col0_x + scaled(4), yc)
+                c.coords(self._pool_name[s],  self._col1_x + scaled(4), yc)
+                self._apply_row_bg(s, di)
                 continue
             if fi >= len(free):
                 break
@@ -257,10 +265,10 @@ class VersionPickerOverlay(tk.Frame):
             else:
                 fg, fg2 = TEXT_MAIN, TEXT_DIM
 
-            c.coords(self._pool_label[s], self._VCX[0] + scaled(4), yc)
+            c.coords(self._pool_label[s], self._col0_x + scaled(4), yc)
             c.itemconfigure(self._pool_label[s], text=entry["label"], fill=fg, state="normal")
 
-            c.coords(self._pool_name[s], self._VCX[1] + scaled(4), yc)
+            c.coords(self._pool_name[s], self._col1_x + scaled(4), yc)
             c.itemconfigure(self._pool_name[s], text=entry["name"], fill=fg2, state="normal")
 
     def _apply_row_bg(self, s: int, di: int):
@@ -315,8 +323,22 @@ class VersionPickerOverlay(tk.Frame):
         self._sb.set(*args)
         self.after_idle(self._redraw)
 
+    def _update_columns(self, width: int):
+        self._canvas_w = width
+        self._col0_x = 0
+        self._col1_x = int(width * self._COL0_FRAC)
+        # Reposition header labels
+        if self._hdr_labels:
+            col0_w = self._col1_x - scaled(4)
+            col1_w = width - self._col1_x - scaled(4)
+            self._hdr_labels[0].place(x=scaled(4), y=scaled(2), width=max(col0_w, 1), height=scaled(18))
+            self._hdr_labels[1].place(x=self._col1_x + scaled(4), y=scaled(2), width=max(col1_w, 1), height=scaled(18))
+
+    def _on_hdr_configure(self, event):
+        self._update_columns(event.width)
+
     def _on_canvas_configure(self, event):
-        self._canvas_w = event.width
+        self._update_columns(event.width)
         n = len(self._ver_entries)
         if n:
             self._canvas.configure(scrollregion=(0, 0, event.width, n * self._ROW_H))
@@ -383,14 +405,21 @@ class SourcePickerOverlay(tk.Frame):
         body = tk.Frame(self, bg=BG_DEEP)
         body.pack(side="top", fill="both", expand=True, padx=scaled(16), pady=scaled(16))
 
-        for value, label in (("nexus", "Nexus Mods"), ("direct", "Direct URL"), ("bundle", "Bundle")):
+        for value, label, desc in (
+            ("nexus",  "Nexus Mods",  "Download mod from Nexus"),
+            ("direct", "Direct URL",  "For off-site mods"),
+            ("bundle", "Bundle",      "Include mod in the output (e.g. DynDOLOD output)"),
+        ):
             row = tk.Frame(body, bg=BG_DEEP)
-            row.pack(fill="x", pady=(0, scaled(8)))
+            row.pack(fill="x", pady=(0, scaled(6)))
             ctk.CTkRadioButton(
                 row, text=label, variable=self._source_var, value=value,
                 font=FONT_BOLD, fg_color=ACCENT, hover_color=ACCENT_HOV,
-                command=self._on_source_change,
+                command=self._on_radio_change,
             ).pack(side="left")
+            tk.Label(
+                row, text=f"— {desc}", bg=BG_DEEP, fg=TEXT_DIM, font=FONT_SMALL,
+            ).pack(side="left", padx=(scaled(6), 0))
 
         # URL entry (shown only when Direct is selected)
         self._url_frame = tk.Frame(body, bg=BG_DEEP)
@@ -413,6 +442,11 @@ class SourcePickerOverlay(tk.Frame):
             self._url_frame.pack(fill="x", pady=(0, scaled(4)))
         else:
             self._url_frame.pack_forget()
+
+    def _on_radio_change(self):
+        self._on_source_change()
+        if self._source_var.get() != "direct":
+            self._apply()
 
     def _apply(self):
         source = self._source_var.get()
@@ -746,7 +780,7 @@ class WorkshopDialog(tk.Frame):
 
         lb.bind("<Double-Button-1>", lambda _e: _load_selected())
 
-    def _read_settings(self, in_path):
+    def _read_settings(self, in_path, silent: bool = False):
         if not in_path:
             return
         try:
@@ -771,25 +805,49 @@ class WorkshopDialog(tk.Frame):
                         except ValueError:
                             pass
             self._apply_filter()
-            CTkAlert(state="info", title="Workshop",
-                     body_text="Settings loaded.",
-                     btn1="OK", btn2="", parent=self.winfo_toplevel()).get()
+            if not silent:
+                CTkAlert(state="info", title="Workshop",
+                         body_text="Settings loaded.",
+                         btn1="OK", btn2="", parent=self.winfo_toplevel()).get()
         except Exception as exc:
-            CTkAlert(state="error", title="Workshop",
-                     body_text=f"Load failed:\n{exc}",
-                     btn1="OK", btn2="", parent=self.winfo_toplevel()).get()
+            if not silent:
+                CTkAlert(state="error", title="Workshop",
+                         body_text=f"Load failed:\n{exc}",
+                         btn1="OK", btn2="", parent=self.winfo_toplevel()).get()
 
     def _do_export(self):
-        if not self._rows:
+        if not self._all_rows:
             CTkAlert(state="warning", title="Workshop",
                      body_text="No mods to export.", btn1="OK", btn2="",
                      parent=self.winfo_toplevel()).get()
             return
 
+        missing = [
+            row["name"] for row in self._all_rows
+            if row.get("source", "nexus") == "nexus" and not row.get("file_id")
+        ]
+        if missing:
+            count = len(missing)
+            noun = "mod" if count == 1 else "mods"
+            verb = "is" if count == 1 else "are"
+            CTkAlert(
+                state="warning", title="Workshop",
+                body_text=(
+                    f"{count} Nexus {noun} {verb} missing a File ID and must be set before exporting."
+                ),
+                btn1="OK", btn2="",
+                parent=self.winfo_toplevel(),
+            ).get()
+            return
+
+        profile_dir = getattr(self._game, "_active_profile_dir", None)
+        profile_name = Path(profile_dir).name if profile_dir else "manifest"
+        default_name = f"{profile_name}_export.amethyst"
+
         pick_save_file(
             "Export Amethyst Manifest",
             lambda p: self.after(0, lambda: self._prefetch_sizes_then_export(p)),
-            current_name="manifest.amethyst",
+            current_name=default_name,
             filters=[("Amethyst Manifest (*.amethyst)", ["*.amethyst"]), ("All files", ["*"])],
         )
 
@@ -803,7 +861,7 @@ class WorkshopDialog(tk.Frame):
 
         # Collect rows that have mod_id + file_id but no size yet
         needs_size = [
-            row for row in self._rows
+            row for row in self._all_rows
             if row["mod_id"] and row["file_id"] and not row["size_bytes"]
         ]
 
@@ -849,7 +907,7 @@ class WorkshopDialog(tk.Frame):
         profile_dir = getattr(self._game, "_active_profile_dir", None)
 
         mods = []
-        for row in self._rows:
+        for row in self._all_rows:
             # Parse fileid from ver_label (format "fileid — version" or just "—")
             ver_label = row["ver_label"]
             file_id   = row["file_id"]
@@ -880,6 +938,21 @@ class WorkshopDialog(tk.Frame):
                 "source":   source,
                 "optional": row["optional"],
             }
+
+            # Include version and category from meta.ini if available.
+            row_version = row.get("version") or ""
+            if not row_version and ver_label and " — " in ver_label:
+                row_version = ver_label.split(" — ", 1)[1]
+            if row_version:
+                mod_entry["version"] = row_version
+            cat_id   = row.get("category_id") or 0
+            cat_name = row.get("category_name") or ""
+            if cat_id or cat_name:
+                mod_entry["category"] = {}
+                if cat_id:
+                    mod_entry["category"]["id"] = cat_id
+                if cat_name:
+                    mod_entry["category"]["name"] = cat_name
 
             if row["has_fomod"] and row.get("fomod_export", True) and game_name:
                 # Prefer the profile-local copy so manifest exports stay
@@ -1054,14 +1127,18 @@ class WorkshopDialog(tk.Frame):
         for entry in self._entries:
             mod_id = file_id = 0
             version = ""
+            category_id = 0
+            category_name = ""
             if staging_root:
                 meta_path = staging_root / entry.name / "meta.ini"
                 if meta_path.is_file():
                     try:
-                        meta    = read_meta(meta_path)
-                        mod_id  = meta.mod_id  or 0
-                        file_id = meta.file_id or 0
-                        version = meta.version or ""
+                        meta          = read_meta(meta_path)
+                        mod_id        = meta.mod_id       or 0
+                        file_id       = meta.file_id      or 0
+                        version       = meta.version      or ""
+                        category_id   = meta.category_id  or 0
+                        category_name = meta.category_name or ""
                     except Exception:
                         pass
 
@@ -1082,6 +1159,9 @@ class WorkshopDialog(tk.Frame):
                 "name":             entry.name,
                 "mod_id":           mod_id,
                 "file_id":          file_id,
+                "version":          version,
+                "category_id":      category_id,
+                "category_name":    category_name,
                 "ver_label":        ver_label,
                 "ver_options":      [{"label": ver_label, "name": "", "size_bytes": 0}],
                 "optional":         False,
@@ -1094,6 +1174,19 @@ class WorkshopDialog(tk.Frame):
             })
 
         self._apply_filter()
+        self._auto_load_latest()
+
+    def _auto_load_latest(self):
+        ws_dir = self._workshop_dir()
+        if not ws_dir:
+            return
+        files = sorted(ws_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            try:
+                print(f"[workshop] auto-loaded state file: {files[0].name}")
+            except Exception:
+                pass
+            self._read_settings(files[0], silent=True)
 
     def _on_search_change(self, event=None):
         self._search_text = self._search_entry.get().lower()

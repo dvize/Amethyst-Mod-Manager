@@ -773,11 +773,13 @@ class App(ctk.CTk):
             log(f"Nexus: Saved metadata (mod {prebuilt_meta.mod_id}, file {prebuilt_meta.file_id})")
 
         if _installed and _archive_path:
-            try:
-                delete_archive_and_sidecar(_archive_path)
-                log(f"Nexus: Removed archive {_archive_path.name}")
-            except OSError:
-                pass
+            from Utils.ui_config import load_clear_archive_after_install
+            if load_clear_archive_after_install():
+                try:
+                    delete_archive_and_sidecar(_archive_path)
+                    log(f"Nexus: Removed archive {_archive_path.name}")
+                except OSError:
+                    pass
             if hasattr(self, "_plugin_panel"):
                 dl_panel = getattr(self._plugin_panel, "_downloads_panel", None)
                 if dl_panel:

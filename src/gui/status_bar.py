@@ -19,6 +19,9 @@ from Utils.ui_config import (
     load_ui_scale, save_ui_scale, detect_hidpi_scale,
     load_collection_settings, save_collection_settings,
     load_normalize_folder_case, save_normalize_folder_case,
+    load_clear_archive_after_install, save_clear_archive_after_install,
+    load_heroic_config_path, save_heroic_config_path,
+    load_steam_libraries_vdf_path, save_steam_libraries_vdf_path,
 )
 from gui.ctk_components import CTkProgressPopup, CTkAlert, CTkNotification
 from gui.theme import (
@@ -437,6 +440,34 @@ class SettingsPanel(ctk.CTkFrame):
         super().__init__(parent, fg_color=BG_DEEP, corner_radius=0)
         self._on_done = on_done or (lambda p: None)
         self._build()
+        self.after(50, self._bind_scroll_recursive)
+
+    def _bind_scroll_recursive(self, widget=None):
+        """Bind Linux scroll-wheel events to every child so they propagate to the scrollable body.
+
+        Interactive widgets that consume scroll themselves (sliders, option menus,
+        comboboxes, spinboxes, scrollbars) are skipped — otherwise scrolling over
+        one would both change its value AND scroll the panel.
+        """
+        if widget is None:
+            widget = self
+        # Skip widgets that already react to the scroll wheel.
+        cls_name = widget.__class__.__name__
+        _SKIP = (
+            "CTkSlider", "CTkOptionMenu", "CTkComboBox", "CTkScrollbar",
+            "Scale", "Spinbox", "Combobox", "Scrollbar", "Listbox",
+        )
+        if cls_name in _SKIP:
+            return
+        try:
+            widget.bind("<Button-4>",   lambda e: self._body._parent_canvas.yview_scroll(-3, "units"), add="+")
+            widget.bind("<Button-5>",   lambda e: self._body._parent_canvas.yview_scroll( 3, "units"), add="+")
+            widget.bind("<MouseWheel>", lambda e: self._body._parent_canvas.yview_scroll(
+                -3 if (getattr(e, "delta", 0) or 0) > 0 else 3, "units"), add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_scroll_recursive(child)
 
     def _build(self):
         self.grid_rowconfigure(0, weight=0)
@@ -455,52 +486,77 @@ class SettingsPanel(ctk.CTkFrame):
             command=self._on_close,
         ).pack(side="right", padx=4, pady=4)
 
-        # ---- body ----
-        body = ctk.CTkFrame(self, fg_color=BG_DEEP, corner_radius=0)
-        body.grid(row=1, column=0, sticky="nsew", padx=20, pady=20)
+        # ---- body (scrollable) ----
+        self._body = ctk.CTkScrollableFrame(self, fg_color=BG_DEEP, corner_radius=0)
+        self._body.grid(row=1, column=0, sticky="nsew", padx=20, pady=20)
+        body = self._body
 
-        ctk.CTkLabel(body, text="UI Scaling", font=FONT_NORMAL, text_color=TEXT_MAIN,
-                     anchor="w").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        # Alternating section background colors
+        _SECTION_BG_A = BG_PANEL
+        _SECTION_BG_B = BG_HEADER
+        _section_idx = [0]
+
+        def _begin_section(title: str) -> ctk.CTkFrame:
+            """Create a rounded section frame with a centered title + separator.
+            Returns the content frame that widgets should be parented to.
+            """
+            bg = _SECTION_BG_A if _section_idx[0] % 2 == 0 else _SECTION_BG_B
+            _section_idx[0] += 1
+
+            section = ctk.CTkFrame(body, fg_color=bg, corner_radius=8)
+            section.pack(fill="x", pady=(0, 12), padx=0)
+
+            ctk.CTkLabel(
+                section, text=title, font=FONT_NORMAL, text_color=TEXT_MAIN, anchor="center",
+            ).pack(fill="x", pady=(10, 4), padx=12)
+            ctk.CTkFrame(section, fg_color=BORDER, height=1).pack(
+                fill="x", padx=12, pady=(0, 10))
+
+            content = ctk.CTkFrame(section, fg_color="transparent")
+            content.pack(fill="x", padx=14, pady=(0, 12))
+            return content
+
+        # ==== User Interface ====
+        ui_sec = _begin_section("User Interface")
 
         current_ini = self._read_raw_ini()
         is_auto = (current_ini == "auto")
         init_scale = detect_hidpi_scale() if is_auto else (float(current_ini) if current_ini else 1.0)
 
+        scale_row = ctk.CTkFrame(ui_sec, fg_color="transparent")
+        scale_row.pack(anchor="w")
+
         self._scale_var = tk.DoubleVar(value=round(init_scale * 20) / 20)
         self._slider = ctk.CTkSlider(
-            body, from_=1.0, to=2.0, number_of_steps=20,
+            scale_row, from_=1.0, to=2.0, number_of_steps=20,
             variable=self._scale_var,
             width=scaled(220),
             command=self._on_slider,
         )
-        self._slider.grid(row=1, column=0, sticky="w", padx=(0, 10))
+        self._slider.pack(side="left", padx=(0, 10))
 
-        self._scale_lbl = ctk.CTkLabel(body, text=f"{round(init_scale * 20) / 20:.2f}×",
+        self._scale_lbl = ctk.CTkLabel(scale_row, text=f"{round(init_scale * 20) / 20:.2f}×",
                                        font=FONT_NORMAL, text_color=TEXT_MAIN, width=scaled(40))
-        self._scale_lbl.grid(row=1, column=1, sticky="w")
+        self._scale_lbl.pack(side="left")
 
         self._auto_var = tk.BooleanVar(value=is_auto)
         ctk.CTkCheckBox(
-            body, text="Auto", variable=self._auto_var,
+            ui_sec, text="Auto", variable=self._auto_var,
             font=FONT_NORMAL, text_color=TEXT_MAIN,
             command=self._on_auto_toggle,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ).pack(anchor="w", pady=(6, 0))
 
-        ctk.CTkLabel(body, text="Changes take effect after restart.",
+        ctk.CTkLabel(ui_sec, text="Changes take effect after restart.",
                      font=FONT_SMALL, text_color=TEXT_WARN, anchor="w",
-                     ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+                     ).pack(anchor="w", pady=(8, 0))
 
         self._update_slider_state()
 
-        # ---- download cache ----
-        ctk.CTkFrame(body, fg_color=BORDER, height=1).grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(20, 0))
+        # ==== Downloads ====
+        dl_sec = _begin_section("Downloads")
 
-        ctk.CTkLabel(body, text="Download Cache", font=FONT_NORMAL, text_color=TEXT_MAIN,
-                     anchor="w").grid(row=5, column=0, columnspan=3, sticky="w", pady=(12, 4))
-
-        cache_row = ctk.CTkFrame(body, fg_color="transparent")
-        cache_row.grid(row=6, column=0, columnspan=3, sticky="w")
+        cache_row = ctk.CTkFrame(dl_sec, fg_color="transparent")
+        cache_row.pack(anchor="w")
 
         self._clear_cache_btn = ctk.CTkButton(
             cache_row, text="Clear Cache (—)",
@@ -516,43 +572,21 @@ class SettingsPanel(ctk.CTkFrame):
 
         self.after(100, self._refresh_cache_size)
 
-        # ---- filemap ----
-        ctk.CTkFrame(body, fg_color=BORDER, height=1).grid(
-            row=6, column=0, columnspan=3, sticky="ew", pady=(20, 0))
-
-        ctk.CTkLabel(body, text="Filemap", font=FONT_NORMAL, text_color=TEXT_MAIN,
-                     anchor="w").grid(row=7, column=0, columnspan=3, sticky="w", pady=(12, 4))
-
-        self._norm_case_var = tk.BooleanVar(value=load_normalize_folder_case())
+        self._clear_archive_var = tk.BooleanVar(value=load_clear_archive_after_install())
         ctk.CTkCheckBox(
-            body, text="Normalise folder casing", variable=self._norm_case_var,
+            dl_sec, text="Clear archive after install", variable=self._clear_archive_var,
             font=FONT_NORMAL, text_color=TEXT_MAIN,
-        ).grid(row=8, column=0, columnspan=3, sticky="w")
+        ).pack(anchor="w", pady=(10, 0))
 
-        ctk.CTkLabel(
-            body,
-            text="When enabled, folder names are unified to a single casing across all mods.\n"
-                 "Disable this on case-insensitive (casefold) filesystems to avoid path conflicts.",
-            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
-        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 0))
-
-        # ---- collections ----
-        ctk.CTkFrame(body, fg_color=BORDER, height=1).grid(
-            row=10, column=0, columnspan=3, sticky="ew", pady=(20, 0))
-
-        ctk.CTkLabel(body, text="Collections", font=FONT_NORMAL, text_color=TEXT_MAIN,
-                     anchor="w").grid(row=11, column=0, columnspan=3, sticky="w", pady=(12, 8))
+        # ==== Collections ====
+        col_sec = _begin_section("Collections")
 
         _col_cfg = load_collection_settings()
 
-        # Downloads sub-label
-        ctk.CTkLabel(body, text="Downloads", font=FONT_SMALL, text_color=TEXT_DIM,
-                     anchor="w").grid(row=12, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        dl_order_row = ctk.CTkFrame(col_sec, fg_color="transparent")
+        dl_order_row.pack(anchor="w", pady=(0, 6))
 
-        dl_order_row = ctk.CTkFrame(body, fg_color="transparent")
-        dl_order_row.grid(row=13, column=0, columnspan=3, sticky="w", pady=(0, 6))
-
-        ctk.CTkLabel(dl_order_row, text="Order:", font=FONT_NORMAL, text_color=TEXT_MAIN,
+        ctk.CTkLabel(dl_order_row, text="Download Order:", font=FONT_NORMAL, text_color=TEXT_MAIN,
                      ).pack(side="left", padx=(0, 8))
 
         _DL_ORDER_LABELS = {"largest": "Largest first", "smallest": "Smallest first"}
@@ -567,8 +601,8 @@ class SettingsPanel(ctk.CTkFrame):
             font=FONT_NORMAL,
         ).pack(side="left")
 
-        dl_concurrent_row = ctk.CTkFrame(body, fg_color="transparent")
-        dl_concurrent_row.grid(row=14, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        dl_concurrent_row = ctk.CTkFrame(col_sec, fg_color="transparent")
+        dl_concurrent_row.pack(anchor="w", pady=(0, 0))
 
         ctk.CTkLabel(dl_concurrent_row, text="Max concurrent:", font=FONT_NORMAL, text_color=TEXT_MAIN,
                      ).pack(side="left", padx=(0, 8))
@@ -586,6 +620,89 @@ class SettingsPanel(ctk.CTkFrame):
             dl_concurrent_row, text=str(_col_cfg["max_concurrent"]),
             font=FONT_NORMAL, text_color=TEXT_MAIN, width=scaled(20))
         self._max_concurrent_lbl.pack(side="left", padx=(6, 0))
+
+        # ==== General Settings ====
+        gen_sec = _begin_section("General Settings")
+
+        self._norm_case_var = tk.BooleanVar(value=load_normalize_folder_case())
+        ctk.CTkCheckBox(
+            gen_sec, text="Normalise folder casing", variable=self._norm_case_var,
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            gen_sec,
+            text="When enabled, folder names are unified to a single casing across all mods.\n"
+                 "Disable this on case-insensitive (casefold) filesystems to avoid path conflicts.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+
+        # ==== Paths ====
+        paths_sec = _begin_section("Paths")
+
+        ctk.CTkLabel(paths_sec, text="Heroic Config Location (Folder Containing config.json):", font=FONT_NORMAL,
+                     text_color=TEXT_MAIN, anchor="w").pack(anchor="w", pady=(0, 4))
+
+        heroic_entry_row = ctk.CTkFrame(paths_sec, fg_color="transparent")
+        heroic_entry_row.pack(fill="x")
+
+        self._heroic_path_var = tk.StringVar(value=load_heroic_config_path())
+        ctk.CTkEntry(
+            heroic_entry_row, textvariable=self._heroic_path_var,
+            font=FONT_NORMAL, placeholder_text="Auto-detect (leave blank)",
+            height=scaled(28),
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            heroic_entry_row, text="Browse", width=scaled(70), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_HOVER, hover_color=ACCENT, text_color=TEXT_MAIN,
+            command=self._browse_heroic_path,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            heroic_entry_row, text="Clear", width=scaled(56), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_DEEP, hover_color=BG_HOVER, text_color=TEXT_DIM,
+            command=lambda: self._heroic_path_var.set(""),
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            paths_sec,
+            text="Leave blank to auto-detect (Flatpak and native locations).",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+        ).pack(anchor="w", pady=(6, 0))
+
+        ctk.CTkFrame(paths_sec, fg_color=BORDER, height=1).pack(fill="x", pady=(12, 8))
+
+        ctk.CTkLabel(paths_sec, text="Steam libraryfolders.vdf:", font=FONT_NORMAL,
+                     text_color=TEXT_MAIN, anchor="w").pack(anchor="w", pady=(0, 4))
+
+        steam_entry_row = ctk.CTkFrame(paths_sec, fg_color="transparent")
+        steam_entry_row.pack(fill="x")
+
+        self._steam_vdf_var = tk.StringVar(value=load_steam_libraries_vdf_path())
+        ctk.CTkEntry(
+            steam_entry_row, textvariable=self._steam_vdf_var,
+            font=FONT_NORMAL, placeholder_text="Auto-detect (leave blank)",
+            height=scaled(28),
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            steam_entry_row, text="Browse", width=scaled(70), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_HOVER, hover_color=ACCENT, text_color=TEXT_MAIN,
+            command=self._browse_steam_vdf,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            steam_entry_row, text="Clear", width=scaled(56), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_DEEP, hover_color=BG_HOVER, text_color=TEXT_DIM,
+            command=lambda: self._steam_vdf_var.set(""),
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            paths_sec,
+            text="Leave blank to auto-detect (Standard, Flatpak and Snap locations).",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w",
+        ).pack(anchor="w", pady=(6, 0))
 
         # ---- footer ----
         foot = ctk.CTkFrame(self, fg_color=BG_HEADER, corner_radius=0, height=scaled(44))
@@ -729,6 +846,53 @@ class SettingsPanel(ctk.CTkFrame):
 
         threading.Thread(target=_size_worker, daemon=True).start()
 
+    def _browse_heroic_path(self):
+        from Utils.portal_filechooser import pick_folder
+
+        def _on_chosen(chosen):
+            if chosen:
+                try:
+                    self._heroic_path_var.set(str(chosen))
+                except Exception:
+                    pass
+
+        pick_folder("Select Heroic Config Folder", _on_chosen)
+
+    def _browse_steam_vdf(self):
+        from Utils.portal_filechooser import pick_folder
+
+        def _on_chosen(chosen):
+            if not chosen:
+                return
+            try:
+                # The user might pick either the Steam root (containing
+                # steamapps/) or the steamapps folder itself — try both and
+                # validate before saving so we don't silently set a bogus
+                # path.
+                candidates = [
+                    chosen / "steamapps" / "libraryfolders.vdf",
+                    chosen / "libraryfolders.vdf",
+                ]
+                vdf = next((c for c in candidates if c.is_file()), None)
+                if vdf is None:
+                    try:
+                        import tkinter.messagebox as mb
+                        mb.showerror(
+                            "Steam path",
+                            f"libraryfolders.vdf not found under:\n{chosen}\n\n"
+                            "Please pick your Steam installation folder "
+                            "(the one containing the steamapps directory).",
+                            parent=self,
+                        )
+                    except Exception:
+                        pass
+                    return
+                self._steam_vdf_var.set(str(vdf))
+            except Exception:
+                pass
+
+        pick_folder("Select Steam Installation Folder", _on_chosen)
+
     def _save_no_restart(self):
         """Save collection settings (and scale) without restarting."""
         if self._auto_var.get():
@@ -736,10 +900,13 @@ class SettingsPanel(ctk.CTkFrame):
         else:
             save_ui_scale(round(self._scale_var.get() * 20) / 20)
         save_normalize_folder_case(self._norm_case_var.get())
+        save_clear_archive_after_install(self._clear_archive_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),
         )
+        save_heroic_config_path(self._heroic_path_var.get())
+        save_steam_libraries_vdf_path(self._steam_vdf_var.get())
         self._on_done(self)
 
     def _on_close(self):
@@ -751,10 +918,13 @@ class SettingsPanel(ctk.CTkFrame):
         else:
             save_ui_scale(round(self._scale_var.get() * 20) / 20)
         save_normalize_folder_case(self._norm_case_var.get())
+        save_clear_archive_after_install(self._clear_archive_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),
         )
+        save_heroic_config_path(self._heroic_path_var.get())
+        save_steam_libraries_vdf_path(self._steam_vdf_var.get())
         self._on_done(self)
         python = sys.executable
         os.execv(python, [python] + sys.argv)

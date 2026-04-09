@@ -699,6 +699,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             _ne_game_domain = getattr(game, "nexus_game_domain", "")
             if prebuilt_meta is not None:
                 try:
+                    prebuilt_meta.installation_file = archive_filename
                     write_meta(_ne_meta_path, prebuilt_meta)
                 except OSError:
                     pass
@@ -1769,6 +1770,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         if prebuilt_meta is not None:
             # Caller already has full metadata — write it directly, no API calls needed.
             try:
+                prebuilt_meta.installation_file = os.path.basename(archive_path)
                 write_meta(meta_path, prebuilt_meta)
                 log_fn(f"Nexus: Saved metadata for '{mod_name}' "
                        f"(mod {prebuilt_meta.mod_id})")

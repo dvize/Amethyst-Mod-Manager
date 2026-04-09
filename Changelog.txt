@@ -1,3 +1,17 @@
+- v1.2.0
+- Added the workshop feature to the collections window
+    * This can be used to export a modlist as a .amethyst file containing all of the links needed to redownload it. 
+    * It also saves fomod options to the manifest so that on import they do not need to be redone (Note this will only work for fomods installed after this update).
+    * Importing will restore the modlist to the same state as when it was exported (load order, separators etc)
+    * You can include mods with no download links (like dyndolod output) by changing source to Bundled
+    * You can include off site mods by changing source to Direct url
+- Added a filter for mods installed via fomod (Mods installed before this update wont show up on the filter unless reinstalled)
+- Added a version column that displays the mods version
+- Added a context menu to the right of the columns header that allows columns to be hidden
+- The heroic folder and steams libraryfolder.vdf can be added to the settings menu if these are not detected automatically
+- Added an option to the settings to disable archives being deleted after install.
+- Fixed games not launching via the manager in the flatpak version
+
 - v1.1.10
 - Collection installs now write a userlist.yaml to handle plugin load order, Including any group and plugin rules included in the collection.
 - Fixed nxm links within flatpaks

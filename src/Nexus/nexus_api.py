@@ -231,6 +231,8 @@ class NexusCollectionMod:
     size_bytes: int = 0
     optional: bool = False
     source_type: str = "nexus"  # "nexus", "bundle", "browse", "direct"
+    category_id: int = 0
+    category_name: str = ""
 
 
 # ---------------------------------------------------------------------------

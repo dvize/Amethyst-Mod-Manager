@@ -45,6 +45,7 @@ from Utils.modlist import write_modlist, read_modlist, ModEntry
 from Utils.filemap import rebuild_mod_index
 from Utils.config_paths import get_download_cache_dir
 from Nexus.nexus_download import delete_archive_and_sidecar
+from Utils.ui_config import load_clear_archive_after_install
 from Nexus.nexus_meta import build_meta_from_download
 from Utils.xdg import open_url
 from Utils.plugins import PluginEntry, write_plugins, write_loadorder
@@ -1093,6 +1094,7 @@ class CollectionDetailDialog(tk.Frame):
                 ))
                 continue
 
+            cat = m.get("category") or {}
             mods.append(_NCM(
                 mod_id=mid,
                 file_id=fid,
@@ -1101,6 +1103,9 @@ class CollectionDetailDialog(tk.Frame):
                 size_bytes=file_size,
                 optional=bool(m.get("optional", False)),
                 source_type="nexus",
+                version=m.get("version") or "",
+                category_id=int(cat.get("id") or 0),
+                category_name=cat.get("name") or "",
             ))
 
         self._offsite_mods = offsite
@@ -2267,6 +2272,10 @@ class CollectionDetailDialog(tk.Frame):
                 _pmeta.nexus_name = mod.mod_name or ""
                 _pmeta.author = mod.mod_author or ""
                 _pmeta.version = mod.version or ""
+                if mod.category_id:
+                    _pmeta.category_id = mod.category_id
+                if mod.category_name:
+                    _pmeta.category_name = mod.category_name
             except Exception:
                 _pmeta = None
 
@@ -2321,7 +2330,7 @@ class CollectionDetailDialog(tk.Frame):
                 # Delete archive and .fileid sidecar once all consumers of this path are done.
                 if archive_path in _archive_use_count:
                     _archive_use_count[archive_path] -= 1
-                    if _archive_use_count[archive_path] == 0:
+                    if _archive_use_count[archive_path] == 0 and load_clear_archive_after_install():
                         try:
                             delete_archive_and_sidecar(Path(archive_path))
                         except Exception as _del_exc:
@@ -2499,6 +2508,10 @@ class CollectionDetailDialog(tk.Frame):
                         _def_pmeta.nexus_name = _def_mod.mod_name or ""
                         _def_pmeta.author = _def_mod.mod_author or ""
                         _def_pmeta.version = _def_mod.version or ""
+                        if _def_mod.category_id:
+                            _def_pmeta.category_id = _def_mod.category_id
+                        if _def_mod.category_name:
+                            _def_pmeta.category_name = _def_mod.category_name
                     except Exception:
                         _def_pmeta = None
                     _def_logical = schema_file_id_to_logical.get(_def_mod.file_id, "") or ""
@@ -2535,7 +2548,7 @@ class CollectionDetailDialog(tk.Frame):
                     with _install_lock:
                         if _def_archive in _archive_use_count:
                             _archive_use_count[_def_archive] -= 1
-                            if _archive_use_count[_def_archive] == 0:
+                            if _archive_use_count[_def_archive] == 0 and load_clear_archive_after_install():
                                 try:
                                     delete_archive_and_sidecar(Path(_def_archive))
                                 except Exception:
@@ -3587,6 +3600,10 @@ class CollectionDetailDialog(tk.Frame):
                 _pmeta.nexus_name = mod.mod_name or ""
                 _pmeta.author = mod.mod_author or ""
                 _pmeta.version = mod.version or ""
+                if mod.category_id:
+                    _pmeta.category_id = mod.category_id
+                if mod.category_name:
+                    _pmeta.category_name = mod.category_name
             except Exception:
                 _pmeta = None
 
@@ -5341,6 +5358,8 @@ class CollectionsDialog(tk.Frame):
             tk.messagebox.showerror("Workshop", f"modlist.txt not found:\n{modlist_path}", parent=self)
             return
 
+        # Preserve load order (reversed so high-priority mods come first) — do NOT sort
+        # alphabetically, otherwise Workshop exports lose priority information.
         entries = [
             e for e in reversed(read_modlist(modlist_path))
             if e.enabled and not e.is_separator

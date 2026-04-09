@@ -181,8 +181,22 @@ def find_steam_libraries() -> list[Path]:
     seen: set[Path] = set()
     libraries: list[Path] = []
 
+    vdf_candidates: list[Path] = []
+
+    # User-configured VDF path takes highest priority
+    try:
+        from Utils.ui_config import load_steam_libraries_vdf_path
+        custom = load_steam_libraries_vdf_path()
+        if custom:
+            vdf_candidates.append(Path(custom))
+    except Exception:
+        pass
+
+    # Built-in fallbacks
     for steam_root in _STEAM_CANDIDATES:
-        vdf_path = steam_root / "steamapps" / _VDF_FILENAME
+        vdf_candidates.append(steam_root / "steamapps" / _VDF_FILENAME)
+
+    for vdf_path in vdf_candidates:
         if vdf_path.is_file():
             for common in parse_vdf_libraries(vdf_path):
                 resolved = common.resolve()

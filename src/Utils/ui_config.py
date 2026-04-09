@@ -237,16 +237,25 @@ def save_column_widths(widths: dict[int, int]) -> None:
     parser = configparser.ConfigParser()
     if path.is_file():
         parser.read(path)
-    # Preserve column order key across the section overwrite
+    # Preserve column order/hidden/sort keys across the section overwrite
     existing_order = parser.get(_COLUMNS_SECTION, "order", fallback=None)
+    existing_hidden = parser.get(_COLUMNS_SECTION, "hidden", fallback=None)
+    existing_sort_col = parser.get(_COLUMNS_SECTION, "sort_column", fallback=None)
+    existing_sort_asc = parser.get(_COLUMNS_SECTION, "sort_ascending", fallback=None)
     parser[_COLUMNS_SECTION] = {str(k): str(v) for k, v in widths.items()}
     if existing_order:
         parser[_COLUMNS_SECTION]["order"] = existing_order
+    if existing_hidden is not None:
+        parser[_COLUMNS_SECTION]["hidden"] = existing_hidden
+    if existing_sort_col is not None:
+        parser[_COLUMNS_SECTION]["sort_column"] = existing_sort_col
+    if existing_sort_asc is not None:
+        parser[_COLUMNS_SECTION]["sort_ascending"] = existing_sort_asc
     with path.open("w") as f:
         parser.write(f)
 
 
-_DEFAULT_COL_ORDER = [2, 3, 4, 5, 6]  # category, flags, conflicts, installed, priority
+_DEFAULT_COL_ORDER = [2, 3, 4, 5, 6, 7]  # category, flags, conflicts, installed, priority, version
 
 
 def load_column_order() -> list[int]:
@@ -261,9 +270,18 @@ def load_column_order() -> list[int]:
         if raw is None:
             return list(_DEFAULT_COL_ORDER)
         order = [int(x) for x in raw.split(",")]
-        if sorted(order) == sorted(_DEFAULT_COL_ORDER):
-            return order
-        return list(_DEFAULT_COL_ORDER)
+        # Drop unknown ids, de-dup, then append any new defaults the user hasn't seen yet.
+        seen: set[int] = set()
+        cleaned: list[int] = []
+        for x in order:
+            if x in _DEFAULT_COL_ORDER and x not in seen:
+                cleaned.append(x)
+                seen.add(x)
+        for x in _DEFAULT_COL_ORDER:
+            if x not in seen:
+                cleaned.append(x)
+                seen.add(x)
+        return cleaned if cleaned else list(_DEFAULT_COL_ORDER)
     except Exception:
         return list(_DEFAULT_COL_ORDER)
 
@@ -278,6 +296,36 @@ def save_column_order(order: list[int]) -> None:
     if _COLUMNS_SECTION not in parser:
         parser[_COLUMNS_SECTION] = {}
     parser[_COLUMNS_SECTION]["order"] = ",".join(str(x) for x in order)
+    with path.open("w") as f:
+        parser.write(f)
+
+
+def load_column_hidden() -> set[int]:
+    """Load hidden column indices from amethyst.ini. Returns set of data col indices."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return set()
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        raw = parser.get(_COLUMNS_SECTION, "hidden", fallback=None)
+        if not raw:
+            return set()
+        return {int(x) for x in raw.split(",") if x.strip()}
+    except Exception:
+        return set()
+
+
+def save_column_hidden(hidden: set[int]) -> None:
+    """Persist hidden column indices to amethyst.ini."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _COLUMNS_SECTION not in parser:
+        parser[_COLUMNS_SECTION] = {}
+    parser[_COLUMNS_SECTION]["hidden"] = ",".join(str(x) for x in sorted(hidden))
     with path.open("w") as f:
         parser.write(f)
 
@@ -394,6 +442,33 @@ def save_normalize_folder_case(value: bool) -> None:
         parser.write(f)
 
 
+def load_clear_archive_after_install() -> bool:
+    """Return the clear_archive_after_install setting (default True)."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return True
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.getboolean(_FILEMAP_SECTION, "clear_archive_after_install", fallback=True)
+    except Exception:
+        return True
+
+
+def save_clear_archive_after_install(value: bool) -> None:
+    """Persist the clear_archive_after_install setting to amethyst.ini."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _FILEMAP_SECTION not in parser:
+        parser[_FILEMAP_SECTION] = {}
+    parser[_FILEMAP_SECTION]["clear_archive_after_install"] = "true" if value else "false"
+    with path.open("w") as f:
+        parser.write(f)
+
+
 def save_nexus_show_adult(value: bool) -> None:
     """Persist the show_adult setting to amethyst.ini."""
     path = get_ui_config_path()
@@ -404,5 +479,65 @@ def save_nexus_show_adult(value: bool) -> None:
     if _NEXUS_SECTION not in parser:
         parser[_NEXUS_SECTION] = {}
     parser[_NEXUS_SECTION]["show_adult"] = "true" if value else "false"
+    with path.open("w") as f:
+        parser.write(f)
+
+
+# ---------------------------------------------------------------------------
+# Custom launcher paths
+# ---------------------------------------------------------------------------
+_PATHS_SECTION = "paths"
+
+
+def load_heroic_config_path() -> str:
+    """Return the user-configured Heroic config directory path, or '' if unset."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return ""
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.get(_PATHS_SECTION, "heroic_config_path", fallback="").strip()
+    except Exception:
+        return ""
+
+
+def save_heroic_config_path(value: str) -> None:
+    """Persist the Heroic config directory path to amethyst.ini. Pass '' to clear."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _PATHS_SECTION not in parser:
+        parser[_PATHS_SECTION] = {}
+    parser[_PATHS_SECTION]["heroic_config_path"] = value.strip()
+    with path.open("w") as f:
+        parser.write(f)
+
+
+def load_steam_libraries_vdf_path() -> str:
+    """Return the user-configured path to Steam's libraryfolders.vdf, or '' if unset."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return ""
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.get(_PATHS_SECTION, "steam_libraries_vdf", fallback="").strip()
+    except Exception:
+        return ""
+
+
+def save_steam_libraries_vdf_path(value: str) -> None:
+    """Persist the Steam libraryfolders.vdf path to amethyst.ini. Pass '' to clear."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _PATHS_SECTION not in parser:
+        parser[_PATHS_SECTION] = {}
+    parser[_PATHS_SECTION]["steam_libraries_vdf"] = value.strip()
     with path.open("w") as f:
         parser.write(f)

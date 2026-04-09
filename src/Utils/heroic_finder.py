@@ -23,13 +23,26 @@ _XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", _HOME / ".config"))
 # ---------------------------------------------------------------------------
 def _heroic_config_candidates() -> list[Path]:
     """All possible Heroic config roots, ordered by likelihood."""
-    return [
+    candidates: list[Path] = []
+
+    # User-configured path takes highest priority
+    try:
+        from Utils.ui_config import load_heroic_config_path
+        custom = load_heroic_config_path()
+        if custom:
+            candidates.append(Path(custom))
+    except Exception:
+        pass
+
+    # Built-in fallbacks
+    candidates += [
         # Flatpak (most common on Steam Deck)
         _HOME / ".var" / "app" / "com.heroicgameslauncher.hgl" / "config" / "heroic",
         # Native / AppImage — respects XDG_CONFIG_HOME
         _XDG_CONFIG / "heroic",
         _HOME / ".config" / "heroic",  # Fallback if XDG_CONFIG was overridden
     ]
+    return candidates
 
 
 def _find_heroic_config_roots() -> list[Path]:
