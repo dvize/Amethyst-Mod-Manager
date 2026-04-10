@@ -350,6 +350,11 @@ class PandoraWizard(ctk.CTkFrame):
         game_arg   = f'--tesv:{_to_wine_path(game_path, _prefix / "pfx" if _prefix else None)}'
         output_arg = f'--output:{_to_wine_path(output_dir, _prefix / "pfx" if _prefix else None)}'
 
+        # Unset .NET environment variables that can prevent Pandora from launching
+        # when the host has a .NET runtime installed (e.g. via Bottles/MO2).
+        env.pop("DOTNET_ROOT", None)
+        env.pop("DOTNET_BUNDLE_EXTRACT_BASE_DIR", None)
+
         self._log(f"Pandora Wizard: launching {exe} via Proton")
         self._log(f"  args: {game_arg}  {output_arg}")
         try:

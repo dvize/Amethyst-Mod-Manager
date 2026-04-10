@@ -254,9 +254,9 @@ def sort_plugins(
     _ensure_masterlist(ml_filename, download_url=masterlist_url, log_fn=_log)
     _ensure_masterlist(PRELUDE_FILE, download_url=PRELUDE_URL, log_fn=_log)
 
-    data_dir = _get_data_dir()
-    masterlist_path = data_dir / ml_filename
-    prelude_path = data_dir / PRELUDE_FILE
+    loot_data_dir = _get_data_dir()
+    masterlist_path = loot_data_dir / ml_filename
+    prelude_path = loot_data_dir / PRELUDE_FILE
 
     if not masterlist_path.is_file():
         url_hint = (f"\nDownload from: {masterlist_url}" if masterlist_url
@@ -267,74 +267,116 @@ def sort_plugins(
 
     warnings: list[str] = []
 
-    # Create libloot Game instance
-    local_data = str(data_dir)
-    _log("Initializing LOOT...")
-    game = loot.Game(game_type, str(game_path), local_data)
-    game.load_current_load_order_state()
+    # libloot's load_current_load_order_state() reads plugin headers directly
+    # from the game's Data directory to determine flags such as the ESM/master
+    # flag.  Masterlist conditions like is_master() rely on this — if a plugin
+    # is only in the staging folder (i.e. the profile is not deployed), libloot
+    # cannot see its header and treats it as a non-master, which can trigger
+    # spurious cyclic-dependency errors when conditional load-after rules fire
+    # incorrectly.  To fix this, temporarily symlink any staging plugins that
+    # are absent from Data/ into Data/ before creating the Game instance, then
+    # remove the symlinks in the finally block.
+    effective_data_dir = game_data_dir if game_data_dir is not None else game_path / "Data"
+    _plugin_exts = {".esp", ".esm", ".esl"}
+    _temp_data_symlinks: list[Path] = []
 
-    # Load masterlist
-    db = game.database()
-    if prelude_path.is_file():
-        db.load_masterlist_with_prelude(str(masterlist_path), str(prelude_path))
-        _log("Loaded masterlist with prelude.")
-    else:
-        db.load_masterlist(str(masterlist_path))
-        _log("Loaded masterlist (no prelude found).")
-        warnings.append("Prelude file not found — sorting may be less accurate.")
+    if staging_root and staging_root.is_dir() and effective_data_dir.is_dir():
+        names_needed = {n.lower() for n in plugin_names}
+        # Build a map of lowercase plugin name → staging file path
+        staging_plugin_map: dict[str, Path] = {}
+        for mod_dir in staging_root.iterdir():
+            if not mod_dir.is_dir():
+                continue
+            for f in mod_dir.rglob("*"):
+                if (f.is_file()
+                        and f.suffix.lower() in _plugin_exts
+                        and f.name.lower() in names_needed
+                        and f.name.lower() not in staging_plugin_map):
+                    staging_plugin_map[f.name.lower()] = f
 
-    # Load userlist if provided and non-empty
-    if userlist_path is not None and userlist_path.is_file():
-        try:
-            content = userlist_path.read_text(encoding="utf-8")
-            if content.strip():
-                db.load_userlist(str(userlist_path))
-                _log(f"Loaded userlist: {userlist_path.name}")
-        except (ValueError, OSError) as e:
-            warnings.append(f"Userlist skipped: {e}")
-
-    # Find plugin files on disk — check game Data dir AND staging mods
-    data_dir = game_data_dir if game_data_dir is not None else game_path / "Data"
-    plugin_paths, missing = _find_plugin_paths(
-        plugin_names, data_dir, staging_root,
-    )
-
-    if missing:
-        warnings.append(
-            f"{len(missing)} plugin(s) not found on disk: "
-            f"{', '.join(missing[:5])}"
-            + (f" ... and {len(missing)-5} more" if len(missing) > 5 else "")
-        )
-
-    if plugin_paths:
-        _log(f"Loading {len(plugin_paths)} plugin headers...")
-        game.load_plugin_headers(plugin_paths)
-
-    # Only sort plugins that exist on disk — libloot can't sort unknown plugins
-    missing_set = set(missing)
-    sortable = [n for n in plugin_names if n not in missing_set]
-    unsortable = [n for n in plugin_names if n in missing_set]
-
-    _log(f"Sorting {len(sortable)} plugins...")
+        for name_lower, src in staging_plugin_map.items():
+            dest = effective_data_dir / src.name
+            if not dest.exists() and not dest.is_symlink():
+                try:
+                    dest.symlink_to(src)
+                    _temp_data_symlinks.append(dest)
+                except OSError:
+                    pass
 
     try:
-        sorted_names = game.sort_plugins(sortable)
-    except loot.CyclicInteractionError as e:
-        raise RuntimeError(f"LOOT found a cyclic dependency: {e}") from e
+        # Create libloot Game instance
+        local_data = str(loot_data_dir)
+        _log("Initializing LOOT...")
+        game = loot.Game(game_type, str(game_path), local_data)
+        game.load_current_load_order_state()
 
-    # Append any unsortable plugins (missing from disk) at the end
-    if unsortable:
-        sorted_names.extend(unsortable)
+        # Load masterlist
+        db = game.database()
+        if prelude_path.is_file():
+            db.load_masterlist_with_prelude(str(masterlist_path), str(prelude_path))
+            _log("Loaded masterlist with prelude.")
+        else:
+            db.load_masterlist(str(masterlist_path))
+            _log("Loaded masterlist (no prelude found).")
+            warnings.append("Prelude file not found — sorting may be less accurate.")
 
-    # Count how many sortable plugins actually moved position
-    moved = sum(
-        1 for i, name in enumerate(sorted_names[:len(sortable)])
-        if i >= len(sortable) or sortable[i] != name
-    )
+        # Load userlist if provided and non-empty
+        if userlist_path is not None and userlist_path.is_file():
+            try:
+                content = userlist_path.read_text(encoding="utf-8")
+                if content.strip():
+                    db.load_userlist(str(userlist_path))
+                    _log(f"Loaded userlist: {userlist_path.name}")
+            except (ValueError, OSError) as e:
+                warnings.append(f"Userlist skipped: {e}")
 
-    _log(f"Sort complete. {moved} plugin(s) changed position.")
-    return SortResult(
-        sorted_names=sorted_names,
-        moved_count=moved,
-        warnings=warnings,
-    )
+        # Find plugin files on disk — check game Data dir AND staging mods
+        plugin_paths, missing = _find_plugin_paths(
+            plugin_names, effective_data_dir, staging_root,
+        )
+
+        if missing:
+            warnings.append(
+                f"{len(missing)} plugin(s) not found on disk: "
+                f"{', '.join(missing[:5])}"
+                + (f" ... and {len(missing)-5} more" if len(missing) > 5 else "")
+            )
+
+        if plugin_paths:
+            _log(f"Loading {len(plugin_paths)} plugin headers...")
+            game.load_plugin_headers(plugin_paths)
+
+        # Only sort plugins that exist on disk — libloot can't sort unknown plugins
+        missing_set = set(missing)
+        sortable = [n for n in plugin_names if n not in missing_set]
+        unsortable = [n for n in plugin_names if n in missing_set]
+
+        _log(f"Sorting {len(sortable)} plugins...")
+
+        try:
+            sorted_names = game.sort_plugins(sortable)
+        except loot.CyclicInteractionError as e:
+            raise RuntimeError(f"LOOT found a cyclic dependency: {e}") from e
+
+        # Append any unsortable plugins (missing from disk) at the end
+        if unsortable:
+            sorted_names.extend(unsortable)
+
+        # Count how many sortable plugins actually moved position
+        moved = sum(
+            1 for i, name in enumerate(sorted_names[:len(sortable)])
+            if i >= len(sortable) or sortable[i] != name
+        )
+
+        _log(f"Sort complete. {moved} plugin(s) changed position.")
+        return SortResult(
+            sorted_names=sorted_names,
+            moved_count=moved,
+            warnings=warnings,
+        )
+    finally:
+        for _sym in _temp_data_symlinks:
+            try:
+                _sym.unlink(missing_ok=True)
+            except OSError:
+                pass

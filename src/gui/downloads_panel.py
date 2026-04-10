@@ -142,7 +142,7 @@ class DownloadsPanel:
 
         self._canvas = tk.Canvas(
             canvas_frame, bg=BG_DEEP, bd=0,
-            highlightthickness=0, yscrollincrement=1, takefocus=0,
+            highlightthickness=0, yscrollincrement=scaled(20), takefocus=0,
         )
         self._vsb = tk.Scrollbar(
             canvas_frame, orient="vertical", command=self._canvas.yview,
@@ -229,6 +229,9 @@ class DownloadsPanel:
                 highlightthickness=0,
                 command=lambda p=fpath: self._on_install(p),
             )
+            btn.bind("<Button-4>",   lambda e: self._scroll(-3))
+            btn.bind("<Button-5>",   lambda e: self._scroll(3))
+            btn.bind("<MouseWheel>", self._on_mousewheel)
             self._btn_widgets.append(btn)
 
         # Place them at their initial canvas positions

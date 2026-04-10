@@ -5473,10 +5473,11 @@ class CollectionInstallModeDialog(tk.Frame):
       None                                                     — cancelled
     """
 
-    def __init__(self, parent, existing_profiles: list[str], on_done):
+    def __init__(self, parent, existing_profiles: list[str], on_done, force_new_profile: bool = False):
         super().__init__(parent, bg=BG_DEEP)
         self._on_done = on_done
         self._existing_profiles = existing_profiles
+        self._force_new_profile = force_new_profile
 
         self._mode_var = tk.StringVar(value="new")
         self._overwrite_var = tk.BooleanVar(value=False)
@@ -5533,44 +5534,53 @@ class CollectionInstallModeDialog(tk.Frame):
             command=self._on_mode_change,
         ).grid(row=1, column=0, sticky="w", pady=(0, 6))
 
-        ctk.CTkRadioButton(
-            body, text="Append to existing profile",
-            variable=self._mode_var, value="append",
-            font=FONT_NORMAL, text_color=TEXT_MAIN,
-            fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
-            command=self._on_mode_change,
-        ).grid(row=2, column=0, sticky="w", pady=(0, 8))
+        if self._force_new_profile:
+            tk.Label(
+                body,
+                text="This collection requires a new profile and cannot be\nappended to an existing one.",
+                font=FONT_SMALL,
+                fg=TEXT_DIM, bg=BG_PANEL, anchor="w", justify="left",
+            ).grid(row=2, column=0, sticky="w", pady=(0, 8))
+        else:
+            ctk.CTkRadioButton(
+                body, text="Append to existing profile",
+                variable=self._mode_var, value="append",
+                font=FONT_NORMAL, text_color=TEXT_MAIN,
+                fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+                command=self._on_mode_change,
+            ).grid(row=2, column=0, sticky="w", pady=(0, 8))
 
-        self._profile_menu = ctk.CTkOptionMenu(
-            body, values=self._existing_profiles or ["(no profiles)"],
-            variable=self._profile_var,
-            font=FONT_NORMAL, text_color=TEXT_MAIN,
-            fg_color=BG_DEEP, button_color=BG_HEADER, button_hover_color=BG_HOVER,
-            dropdown_fg_color=BG_PANEL, dropdown_text_color=TEXT_MAIN,
-            dropdown_hover_color=BG_HOVER,
-            state="disabled", width=280,
-        )
-        self._profile_menu.grid(row=3, column=0, sticky="w", padx=(16, 0), pady=(0, 6))
+        if not self._force_new_profile:
+            self._profile_menu = ctk.CTkOptionMenu(
+                body, values=self._existing_profiles or ["(no profiles)"],
+                variable=self._profile_var,
+                font=FONT_NORMAL, text_color=TEXT_MAIN,
+                fg_color=BG_DEEP, button_color=BG_HEADER, button_hover_color=BG_HOVER,
+                dropdown_fg_color=BG_PANEL, dropdown_text_color=TEXT_MAIN,
+                dropdown_hover_color=BG_HOVER,
+                state="disabled", width=280,
+            )
+            self._profile_menu.grid(row=3, column=0, sticky="w", padx=(16, 0), pady=(0, 6))
 
-        self._overwrite_cb = ctk.CTkCheckBox(
-            body, text="Overwrite existing mods",
-            variable=self._overwrite_var,
-            font=FONT_NORMAL, text_color=TEXT_DIM,
-            fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
-            checkmark_color="white",
-            state="disabled",
-        )
-        self._overwrite_cb.grid(row=4, column=0, sticky="w", padx=(16, 0), pady=(0, 4))
+            self._overwrite_cb = ctk.CTkCheckBox(
+                body, text="Overwrite existing mods",
+                variable=self._overwrite_var,
+                font=FONT_NORMAL, text_color=TEXT_DIM,
+                fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+                checkmark_color="white",
+                state="disabled",
+            )
+            self._overwrite_cb.grid(row=4, column=0, sticky="w", padx=(16, 0), pady=(0, 4))
 
-        self._skip_existing_cb = ctk.CTkCheckBox(
-            body, text="Skip already installed mods",
-            variable=self._skip_existing_var,
-            font=FONT_NORMAL, text_color=TEXT_DIM,
-            fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
-            checkmark_color="white",
-            state="disabled",
-        )
-        self._skip_existing_cb.grid(row=5, column=0, sticky="w", padx=(16, 0), pady=(0, 4))
+            self._skip_existing_cb = ctk.CTkCheckBox(
+                body, text="Skip already installed mods",
+                variable=self._skip_existing_var,
+                font=FONT_NORMAL, text_color=TEXT_DIM,
+                fg_color=ACCENT, hover_color=ACCENT_HOV, border_color=BORDER,
+                checkmark_color="white",
+                state="disabled",
+            )
+            self._skip_existing_cb.grid(row=5, column=0, sticky="w", padx=(16, 0), pady=(0, 4))
 
         # Separator before buttons
         tk.Frame(card, bg=BORDER, height=1).grid(row=row, column=0, sticky="ew")
@@ -5594,15 +5604,18 @@ class CollectionInstallModeDialog(tk.Frame):
     def _on_mode_change(self):
         is_append = self._mode_var.get() == "append"
         state = "normal" if is_append else "disabled"
-        self._profile_menu.configure(state=state)
-        self._overwrite_cb.configure(
-            state=state,
-            text_color=TEXT_MAIN if is_append else TEXT_DIM,
-        )
-        self._skip_existing_cb.configure(
-            state=state,
-            text_color=TEXT_MAIN if is_append else TEXT_DIM,
-        )
+        if hasattr(self, "_profile_menu"):
+            self._profile_menu.configure(state=state)
+        if hasattr(self, "_overwrite_cb"):
+            self._overwrite_cb.configure(
+                state=state,
+                text_color=TEXT_MAIN if is_append else TEXT_DIM,
+            )
+        if hasattr(self, "_skip_existing_cb"):
+            self._skip_existing_cb.configure(
+                state=state,
+                text_color=TEXT_MAIN if is_append else TEXT_DIM,
+            )
 
     def _on_ok(self):
         mode = self._mode_var.get()

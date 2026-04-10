@@ -1269,6 +1269,42 @@ class Starfield(Fallout_3):
     def _script_extender_exe(self) -> str:
         return "sfse_loader.exe"
 
+    def _plugins_txt_target(self) -> Path | None:
+        """Return the in-prefix path where Starfield expects Plugins.txt (capital P)."""
+        if self._prefix_path is None:
+            return None
+        return self._prefix_path / self._APPDATA_SUBPATH / "Plugins.txt"
+
+    def swap_launcher(self, log_fn) -> None:
+        """Replace Starfield.exe with sfse_loader.exe and write Data/SFSE/sfse.ini.
+
+        SFSE reads its RuntimeName setting from Data/SFSE/sfse.ini when the
+        loader has been renamed away from sfse_loader.exe.
+        """
+        super().swap_launcher(log_fn)
+        _log = log_fn
+        if self._game_path is None:
+            return
+        backup_name = Path(self.exe_name).stem + ".bak"
+        backup = self._game_path / backup_name
+        if not backup.is_file():
+            return
+        sfse_ini = self._game_path / "Data" / "SFSE" / "sfse.ini"
+        sfse_ini.parent.mkdir(parents=True, exist_ok=True)
+        sfse_ini.write_text(f"[Loader]\nRuntimeName={backup_name}\n", encoding="utf-8")
+        _log(f"  Wrote Data/SFSE/sfse.ini (RuntimeName={backup_name}).")
+
+    def _restore_launcher(self, log_fn) -> None:
+        """Reverse the launcher swap and remove Data/SFSE/sfse.ini."""
+        super()._restore_launcher(log_fn)
+        _log = log_fn
+        if self._game_path is None:
+            return
+        sfse_ini = self._game_path / "Data" / "SFSE" / "sfse.ini"
+        if sfse_ini.is_file():
+            sfse_ini.unlink()
+            _log("  Removed Data/SFSE/sfse.ini.")
+
 class Enderal(Fallout_3):
 
     @property

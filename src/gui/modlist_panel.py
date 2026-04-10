@@ -6953,6 +6953,9 @@ class ModListPanel(ctk.CTkFrame):
             self.after(0, lambda n=total_exc: self._log(
                 f"Filemap: excluding {n} file(s) (profile_state excluded_mod_files)"))
 
+        def _log_thread_safe(msg: str) -> None:
+            self.after(0, lambda m=msg: self._log(m))
+
         def _worker():
             nonlocal rescan_index
             try:
@@ -6974,6 +6977,7 @@ class ModListPanel(ctk.CTkFrame):
                         root_deploy_folders=root_deploy_folders or None,
                         normalize_folder_case=normalize_folder_case,
                         exclude_dirs=exclude_dirs,
+                        log_fn=_log_thread_safe,
                     )
                 count, conflict_map, overrides, overridden_by = build_filemap(
                     modlist_path, staging, output,
@@ -6987,6 +6991,7 @@ class ModListPanel(ctk.CTkFrame):
                     normalize_folder_case=normalize_folder_case,
                     conflict_key_fn=_conflict_key_fn,
                     exclude_dirs=exclude_dirs,
+                    log_fn=_log_thread_safe,
                 )
                 _game = getattr(self, "_game", None)
                 if _game is not None:

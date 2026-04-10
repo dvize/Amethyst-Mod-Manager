@@ -1,3 +1,11 @@
+- v1.2.1
+- Fixed the right click context menu in the modlist panel instantly closing after installing a mod
+- Mods in the workshop are now displayed in alphabetical order
+- The ignore updates flag is now removed when the mod has a genuine update.
+- Starfield deploy adds the launcher binary to sfse.ini to allow the launcher swap to work
+- Collections that have recommendNewProfile set to true will force a new profile to be made for them
+- Fix for loot conditions that require the plugin to be read from the game folder
+
 - v1.2.0
 - Added the workshop feature to the collections window
     * This can be used to export a modlist as a .amethyst file containing all of the links needed to redownload it. 
@@ -11,6 +19,7 @@
 - The heroic folder and steams libraryfolder.vdf can be added to the settings menu if these are not detected automatically
 - Added an option to the settings to disable archives being deleted after install.
 - Fixed games not launching via the manager in the flatpak version
+- Right click options in the modlist panel are now in alphabetical order
 
 - v1.1.10
 - Collection installs now write a userlist.yaml to handle plugin load order, Including any group and plugin rules included in the collection.

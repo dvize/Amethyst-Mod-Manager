@@ -83,11 +83,12 @@ def _scan_dir(
     _unused_root_deploy_folders: frozenset[str] = frozenset(),
     strip_path_prefixes: list[str] | None = None,
     exclude_dirs: frozenset[str] = frozenset(),
-) -> tuple[str, dict[str, str], dict[str, str]]:
+) -> tuple[str, dict[str, str], dict[str, str], list[str]]:
     """Walk source_dir with os.scandir (fast, no Pathlib overhead).
 
-    Returns (source_name, normal_files, {}) where normal_files is
-    {rel_key_lower: rel_str_original}.
+    Returns (source_name, normal_files, {}, invalid_names) where normal_files
+    is {rel_key_lower: rel_str_original} and invalid_names is a list of
+    relative paths whose filenames contain non-UTF-8 bytes (surrogates).
     Pure function — no shared state, safe to call from any thread.
 
     strip_path_prefixes — full path prefixes to strip once (e.g. ["Tree", "Meshes/Architecture"]).
@@ -114,6 +115,7 @@ def _scan_dir(
     """
     result: dict[str, str] = {}
     root_result: dict[str, str] = {}  # always empty; kept for tuple compat
+    invalid_names: list[str] = []
     # Pre-sort once (longest match first) so we don't re-sort inside the per-file loop.
     # Each entry is (lowercase_prefix, len_of_original_prefix) for O(1) strip-by-length.
     sorted_path_prefixes: list[tuple[str, int]] = (
@@ -130,12 +132,18 @@ def _scan_dir(
                     if entry.is_dir(follow_symlinks=False):
                         if exclude_dirs and entry.name.lower() in exclude_dirs:
                             continue
+                        if not _is_utf8_safe(entry.name):
+                            invalid_names.append(prefix + entry.name + "/")
+                            continue
                         stack.append((
                             prefix + entry.name + "/",
                             entry.path,
                         ))
                     elif entry.is_file(follow_symlinks=False):
                         if entry.name in _EXCLUDE_NAMES:
+                            continue
+                        if not _is_utf8_safe(entry.name):
+                            invalid_names.append(prefix + entry.name)
                             continue
                         rel_str = prefix + entry.name
                         # Strip full path prefixes first (per-mod "ignore this folder" paths).
@@ -175,7 +183,7 @@ def _scan_dir(
                             result[key] = rel_str
         except OSError:
             pass
-    return source_name, result, root_result
+    return source_name, result, root_result, invalid_names
 
 
 def fix_flat_staging_folders(staging_root: Path) -> list[str]:
@@ -233,6 +241,15 @@ def fix_flat_staging_folders(staging_root: Path) -> list[str]:
 @lru_cache(maxsize=2048)
 def _upper_count(s: str) -> int:
     return sum(1 for c in s if c.isupper())
+
+
+def _is_utf8_safe(s: str) -> bool:
+    """Return True if s can be encoded as UTF-8 (no lone surrogates)."""
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
 
 
 def _pick_canonical_segment(a: str, b: str) -> str:
@@ -457,6 +474,7 @@ def rebuild_mod_index(
     root_deploy_folders: set[str] | None = None,  # unused, kept for call-site compat
     normalize_folder_case: bool = True,
     exclude_dirs: frozenset[str] | None = None,
+    log_fn: "Callable[[str], None] | None" = None,
 ) -> None:
     """Scan every mod folder under staging_root and rewrite the full index.
 
@@ -509,7 +527,14 @@ def rebuild_mod_index(
 
     index: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
     for fut in futures:
-        name, normal, root = fut.result()
+        name, normal, root, invalid_names = fut.result()
+        if invalid_names:
+            if log_fn is not None:
+                log_fn(
+                    f"WARN: Mod \"{name}\" skipped — contains file(s) with "
+                    f"non-UTF-8 name(s): {', '.join(invalid_names)}"
+                )
+            continue  # skip the entire mod
         index[name] = (normal, root)
 
     _write_mod_index(index_path, index, normalize_folder_case=normalize_folder_case)
@@ -533,6 +558,7 @@ def build_filemap(
     normalize_folder_case: bool = True,
     conflict_key_fn: "Callable[[str], str] | None" = None,
     exclude_dirs: frozenset[str] | None = None,
+    log_fn: "Callable[[str], None] | None" = None,
 ) -> tuple[int, dict[str, int], dict[str, set[str]], dict[str, set[str]]]:
     """
     Build filemap.txt from the current modlist.
@@ -588,6 +614,7 @@ def build_filemap(
             allowed_extensions=allowed_extensions,
             normalize_folder_case=normalize_folder_case,
             exclude_dirs=exclude_dirs,
+            log_fn=log_fn,
         )
         index = read_mod_index(index_path) or {}
 
@@ -625,6 +652,17 @@ def build_filemap(
             continue
         normal, _ = entry
         if not normal:
+            continue
+        # Guard against surrogate-encoded filenames left in an old modindex.bin.
+        # (Old scans ran before the _scan_dir surrogate-skip fix.)  Skip the
+        # entire mod and log it so the user knows to Refresh / reinstall it.
+        bad_names = [rs for rs in normal.values() if not _is_utf8_safe(rs)]
+        if bad_names:
+            if log_fn is not None:
+                log_fn(
+                    f"WARN: Mod \"{name}\" skipped \u2014 contains file(s) with "
+                    f"non-UTF-8 name(s): {', '.join(bad_names[:5])}"
+                )
             continue
         exc = _excluded.get(name)
         had_file = False

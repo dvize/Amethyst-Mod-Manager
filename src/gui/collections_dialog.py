@@ -1540,8 +1540,13 @@ class CollectionDetailDialog(tk.Frame):
                 overlay_parent, existing_profile, _on_mode_chosen
             )
         else:
+            _schema = getattr(self, "_collection_schema_cache", None) or {}
+            _force_new = bool(
+                _schema.get("collectionConfig", {}).get("recommendNewProfile", False)
+            )
             overlay = CollectionInstallModeDialog(
-                overlay_parent, existing_profiles, _on_mode_chosen
+                overlay_parent, existing_profiles, _on_mode_chosen,
+                force_new_profile=_force_new,
             )
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         overlay.lift()
