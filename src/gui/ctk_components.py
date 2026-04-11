@@ -823,16 +823,18 @@ class CTkPopupMenu(ctk.CTkToplevel):
 
         self.withdraw()
 
-    def add_command(self, label: str, command=None):
+    def add_command(self, label: str, command=None, font=None):
         """Add a menu item. command is called when the menu is dismissed."""
-        btn = ctk.CTkButton(
-            self.frame, text=label, anchor="w",
+        btn_kwargs = dict(
             fg_color="transparent", hover=True,
             text_color=ctk.ThemeManager.theme["CTkLabel"]["text_color"],
             hover_color=ctk.ThemeManager.theme["CTkButton"]["hover_color"],
             corner_radius=4, height=_MENU_ITEM_H,
             command=lambda: self._on_item_click(command),
         )
+        if font is not None:
+            btn_kwargs["font"] = font
+        btn = ctk.CTkButton(self.frame, text=label, anchor="w", **btn_kwargs)
         btn.grid(row=self._item_row, column=0, sticky="ew", padx=6, pady=1)
         self._item_row += 1
         self._content_height += _MENU_ITEM_H + 2

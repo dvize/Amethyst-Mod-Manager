@@ -1658,7 +1658,7 @@ class PluginPanel(ctk.CTkFrame):
         style.configure("ModFiles.Treeview",
             background=_bg, foreground=_fg,
             fieldbackground=_bg, borderwidth=0,
-            rowheight=scaled(22), font=(_theme.FONT_FAMILY, _theme.FS10),
+            rowheight=scaled(22), font=("Cantarell", _theme.FS10),
             focuscolor=_bg,
         )
         style.map("ModFiles.Treeview",
@@ -1667,7 +1667,7 @@ class PluginPanel(ctk.CTkFrame):
         )
         style.configure("ModFiles.Treeview.Heading",
             background=_bg, foreground=_fg,
-            font=(_theme.FONT_FAMILY, _theme.FS10, "bold"), relief="flat",
+            font=("Cantarell", _theme.FS10, "bold"), relief="flat",
         )
 
         self._mf_tree = ttk.Treeview(
@@ -1697,9 +1697,11 @@ class PluginPanel(ctk.CTkFrame):
         self._mf_tree.bind("<Button-5>", lambda e: self._mf_tree.yview_scroll(3, "units"))
         self._mf_tree.bind("<Button-1>", self._on_mf_click)
         self._mf_tree.bind("<space>", self._on_mf_space)
+        self._mf_tree.bind("<Button-3>", self._on_mf_right_click)
 
         self._mf_checked: dict[str, bool] = {}   # iid → checked state
         self._mf_iid_to_key: dict[str, str | None] = {}  # iid → rel_key (None for folders)
+        self._mf_iid_to_relstr: dict[str, str] = {}  # iid → rel_str (original-case, leaf nodes only)
         self._mf_folder_iids: set[str] = set()
 
     # ------------------------------------------------------------------

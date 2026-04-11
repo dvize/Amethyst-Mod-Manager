@@ -1461,7 +1461,8 @@ class ModListPanel(ctk.CTkFrame):
             title = self._DATA_COL_TITLES.get(dc, f"Col {dc}")
             visible = dc not in self._col_hidden
             prefix = "☑  " if visible else "☐  "
-            menu.add_command(prefix + title, lambda d=dc: self._toggle_column_hidden(d))
+            menu.add_command(prefix + title, lambda d=dc: self._toggle_column_hidden(d),
+                             font=("Cantarell", _theme.FONT_NORMAL[1]))
         try:
             btn = self._col_menu_btn
             x = btn.winfo_rootx()
@@ -4835,7 +4836,18 @@ class ModListPanel(ctk.CTkFrame):
                     return
                 old_folder.rename(new_folder)
         # Update entry in memory
+        old_name = entry.name
         entry.name = new_name
+        # Migrate all name-keyed metadata dicts/sets to the new name
+        for s in (self._update_mods, self._missing_reqs, self._ignored_missing_reqs,
+                  self._endorsed_mods, self._prertx_mods, self._fomod_mods):
+            if old_name in s:
+                s.discard(old_name)
+                s.add(new_name)
+        for d in (self._missing_reqs_detail, self._install_dates,
+                  self._install_datetimes, self._category_names, self._mod_versions):
+            if old_name in d:
+                d[new_name] = d.pop(old_name)
         self._vis_dirty = True  # name change affects text filter
         self._save_modlist()
         self._rebuild_filemap()
@@ -5426,12 +5438,12 @@ class ModListPanel(ctk.CTkFrame):
         style.configure(_tree_style,
                         background=_tree_bg, foreground=TEXT_MAIN,
                         fieldbackground=_tree_bg, rowheight=22,
-                        font=(_theme.FONT_FAMILY, _theme.FS10),
+                        font=("Cantarell", _theme.FS10),
                         bordercolor=BG_ROW, borderwidth=1,
                         focuscolor=_tree_bg)
         style.configure(_heading_style,
                         background=BG_HEADER, foreground=TEXT_SEP,
-                        font=(_theme.FONT_FAMILY, _theme.FS10), borderwidth=0)
+                        font=("Cantarell", _theme.FS10), borderwidth=0)
         style.map(_tree_style,
                   background=[("selected", BG_SELECT), ("focus", _tree_bg)],
                   foreground=[("selected", TEXT_MAIN)])
