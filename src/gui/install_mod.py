@@ -611,6 +611,26 @@ def _copy_file_list(file_list: list[tuple[str, str, bool]],
 FOMOD_DEFERRED = "__FOMOD_DEFERRED__"
 
 
+def _fire_on_installed(cb, is_fomod: bool = False) -> None:
+    """Invoke an `on_installed` callback with backwards-compatible signature.
+
+    Callers may supply either a no-arg callable or one that accepts an
+    `is_fomod` keyword. Try the richer form first, then fall back."""
+    if cb is None:
+        return
+    try:
+        cb(is_fomod=is_fomod)
+        return
+    except TypeError:
+        pass
+    except Exception:
+        return
+    try:
+        cb()
+    except Exception:
+        pass
+
+
 def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                              game, mod_panel=None,
                              on_installed=None,
@@ -630,9 +650,12 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
     present, then copy the resolved files into the game's mod staging area.
     Supports .zip, .7z, and .tar.* formats.
 
-    on_installed : optional callable()
+    on_installed : optional callable
         Called after a successful install, before the function returns.
         Use this to e.g. delete the source archive or refresh the UI.
+        May be defined as either ``f()`` or ``f(is_fomod: bool)`` —
+        when a keyword ``is_fomod`` is accepted, it indicates the mod
+        was installed via a FOMOD installer.
 
     fomod_auto_selections : dict | None
         When provided, the FOMOD wizard is skipped entirely and these
@@ -746,11 +769,8 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             log_fn(f"Added '{mod_name}' to modlist.")
             _show_mod_notification(parent_window, f"Installed: {mod_name}")
 
-            if on_installed is not None:
-                try:
-                    on_installed()
-                except Exception:
-                    pass
+            # Disable-extract path never runs a FOMOD installer.
+            _fire_on_installed(on_installed, is_fomod=False)
 
             if mod_panel is not None:
                 mod_panel.after(0, mod_panel.reload_after_install)
@@ -1373,11 +1393,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             log_fn(f"Installed bundle '{bundle_name}' ({len(variants)} variant(s)).")
             if not headless:
                 _show_mod_notification(parent_window, f"Installed bundle: {bundle_name}")
-            if on_installed is not None:
-                try:
-                    on_installed()
-                except Exception:
-                    pass
+            _fire_on_installed(on_installed, is_fomod=False)
             if mod_panel is not None and not headless:
                 mod_panel.after(0, mod_panel.reload_after_install)
             return installed_variant_names[0] if installed_variant_names else mod_name
@@ -1464,11 +1480,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             log_fn(f"Installed {len(multi_mods)} mod(s) from archive.")
             if not headless:
                 _show_mod_notification(parent_window, f"Installed {len(multi_mods)} mods")
-            if on_installed is not None:
-                try:
-                    on_installed()
-                except Exception:
-                    pass
+            _fire_on_installed(on_installed, is_fomod=False)
             if mod_panel is not None and not headless:
                 mod_panel.after(0, mod_panel.reload_after_install)
             return installed_names[0] if installed_names else mod_name
@@ -1809,11 +1821,7 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
         if not headless:
             _show_mod_notification(parent_window, f"Installed: {mod_name}")
 
-        if on_installed is not None:
-            try:
-                on_installed()
-            except Exception:
-                pass
+        _fire_on_installed(on_installed, is_fomod=is_fomod_install)
 
         if mod_panel is not None and not headless:
             mod_panel.after(0, mod_panel.reload_after_install)

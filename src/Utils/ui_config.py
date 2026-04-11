@@ -515,6 +515,37 @@ def save_clear_archive_after_install(value: bool) -> None:
         parser.write(f)
 
 
+def load_keep_fomod_archives() -> bool:
+    """Return the keep_fomod_archives setting (default False).
+
+    When True, archives of mods that use a FOMOD installer are always kept
+    regardless of the clear_archive_after_install setting.
+    """
+    path = get_ui_config_path()
+    if not path.is_file():
+        return False
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.getboolean(_FILEMAP_SECTION, "keep_fomod_archives", fallback=False)
+    except Exception:
+        return False
+
+
+def save_keep_fomod_archives(value: bool) -> None:
+    """Persist the keep_fomod_archives setting to amethyst.ini."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _FILEMAP_SECTION not in parser:
+        parser[_FILEMAP_SECTION] = {}
+    parser[_FILEMAP_SECTION]["keep_fomod_archives"] = "true" if value else "false"
+    with path.open("w") as f:
+        parser.write(f)
+
+
 def save_nexus_show_adult(value: bool) -> None:
     """Persist the show_adult setting to amethyst.ini."""
     path = get_ui_config_path()

@@ -6048,10 +6048,16 @@ class ModListPanel(ctk.CTkFrame):
                         app.after(0, lambda d=done, t=total, p=phase: status_bar.set_progress(d, t, p, title="Extracting"))
 
                 def _install_worker():
-                    def _cleanup():
-                        from Utils.ui_config import load_clear_archive_after_install
-                        if load_clear_archive_after_install():
-                            delete_archive_and_sidecar(Path(result.file_path))
+                    def _cleanup(is_fomod: bool = False):
+                        from Utils.ui_config import (
+                            load_clear_archive_after_install,
+                            load_keep_fomod_archives,
+                        )
+                        if not load_clear_archive_after_install():
+                            return
+                        if is_fomod and load_keep_fomod_archives():
+                            return
+                        delete_archive_and_sidecar(Path(result.file_path))
 
                     try:
                         prebuilt = build_meta_from_download(

@@ -20,6 +20,7 @@ from Utils.ui_config import (
     load_collection_settings, save_collection_settings,
     load_normalize_folder_case, save_normalize_folder_case,
     load_clear_archive_after_install, save_clear_archive_after_install,
+    load_keep_fomod_archives, save_keep_fomod_archives,
     load_heroic_config_path, save_heroic_config_path,
     load_steam_libraries_vdf_path, save_steam_libraries_vdf_path,
     load_font_family, save_font_family, get_font_family,
@@ -603,6 +604,18 @@ class SettingsPanel(ctk.CTkFrame):
             font=FONT_NORMAL, text_color=TEXT_MAIN,
         ).pack(anchor="w", pady=(10, 0))
 
+        self._keep_fomod_archives_var = tk.BooleanVar(value=load_keep_fomod_archives())
+        ctk.CTkCheckBox(
+            dl_sec, text="Keep FOMOD archives", variable=self._keep_fomod_archives_var,
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+        ).pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(
+            dl_sec,
+            text="When enabled, archives for mods that use a FOMOD installer are\n"
+                 "always kept, even if 'Clear archive after install' is on.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
         # ==== Collections ====
         col_sec = _begin_section("Collections")
 
@@ -939,6 +952,7 @@ class SettingsPanel(ctk.CTkFrame):
         save_font_family(self._font_var.get())
         save_normalize_folder_case(self._norm_case_var.get())
         save_clear_archive_after_install(self._clear_archive_var.get())
+        save_keep_fomod_archives(self._keep_fomod_archives_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),
@@ -959,6 +973,7 @@ class SettingsPanel(ctk.CTkFrame):
         save_font_family(self._font_var.get())
         save_normalize_folder_case(self._norm_case_var.get())
         save_clear_archive_after_install(self._clear_archive_var.get())
+        save_keep_fomod_archives(self._keep_fomod_archives_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),

@@ -46,7 +46,7 @@ from Utils.filemap import rebuild_mod_index
 from Utils.config_paths import get_download_cache_dir
 from Nexus.nexus_download import delete_archive_and_sidecar, DownloadResult, _find_cached_archive, _get_downloads_dir
 from gui.download_locations_overlay import load_extra_download_locations
-from Utils.ui_config import load_clear_archive_after_install
+from Utils.ui_config import load_clear_archive_after_install, load_keep_fomod_archives
 from Nexus.nexus_meta import build_meta_from_download
 from Utils.xdg import open_url
 from Utils.plugins import PluginEntry, write_plugins, write_loadorder
@@ -2356,6 +2356,9 @@ class CollectionDetailDialog(tk.Frame):
             _large_sem = _large_archive_semaphore if _archive_size >= _LARGE_ARCHIVE_BYTES else None
             if _large_sem is not None:
                 _large_sem.acquire()
+            _fomod_flag = {"value": False}
+            def _capture_fomod(is_fomod: bool = False):
+                _fomod_flag["value"] = is_fomod
             try:
                 folder_name = install_mod_from_archive(
                     archive_path, self, self._log, self._game,
@@ -2367,10 +2370,12 @@ class CollectionDetailDialog(tk.Frame):
                     skip_index_update=True,
                     overwrite_existing=overwrite_existing,
                     defer_interactive_fomod=(auto_fomod is None),
+                    on_installed=_capture_fomod,
                 )
             finally:
                 if _large_sem is not None:
                     _large_sem.release()
+            _installed_was_fomod = _fomod_flag["value"]
 
             if folder_name == FOMOD_DEFERRED:
                 # FOMOD with no auto-selections — queue for after all other mods install.
@@ -2393,10 +2398,12 @@ class CollectionDetailDialog(tk.Frame):
                 # a custom scan location — those belong to the user, not the cache.
                 if archive_path in _archive_use_count:
                     _archive_use_count[archive_path] -= 1
+                    _keep_for_fomod = _installed_was_fomod and load_keep_fomod_archives()
                     if (
                         _archive_use_count[archive_path] == 0
                         and load_clear_archive_after_install()
                         and archive_path not in _external_archive_paths
+                        and not _keep_for_fomod
                     ):
                         try:
                             delete_archive_and_sidecar(Path(archive_path))
@@ -2620,6 +2627,7 @@ class CollectionDetailDialog(tk.Frame):
                                 _archive_use_count[_def_archive] == 0
                                 and load_clear_archive_after_install()
                                 and _def_archive not in _external_archive_paths
+                                and not load_keep_fomod_archives()
                             ):
                                 try:
                                     delete_archive_and_sidecar(Path(_def_archive))
@@ -3684,6 +3692,9 @@ class CollectionDetailDialog(tk.Frame):
                 schema_file_id_to_pos.get(mod.file_id, -1), "") or ""
             _preferred = _logical or _schema_name or mod.mod_name or ""
 
+            _manual_fomod_flag = {"value": False}
+            def _manual_capture_fomod(is_fomod: bool = False):
+                _manual_fomod_flag["value"] = is_fomod
             try:
                 folder_name = install_mod_from_archive(
                     str(archive_path), self, self._log, self._game,
@@ -3694,6 +3705,7 @@ class CollectionDetailDialog(tk.Frame):
                     preferred_name=_preferred,
                     skip_index_update=True,
                     overwrite_existing=overwrite_existing,
+                    on_installed=_manual_capture_fomod,
                 )
             except Exception as exc:
                 self._log(f"Manual install: failed to install '{mod.mod_name}': {exc}")
@@ -3707,12 +3719,16 @@ class CollectionDetailDialog(tk.Frame):
                     self.after(0, lambda fid=mod.file_id: self._mark_row_installed(fid))
                 except Exception:
                     pass
-                # Delete the archive after a successful install
-                try:
-                    archive_path.unlink(missing_ok=True)
-                    self._log(f"Manual install: deleted archive '{archive_path.name}'")
-                except Exception as _del_exc:
-                    self._log(f"Manual install: could not delete archive '{archive_path.name}': {_del_exc}")
+                # Delete the archive after a successful install — unless the mod
+                # used a FOMOD installer and the user wants to keep FOMOD archives.
+                if _manual_fomod_flag["value"] and load_keep_fomod_archives():
+                    self._log(f"Manual install: keeping FOMOD archive '{archive_path.name}'")
+                else:
+                    try:
+                        archive_path.unlink(missing_ok=True)
+                        self._log(f"Manual install: deleted archive '{archive_path.name}'")
+                    except Exception as _del_exc:
+                        self._log(f"Manual install: could not delete archive '{archive_path.name}': {_del_exc}")
                 # Auto-open next mod's download page if checkbox is ticked
                 _next_mods = to_download[idx_0 + 1:]
                 if _next_mods and getattr(self, "_manual_auto_open_var", None) and self._manual_auto_open_var.get():

@@ -789,10 +789,12 @@ class App(ctk.CTk):
         mod_panel = getattr(self, "_mod_panel", None)
         _archive_path = result.file_path
         _installed = False
+        _installed_is_fomod = False
 
-        def _on_installed():
-            nonlocal _installed
+        def _on_installed(is_fomod: bool = False):
+            nonlocal _installed, _installed_is_fomod
             _installed = True
+            _installed_is_fomod = is_fomod
 
         # Build metadata now from the NXM link data so install_mod_from_archive
         # can write it directly, skipping the async detection thread entirely.
@@ -813,8 +815,15 @@ class App(ctk.CTk):
             log(f"Nexus: Saved metadata (mod {prebuilt_meta.mod_id}, file {prebuilt_meta.file_id})")
 
         if _installed and _archive_path:
-            from Utils.ui_config import load_clear_archive_after_install
-            if load_clear_archive_after_install():
+            from Utils.ui_config import (
+                load_clear_archive_after_install,
+                load_keep_fomod_archives,
+            )
+            _should_clear = load_clear_archive_after_install()
+            if _should_clear and _installed_is_fomod and load_keep_fomod_archives():
+                _should_clear = False
+                log(f"Nexus: Keeping FOMOD archive {_archive_path.name}")
+            if _should_clear:
                 try:
                     delete_archive_and_sidecar(_archive_path)
                     log(f"Nexus: Removed archive {_archive_path.name}")
