@@ -310,6 +310,46 @@ class App(ctk.CTk):
             icon_img = tk.PhotoImage(file=str(icon_path))
             self.iconphoto(False, icon_img)
 
+        # Global click handler: defocus text entry widgets when clicking
+        # outside of them, so search bars etc. don't stay focused.
+        self.bind_all("<Button-1>", self._defocus_on_outside_click, add="+")
+
+    # -- Focus management ---------------------------------------------------
+    def _defocus_on_outside_click(self, event: tk.Event) -> None:
+        """Move focus away from Entry/Text widgets when the user clicks
+        somewhere that isn't itself a text input widget."""
+        w = event.widget
+        # If the click landed on a text-entry-like widget, leave focus alone.
+        try:
+            cls = w.winfo_class() if hasattr(w, "winfo_class") else ""
+        except Exception:
+            return
+        if cls in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox",
+                   "CTkEntry", "Listbox", "TListbox"):
+            return
+        # Check current focus — only act if something text-ish is focused.
+        try:
+            focused = self.focus_get()
+        except Exception:
+            focused = None
+        if focused is None:
+            return
+        try:
+            fcls = focused.winfo_class()
+        except Exception:
+            return
+        if fcls in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox",
+                    "CTkEntry"):
+            # Shift focus to the clicked widget if it can take focus,
+            # otherwise to the root window.
+            try:
+                w.focus_set()
+            except Exception:
+                try:
+                    self.focus_set()
+                except Exception:
+                    pass
+
     # -- Splash screen ------------------------------------------------------
 
     def _finish_splash(self):
