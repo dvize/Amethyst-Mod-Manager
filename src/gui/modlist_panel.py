@@ -4352,6 +4352,18 @@ class ModListPanel(ctk.CTkFrame):
             menu.add_command("Change Version",
                 lambda mn=_mod_name: self._update_nexus_mod(mn))
 
+        # Check Updates (single)
+        if (not is_separator and not is_synthetic and not _is_multi
+                and _ctx_meta is not None and _ctx_meta.mod_id > 0):
+            menu.add_command("Check Updates",
+                lambda mn=_mod_name: self._on_check_updates_for_mods([mn]))
+
+        # Check Updates (multi)
+        if _is_multi and _nexus_urls:
+            _check_names = [self._entries[i].name for i in toggleable]
+            menu.add_command(f"Check Updates ({len(_check_names)})",
+                lambda mns=_check_names: self._on_check_updates_for_mods(mns))
+
         # Copy to profile
         if _other_profiles:
             if _is_multi and _copy_mod_names:
@@ -6806,6 +6818,57 @@ class ModListPanel(ctk.CTkFrame):
                             log_fn(f"  ⚠ {m.mod_name}: needs {names}{suffix}")
                     else:
                         log_fn("Nexus: All mod requirements satisfied.")
+                    self._scan_meta_flags_async()
+                app.after(0, _done)
+            except Exception as exc:
+                app.after(0, lambda e=exc: (
+                    self._update_btn.configure(text="Check Updates", state="normal"),
+                    log_fn(f"Nexus: Check failed — {e}"),
+                ))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_check_updates_for_mods(self, mod_names: list[str]):
+        """Check for updates for a specific set of mods (from right-click menu)."""
+        if not mod_names:
+            return
+        app = self.winfo_toplevel()
+        if app._nexus_api is None:
+            self._log("Nexus: Login to Nexus first (Nexus button).")
+            return
+        game = self._game
+        if game is None or not game.is_configured():
+            self._log("No configured game selected.")
+            return
+
+        staging = game.get_effective_mod_staging_path()
+        target_names = set(mod_names)
+        self._update_btn.configure(text="Checking...", state="disabled")
+        log_fn = self._log
+
+        def _worker():
+            try:
+                results, missing = check_for_updates(
+                    app._nexus_api, staging,
+                    game_domain=game.nexus_game_domain,
+                    progress_cb=lambda m: app.after(0, lambda msg=m: log_fn(msg)),
+                    enabled_only=target_names,
+                )
+
+                def _done():
+                    self._update_btn.configure(text="Check Updates", state="normal")
+                    if results:
+                        log_fn(f"Nexus: {len(results)} update(s) available!")
+                        for u in results:
+                            log_fn(f"  ↑ {u.mod_name}: {u.installed_version} → {u.latest_version}")
+                    else:
+                        log_fn("Nexus: Selected mod(s) are up to date.")
+                    if missing:
+                        log_fn(f"Nexus: {len(missing)} mod(s) have missing requirements!")
+                        for m in missing:
+                            names = ", ".join(r.mod_name for r in m.missing[:3])
+                            suffix = f" (+{len(m.missing) - 3} more)" if len(m.missing) > 3 else ""
+                            log_fn(f"  ⚠ {m.mod_name}: needs {names}{suffix}")
                     self._scan_meta_flags_async()
                 app.after(0, _done)
             except Exception as exc:
