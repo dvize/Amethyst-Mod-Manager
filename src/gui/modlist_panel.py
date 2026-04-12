@@ -699,7 +699,7 @@ class ModListPanel(ctk.CTkFrame):
         self._canvas.bind("<B1-Motion>",             self._on_mouse_drag)
         self._canvas.bind("<ButtonRelease-1>",       self._on_mouse_release)
         self._canvas.bind("<ButtonRelease-3>", self._on_right_click)
-        self._canvas.bind("<Shift-ButtonRelease-2>", self._on_shift_middle_click)
+        self._canvas.bind("<ButtonRelease-2>", self._on_middle_click)
         self._canvas.bind("<Motion>",         self._on_mouse_motion)
         self._canvas.bind("<Leave>",          self._on_mouse_leave)
 
@@ -3325,6 +3325,10 @@ class ModListPanel(ctk.CTkFrame):
             self._drag_scroll_after = None
 
     def _on_mouse_press(self, event):
+        try:
+            self.winfo_toplevel()._last_list_panel = "mod"
+        except Exception:
+            pass
         if not self._entries:
             return
         # Cancel any previous pending drag
@@ -5763,8 +5767,8 @@ class ModListPanel(ctk.CTkFrame):
         except Exception as e:
             self._log(f"Could not open folder: {e}")
 
-    def _on_shift_middle_click(self, event) -> None:
-        """Shift+middle-click: open the hovered mod's Nexus page in the background."""
+    def _on_middle_click(self, event) -> None:
+        """Middle-click: open the hovered mod's Nexus page in the browser."""
         if not self._entries or self._modlist_path is None:
             return
         cy = self._event_canvas_y(event)

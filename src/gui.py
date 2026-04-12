@@ -61,6 +61,7 @@ from Utils.filemap import OVERWRITE_NAME as _OVERWRITE_NAME
 from gui.plugin_panel import PluginPanel
 from gui.top_bar import TopBar
 from gui.status_bar import StatusBar
+from gui.shortcuts import register_shortcuts
 from gui.install_mod import install_mod_from_archive, fomod_dialog_active
 from gui.mod_name_utils import _suggest_mod_names
 from gui.version_check import (
@@ -312,22 +313,40 @@ class App(ctk.CTk):
 
         # Global click handler: defocus text entry widgets when clicking
         # outside of them, so search bars etc. don't stay focused.
-        self.bind_all("<Button-1>", self._defocus_on_outside_click, add="+")
+        # Bind on both Press and Release — Press is needed so focus moves
+        # before the click is processed; Release is a fallback in case a
+        # widget returns "break" from its ButtonPress binding.
+        self.bind_all("<ButtonPress-1>", self._defocus_on_outside_click, add="+")
+        self.bind_all("<ButtonRelease-1>", self._defocus_on_outside_click, add="+")
+
+        # Global keyboard shortcuts (F2 rename, Ctrl+D deploy, Ctrl+R restore,
+        # Up/Down reorder selection).
+        register_shortcuts(self)
 
     # -- Focus management ---------------------------------------------------
+    _TEXT_INPUT_CLASSES = (
+        "Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox",
+    )
+
     def _defocus_on_outside_click(self, event: tk.Event) -> None:
         """Move focus away from Entry/Text widgets when the user clicks
-        somewhere that isn't itself a text input widget."""
+        somewhere that isn't itself a text input widget.
+
+        Uses <ButtonPress-1> on the root via bindtag "all" — runs AFTER
+        widget/class bindings, so widgets that return "break" will prevent
+        this from firing on them. We work around that by also re-binding
+        on each new Toplevel if needed. We force focus to the root window
+        (which always succeeds) so the Entry loses focus unconditionally.
+        """
         w = event.widget
-        # If the click landed on a text-entry-like widget, leave focus alone.
         try:
             cls = w.winfo_class() if hasattr(w, "winfo_class") else ""
         except Exception:
+            cls = ""
+        # If the click landed on a text-entry-like widget, leave focus alone.
+        if cls in self._TEXT_INPUT_CLASSES:
             return
-        if cls in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox",
-                   "CTkEntry", "Listbox", "TListbox"):
-            return
-        # Check current focus — only act if something text-ish is focused.
+        # Only act if a text input currently has focus (cheap check).
         try:
             focused = self.focus_get()
         except Exception:
@@ -338,17 +357,18 @@ class App(ctk.CTk):
             fcls = focused.winfo_class()
         except Exception:
             return
-        if fcls in ("Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox",
-                    "CTkEntry"):
-            # Shift focus to the clicked widget if it can take focus,
-            # otherwise to the root window.
+        if fcls not in self._TEXT_INPUT_CLASSES:
+            return
+        # Force focus onto the toplevel containing the click — this always
+        # succeeds and reliably removes focus from the Entry on Wayland/X11.
+        try:
+            top = w.winfo_toplevel()
+            top.focus_set()
+        except Exception:
             try:
-                w.focus_set()
+                self.focus_set()
             except Exception:
-                try:
-                    self.focus_set()
-                except Exception:
-                    pass
+                pass
 
     # -- Splash screen ------------------------------------------------------
 

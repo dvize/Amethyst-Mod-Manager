@@ -3998,6 +3998,54 @@ class PluginPanel(ctk.CTkFrame):
         write_loadorder(self._plugins_path.parent / "loadorder.txt", self._plugin_entries)
 
     # ------------------------------------------------------------------
+    # Keyboard reorder
+    # ------------------------------------------------------------------
+
+    def _move_plugins_up(self) -> None:
+        """Move selected plugins up one slot (keyboard shortcut)."""
+        if not self._plugin_entries or self._plugin_filtered_indices is not None:
+            return
+        indices = sorted(self._psel_set) if self._psel_set else (
+            [self._sel_idx] if self._sel_idx >= 0 else []
+        )
+        if not indices or indices[0] <= 0:
+            return
+        if any(self._is_plugin_locked(i) or self._is_plugin_locked(i - 1) for i in indices):
+            return
+        for i in indices:
+            self._plugin_entries[i], self._plugin_entries[i - 1] = (
+                self._plugin_entries[i - 1], self._plugin_entries[i],
+            )
+        self._psel_set = {i - 1 for i in indices}
+        if self._sel_idx >= 0:
+            self._sel_idx -= 1
+        self._save_plugins()
+        self._check_all_masters()
+        self._predraw()
+
+    def _move_plugins_down(self) -> None:
+        """Move selected plugins down one slot (keyboard shortcut)."""
+        if not self._plugin_entries or self._plugin_filtered_indices is not None:
+            return
+        indices = sorted(self._psel_set, reverse=True) if self._psel_set else (
+            [self._sel_idx] if self._sel_idx >= 0 else []
+        )
+        if not indices or indices[0] >= len(self._plugin_entries) - 1:
+            return
+        if any(self._is_plugin_locked(i) or self._is_plugin_locked(i + 1) for i in indices):
+            return
+        for i in indices:
+            self._plugin_entries[i], self._plugin_entries[i + 1] = (
+                self._plugin_entries[i + 1], self._plugin_entries[i],
+            )
+        self._psel_set = {i + 1 for i in indices}
+        if self._sel_idx >= 0:
+            self._sel_idx += 1
+        self._save_plugins()
+        self._check_all_masters()
+        self._predraw()
+
+    # ------------------------------------------------------------------
     # Canvas drawing
     # ------------------------------------------------------------------
 
@@ -4567,6 +4615,10 @@ class PluginPanel(ctk.CTkFrame):
         return False
 
     def _on_pmouse_press(self, event):
+        try:
+            self.winfo_toplevel()._last_list_panel = "plugin"
+        except Exception:
+            pass
         if not self._plugin_entries:
             return
         cy = self._pevent_canvas_y(event)
