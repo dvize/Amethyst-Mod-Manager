@@ -2,7 +2,7 @@
 Global keyboard shortcuts for the Mod Manager main window.
 
 Bindings:
-    F2              Rename the selected mod (modlist panel)
+    F2              Rename the selected mod or separator (modlist panel)
     Ctrl+D          Deploy
     Ctrl+R          Restore
     Alt+Up          Move selected mods/plugins/separators up
@@ -60,12 +60,17 @@ def _rename_selected(app):
     kind, panel = _active_list_panel(app)
     if kind != "mod" or panel is None:
         return
-    # Use first selected non-separator mod
     sel = sorted(panel._sel_set) if panel._sel_set else (
         [panel._sel_idx] if panel._sel_idx >= 0 else []
     )
     for idx in sel:
-        if 0 <= idx < len(panel._entries) and not panel._entries[idx].is_separator:
+        if not (0 <= idx < len(panel._entries)):
+            continue
+        entry = panel._entries[idx]
+        if entry.is_separator:
+            panel._rename_separator(idx)
+            return
+        else:
             panel._rename_mod(idx)
             return
 
