@@ -54,41 +54,48 @@ def _fmt_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 
-class _FileChooserDialog(ctk.CTkToplevel):
-    """Modal dialog that lets the user pick which file to install
-    when a Nexus mod has multiple files in the MAIN category."""
+class _FileChooserOverlay(tk.Frame):
+    """Inline overlay that lets the user pick which file to install
+    when a Nexus mod has multiple files in the MAIN category.
+    Placed over the parent widget instead of opening a separate window,
+    which works better on Steam Deck gaming mode."""
 
     _WIDTH = 550
 
-    def __init__(self, parent, mod_name: str, files: list):
-        super().__init__(parent, fg_color=BG_DEEP)
-        self.title(f"Choose File — {mod_name}")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+    def __init__(self, parent, mod_name: str, files: list, on_pick=None):
+        """``on_pick(file_or_none)`` is called when the user picks or cancels."""
+        super().__init__(parent, bg=BG_DEEP)
+        self._on_pick = on_pick
+        self.result = None
 
-        self.result = None  # will hold the chosen NexusModFile or None
+        # Semi-transparent backdrop — absorbs clicks outside the card
+        self._backdrop = tk.Frame(parent, bg="#000000")
+        self._backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._backdrop.bind("<Button-1>", lambda e: self._dismiss(None))
+
+        # Card
+        card = tk.Frame(self._backdrop, bg=BG_DEEP, bd=1, relief="solid",
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.place(relx=0.5, rely=0.5, anchor="center", width=self._WIDTH)
 
         pad = 14
 
         # Header
         tk.Label(
-            self, text=f"'{mod_name}' has multiple main files.",
+            card, text=f"'{mod_name}' has multiple main files.",
             font=FONT_BOLD, fg=TEXT_MAIN, bg=BG_DEEP, anchor="w",
         ).pack(fill="x", padx=pad, pady=(pad, 2))
         tk.Label(
-            self, text="Select which file to install:",
+            card, text="Select which file to install:",
             font=FONT_SMALL, fg=TEXT_DIM, bg=BG_DEEP, anchor="w",
         ).pack(fill="x", padx=pad, pady=(0, 8))
 
         # File list
-        list_frame = tk.Frame(self, bg=BORDER)
-        list_frame.pack(fill="both", padx=pad, pady=(0, 8))
+        list_frame = tk.Frame(card, bg=BORDER)
+        list_frame.pack(fill="x", padx=pad, pady=(0, 8))
 
-        # Sort newest first
         files = sorted(files, key=lambda f: -(f.uploaded_timestamp or 0))
 
-        self._rows: list[tk.Frame] = []
         for idx, f in enumerate(files):
             bg = BG_ROW if idx % 2 == 0 else BG_ROW_ALT
             row = tk.Frame(list_frame, bg=bg, cursor="hand2")
@@ -112,7 +119,6 @@ class _FileChooserDialog(ctk.CTkToplevel):
                     font=FONT_SMALL, fg=TEXT_DIM, bg=bg, anchor="e",
                 ).pack(side="right", padx=(6, 12), pady=(4, 0))
 
-            # Hover effect + click binding
             def _enter(e, r=row):
                 for w in (r, *r.winfo_children()):
                     w.configure(bg=BG_HOVER_ROW)
@@ -122,54 +128,33 @@ class _FileChooserDialog(ctk.CTkToplevel):
                     w.configure(bg=b)
 
             def _click(e, fi=f):
-                self.result = fi
-                self._on_cancel()
+                self._dismiss(fi)
 
             for widget in (row, *row.winfo_children()):
                 widget.bind("<Enter>", _enter)
                 widget.bind("<Leave>", _leave)
                 widget.bind("<Button-1>", _click)
 
-            self._rows.append(row)
-
         # Cancel button
         ctk.CTkButton(
-            self, text="Cancel", width=100, height=30,
+            card, text="Cancel", width=100, height=30,
             fg_color="#555", hover_color="#666",
             text_color="white", font=FONT_BOLD,
-            command=self._on_cancel,
+            command=lambda: self._dismiss(None),
         ).pack(pady=(0, pad))
 
-        # Center and show
-        self.after(10, self._center_and_grab)
-
-    def _center_and_grab(self):
-        self.update_idletasks()
-        parent = self.master
+    def _dismiss(self, chosen):
+        self.result = chosen
         try:
-            top = parent.winfo_toplevel()
-            top.update_idletasks()
-            px = top.winfo_rootx()
-            py = top.winfo_rooty()
-            pw = top.winfo_width()
-            ph = top.winfo_height()
-            w = self.winfo_reqwidth()
-            h = self.winfo_reqheight()
-            self.geometry(f"{max(w, self._WIDTH)}x{h}+{px + (pw - max(w, self._WIDTH)) // 2}+{py + (ph - h) // 2}")
+            self._backdrop.destroy()
         except Exception:
             pass
         try:
-            self.grab_set()
-            self.focus_set()
+            self.destroy()
         except Exception:
             pass
-
-    def _on_cancel(self):
-        try:
-            self.grab_release()
-        except Exception:
-            pass
-        self.destroy()
+        if self._on_pick:
+            self._on_pick(chosen)
 
 
 def install_nexus_mod_from_entry(app, api, game, mod_panel, log_fn, entry,
@@ -238,10 +223,13 @@ def install_nexus_mod_from_entry(app, api, game, mod_panel, log_fn, entry,
                 def _show_chooser():
                     if mod_panel:
                         mod_panel.hide_download_progress(cancel=cancel_ev)
-                    dlg = _FileChooserDialog(app, mod_name, main_files)
-                    dlg.wait_window()
-                    chosen[0] = dlg.result
-                    pick_event.set()
+
+                    def _on_pick(result):
+                        chosen[0] = result
+                        pick_event.set()
+
+                    _FileChooserOverlay(mod_panel or app, mod_name,
+                                        main_files, on_pick=_on_pick)
 
                 app.after(0, _show_chooser)
                 pick_event.wait()

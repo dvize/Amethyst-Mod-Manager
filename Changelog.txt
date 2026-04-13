@@ -1,5 +1,8 @@
 - v1.2.3
 - Updated Libloot to 0.29.3
+- Added Palworld
+- Added My Summer Car
+- Added a system to allow creation of plugins/wizard tools as external scripts
 - F2 Keybind can now rename separators
 - Added a check updates right click option for mods in the modlist panel.
 - Slightly optimised extraction logic
@@ -10,17 +13,11 @@
 - Marker strips now work correctly when selecting multiple mods with conflicts.
 - Several UI scaling tweaks including missing text not being scaled
 - Installing a mod via the nexus panel will now display all versions in the main category to choose from.
-- Added several keybinds, Some added in the last update.
-    * F2 - Rename selected mod
-    * CTRL + D - Deploy
-    * Middle mouse button - Open mod on nexus
-    * Alt + Up/Down Arrow - Move mod/plugin up/down
-    * Delete - remove mod
-    * Home/End - Move to top/bottom of modlist/plugins panel
-    * Shift + F - Open modlist/plugins filters menu
-    * Shift + Mousewheel - Speeds up scrolling speed
-    * Shift + E - Expand Collapse separators
-    
+- Added several keybinds, Some added in the last update. See Wiki for a list of keybinds.
+- Fixed custom routing rules for folders not working as intended when a multi level path was defined
+- Copying multiple mods to another profile now preserves load order of the copied mods
+
+
 - v1.2.2
 - Collection installs can now check the downloads folder or any added locations set in the downloads tab for any aleady downloaded mods
 - Plugins in the plugins panel can now be marked as light (ESL)

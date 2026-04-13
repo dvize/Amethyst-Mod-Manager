@@ -1223,6 +1223,12 @@ class App(ctk.CTk):
                     e = self._mod_panel._entries[si]
                     if not e.is_separator:
                         all_mod_names.add(e.name)
+                    elif e.name not in (_OVERWRITE_NAME,):
+                        # Separator selected — include all child mods
+                        for ci in self._mod_panel._sep_block_range(si):
+                            child = self._mod_panel._entries[ci]
+                            if not child.is_separator:
+                                all_mod_names.add(child.name)
             self._plugin_panel.set_highlighted_plugins(
                 mod_name if mod_name and mod_name != _OVERWRITE_NAME else None,
                 mod_names=all_mod_names if all_mod_names else None,

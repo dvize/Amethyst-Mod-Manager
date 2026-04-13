@@ -5351,9 +5351,17 @@ class ModListPanel(ctk.CTkFrame):
                 title="Mods Exist",
             )
 
+        # Build ordered list of (name, enabled) from source entries
+        _entry_map = {e.name: e for e in self._entries}
+        _ordered_mods = [
+            (mn, _entry_map[mn].enabled if mn in _entry_map else True)
+            for mn in mod_names
+        ]
+
         def _do_copy():
             copied, skipped = 0, 0
-            for mod_name in mod_names:
+            copied_mods: list[tuple[str, bool]] = []
+            for mod_name, enabled in _ordered_mods:
                 src_folder = self._staging_root / mod_name
                 if not src_folder.is_dir():
                     skipped += 1
@@ -5370,10 +5378,29 @@ class ModListPanel(ctk.CTkFrame):
                         shutil.rmtree(dest_folder, onexc=_force_remove)
                     shutil.copytree(str(src_folder), str(dest_folder))
                     copied += 1
+                    copied_mods.append((mod_name, enabled))
                 except Exception as exc:
                     self.after(0, lambda e=exc, n=mod_name: show_error(
                         "Copy Failed", f"Failed to copy '{n}':\n{e}", parent=self.winfo_toplevel()))
                     return
+
+            # Insert copied mods into the target profile's modlist,
+            # preserving their relative order from the source profile.
+            if copied_mods:
+                target_modlist = target_profile_dir / "modlist.txt"
+                from Utils.modlist import read_modlist, write_modlist, ModEntry
+                entries = read_modlist(target_modlist) if target_modlist.exists() else []
+                existing_names = {e.name for e in entries}
+                # Prepend in order (low index = high priority, matching source)
+                new_entries = [
+                    ModEntry(name=mn, enabled=en, locked=False)
+                    for mn, en in copied_mods
+                    if mn not in existing_names
+                ]
+                if new_entries:
+                    entries = new_entries + entries
+                    write_modlist(target_modlist, entries)
+
             self.after(0, lambda c=copied, s=skipped: self._log(
                 f"Copied {c} mod(s) → profile '{target_profile}'"
                 + (f" ({s} skipped)" if s else "")))
@@ -7333,6 +7360,12 @@ class ModListPanel(ctk.CTkFrame):
                 continue
             e = self._entries[si]
             if e.is_separator and e.name != OVERWRITE_NAME:
+                # Collect conflicts from all mods under this separator
+                for ci in self._sep_block_range(si):
+                    child = self._entries[ci]
+                    if not child.is_separator:
+                        all_higher.update(self._overrides.get(child.name, set()))
+                        all_lower.update(self._overridden_by.get(child.name, set()))
                 continue
             all_higher.update(self._overrides.get(e.name, set()))
             all_lower.update(self._overridden_by.get(e.name, set()))
