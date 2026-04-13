@@ -242,8 +242,14 @@ class UE5Game(BaseGame):
         basename = parts[-1].lower() if parts else ""
         for rule in self.ue5_routing_rules:
             if rule.prefix and norm.lower().startswith(rule.prefix.lower() + "/"):
+                # If the rule also has an extension filter, only match when
+                # the file's extension is in the list.
+                if rule.extensions and ext not in rule.extensions:
+                    continue
                 return rule
             if rule.folder and first_seg == rule.folder.lower():
+                if rule.extensions and ext not in rule.extensions:
+                    continue
                 return rule
             if rule.filenames and basename in {f.lower() for f in rule.filenames}:
                 return rule

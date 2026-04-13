@@ -732,7 +732,60 @@ class Ue5CustomGame(UE5Game):
 
     @property
     def ue5_routing_rules(self) -> list[UE5Rule]:
-        rules = [
+        # User-defined custom routing rules go FIRST so they take priority
+        # over the built-in UE5 defaults.  Each CustomRule may have multiple
+        # folders, so expand into one UE5Rule per folder.  Extension-only
+        # rules produce a single UE5Rule with no folder.
+        rules: list[UE5Rule] = []
+        for cr in self.custom_routing_rules:
+            if cr.folders:
+                for folder in cr.folders:
+                    norm_folder = folder.replace("\\", "/").strip("/")
+                    exts = list(cr.extensions)
+                    fnames = list(cr.filenames)
+                    if "/" in norm_folder:
+                        # Multi-segment: primary prefix rule, strip the
+                        # full prefix so content is placed flat under dest.
+                        rules.append(UE5Rule(
+                            dest=cr.dest, extensions=exts,
+                            prefix=norm_folder, filenames=fnames,
+                            strip=[norm_folder],
+                        ))
+                    else:
+                        # Single-segment: match as first path segment.
+                        # No strip — the folder name is preserved under
+                        # dest.
+                        rules.append(UE5Rule(
+                            dest=cr.dest, extensions=exts,
+                            folder=norm_folder, filenames=fnames,
+                        ))
+                    # Generate extra prefix rules for common UE5 packaging
+                    # prefixes above the target folder.
+                    ue5_prefixes = ["Paks", "Content/Paks", "Content"]
+                    for ue_pfx in ue5_prefixes:
+                        full = f"{ue_pfx}/{norm_folder}"
+                        if full.lower() == norm_folder.lower():
+                            continue
+                        rules.append(UE5Rule(
+                            dest=cr.dest, extensions=exts,
+                            prefix=full, filenames=fnames,
+                            strip=[ue_pfx],
+                        ))
+            elif cr.filenames:
+                rules.append(UE5Rule(
+                    dest=cr.dest,
+                    extensions=list(cr.extensions),
+                    filenames=list(cr.filenames),
+                ))
+            else:
+                rules.append(UE5Rule(
+                    dest=cr.dest,
+                    extensions=list(cr.extensions),
+                ))
+
+        # Built-in UE5 defaults follow — they act as fallbacks when no
+        # custom rule matched.
+        rules.extend([
             # Pak / streaming files → Content/Paks/~mods/  (checked before the
             # generic folder="content" catch-all so mods shipped as
             # Content/Paks/… are routed here rather than to the game root as-is)
@@ -795,30 +848,7 @@ class Ue5CustomGame(UE5Game):
                 extensions=[".bk2"],
                 strip=["Content/Movies"],
             ),
-        ]
-        # Append user-defined custom routing rules (from the UI / JSON definition).
-        # Each CustomRule may have multiple folders, so expand into one UE5Rule per
-        # folder.  Extension-only rules produce a single UE5Rule with no folder.
-        for cr in self.custom_routing_rules:
-            if cr.folders:
-                for folder in cr.folders:
-                    rules.append(UE5Rule(
-                        dest=cr.dest,
-                        extensions=list(cr.extensions),
-                        folder=folder,
-                        filenames=list(cr.filenames),
-                    ))
-            elif cr.filenames:
-                rules.append(UE5Rule(
-                    dest=cr.dest,
-                    extensions=list(cr.extensions),
-                    filenames=list(cr.filenames),
-                ))
-            else:
-                rules.append(UE5Rule(
-                    dest=cr.dest,
-                    extensions=list(cr.extensions),
-                ))
+        ])
         return rules
 
     @property
