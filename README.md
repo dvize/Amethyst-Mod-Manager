@@ -71,8 +71,8 @@ Download the .flatpak from [releases](https://github.com/ChrisDKN/Amethyst-Mod-M
 <tr><td>Hogwarts Legacy</td><td></td><td>Monster Hunter Rise</td><td></td></tr>
 <tr><td>Marvel Rivals</td><td></td><td>Monster Hunter Wilds</td><td></td></tr>
 <tr><td>Expedition 33</td><td></td><td>Stalker 2</td><td></td></tr>
-<tr><td>Subnautica</td><td></td><td></td><td></td></tr>
-<tr><td>Subnautica Below Zero</td><td></td><td></td><td></td></tr>
+<tr><td>Subnautica</td><td></td><td>Palworld</td><td></td></tr>
+<tr><td>Subnautica Below Zero</td><td></td><td>My Summer Car</td><td></td></tr>
 </table>
 
 - Amethyst has the ability to define custom games and is not limited to this list. See the Wiki for the guide
