@@ -45,7 +45,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libarchive-dev bsdtar wget libfuse2 \
+            libarchive-dev libarchive-tools wget libfuse2 \
             python3-gi gir1.2-gtk-3.0 python3-cairo
 
       - name: Build AppImage
@@ -72,8 +72,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
-          sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y --noninteractive flathub org.gnome.Platform//49 org.gnome.Sdk//49
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.gnome.Platform//49 org.gnome.Sdk//49
 
       - name: Build Flatpak bundle
         run: |
