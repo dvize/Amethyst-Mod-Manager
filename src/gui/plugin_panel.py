@@ -34,6 +34,8 @@ from gui.theme import (
     TEXT_MAIN,
     TEXT_OK,
     TEXT_SEP,
+    conflict_higher,
+    conflict_lower,
     plugin_mod,
     scaled,
     _ICONS_DIR,
@@ -137,6 +139,15 @@ class PluginPanel(ctk.CTkFrame):
         self._plugin_mod_map: dict[str, str] = {}  # plugin name → staging mod folder name
         self._highlighted_plugins: set[str] = set()  # plugin names highlighted when their mod is selected
         self._master_highlights: set[str] = set()    # master plugin names for the currently selected plugin
+        # Plugins of mods in a BSA conflict with the currently-selected mod.
+        # Semantics mirror the modlist panel's row colouring:
+        #   _bsa_conflict_higher_plugins — plugins whose mod LOSES to the
+        #       selection (the selection is "higher") → paint green.
+        #   _bsa_conflict_lower_plugins  — plugins whose mod BEATS the
+        #       selection (the selection is "lower") → paint red.
+        # Plugin names are stored lowercase.
+        self._bsa_conflict_higher_plugins: set[str] = set()
+        self._bsa_conflict_lower_plugins: set[str] = set()
         self._plugin_paths: dict[str, "Path"] = {}   # plugin name.lower() → path on disk
         self._on_plugin_selected_cb = None  # callable(mod_name: str | None)
         self._on_mod_selected_cb = None     # callable() — notify mod panel a plugin was selected
@@ -243,6 +254,21 @@ class PluginPanel(ctk.CTkFrame):
         self._mod_files_profile_dir: Path | None = None  # profile dir for excluded_mod_files in profile_state.json
         self._mod_files_excluded: dict[str, set[str]] = {}  # mod_name → set of excluded rel_keys
         self._mod_files_on_change: callable | None = None  # called when exclusions change
+        self._plugin_order_on_change: callable | None = None  # called after plugin load order changes
+
+        # Archive tab state (BSA contents viewer, Bethesda-only)
+        self._archive_mod_name: str | None = None
+        self._bsa_index_path: Path | None = None
+        self._arc_tree: ttk.Treeview | None = None
+        self._arc_tree_expanded: bool = False
+        self._arc_expand_btn: tk.Button | None = None
+        self._archive_label: tk.Label | None = None
+        self._bsa_conflict_cache: tuple | None = None
+
+        # "Show only conflicts" filter state (per-tab)
+        self._mf_only_conflicts_var: tk.BooleanVar | None = None
+        self._data_only_conflicts_var: tk.BooleanVar | None = None
+        self._arc_only_conflicts_var: tk.BooleanVar | None = None
 
         self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=1)
@@ -321,12 +347,15 @@ class PluginPanel(ctk.CTkFrame):
         # filemap change, so they are only rebuilt when their tab is selected.
         self._data_tab_dirty: bool = False
         self._ini_files_tab_dirty: bool = False
+        self._archive_tab_dirty: bool = False
 
         self._build_plugins_tab()
         self._build_mod_files_tab()
         self._build_ini_files_tab()
         self._build_data_tab()
         self._build_downloads_tab()
+        # Archive tab is gated on game.archive_extensions — added lazily by
+        # _update_archive_tab_visibility() when a BSA-using game loads.
 
     # ------------------------------------------------------------------
     # Tab change handler — lazy refresh for expensive tabs
@@ -341,6 +370,9 @@ class PluginPanel(ctk.CTkFrame):
         elif current == "Ini Files" and self._ini_files_tab_dirty:
             self._ini_files_tab_dirty = False
             self._refresh_ini_files_tab()
+        elif current == "Archive" and self._archive_tab_dirty:
+            self._archive_tab_dirty = False
+            self._render_archive_tree(self._archive_mod_name)
 
     # ------------------------------------------------------------------
     # Executable toolbar — scan / run
@@ -1586,6 +1618,20 @@ class PluginPanel(ctk.CTkFrame):
         )
         self._mf_expand_btn.pack(side="right", padx=(0, 8), pady=2)
 
+        self._mf_only_conflicts_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            toolbar, text="Show only conflicts",
+            variable=self._mf_only_conflicts_var,
+            width=140, height=20,
+            checkbox_width=16, checkbox_height=16,
+            font=("Cantarell", _theme.FS10),
+            text_color=TEXT_MAIN,
+            fg_color=ACCENT, hover_color=ACCENT_HOV,
+            border_color=BORDER, checkmark_color="white",
+            bg_color=BG_HEADER,
+            command=lambda: self.show_mod_files(self._mod_files_mod_name),
+        ).pack(side="right", padx=(0, 8), pady=2)
+
         self._mod_files_label = tk.Label(
             toolbar, text="(no mod selected)",
             bg=BG_HEADER, fg=TEXT_DIM,
@@ -2222,15 +2268,6 @@ class PluginPanel(ctk.CTkFrame):
         self._mf_tree.tag_configure("conflict_win",  foreground="#4caf50")
         self._mf_tree.tag_configure("conflict_lose", foreground="#f44336")
 
-        # Build tree structure
-        tree_dict: dict = {}
-        for rel_key, rel_str in sorted(files.items()):
-            parts = rel_str.replace("\\", "/").split("/")
-            node = tree_dict
-            for part in parts[:-1]:
-                node = node.setdefault(part, {})
-            node.setdefault("__files__", []).append((parts[-1], rel_key, rel_str))
-
         def _conflict_tag(rel_key: str) -> str | None:
             if rel_key not in contested_keys:
                 return None
@@ -2238,6 +2275,25 @@ class PluginPanel(ctk.CTkFrame):
             if winner is None:
                 return None
             return "conflict_win" if winner == mod_name else "conflict_lose"
+
+        only_conflicts = bool(
+            self._mf_only_conflicts_var and self._mf_only_conflicts_var.get()
+        )
+
+        # Build tree structure
+        tree_dict: dict = {}
+        for rel_key, rel_str in sorted(files.items()):
+            if only_conflicts and _conflict_tag(rel_key) is None:
+                continue
+            parts = rel_str.replace("\\", "/").split("/")
+            node = tree_dict
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node.setdefault("__files__", []).append((parts[-1], rel_key, rel_str))
+
+        if only_conflicts and not tree_dict:
+            self._mf_tree.insert("", "end", text="  (no conflicts)", tags=("dim",))
+            return
 
         def insert_node(parent_id, name, subtree, depth=0):
             iid = self._mf_tree.insert(
@@ -2280,6 +2336,378 @@ class PluginPanel(ctk.CTkFrame):
             self._mf_iid_to_key[leaf_iid] = rel_key
             self._mf_iid_to_relstr[leaf_iid] = rel_str
 
+    # ------------------------------------------------------------------
+    # Archive tab — BSA contents viewer (Bethesda games only)
+    # ------------------------------------------------------------------
+
+    def _update_archive_tab_visibility(self):
+        """Add/remove the Archive tab to match the current game's archive support."""
+        want = bool(self._game and getattr(self._game, "archive_extensions", None))
+        try:
+            present = "Archive" in self._tabs._name_list
+        except Exception:
+            present = False
+        if want and not present:
+            try:
+                self._tabs.insert(1, "Archive")
+            except Exception:
+                self._tabs.add("Archive")
+            self._build_archive_tab()
+            self._archive_tab_dirty = False
+            if self._archive_mod_name is not None:
+                self._render_archive_tree(self._archive_mod_name)
+        elif not want and present:
+            try:
+                self._tabs.delete("Archive")
+            except Exception:
+                pass
+            self._arc_tree = None
+            self._archive_label = None
+            self._arc_expand_btn = None
+
+    def _build_archive_tab(self):
+        tab = self._tabs.tab("Archive")
+        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_columnconfigure(1, weight=0)
+
+        toolbar = tk.Frame(tab, bg=BG_HEADER, height=scaled(28), highlightthickness=0)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        toolbar.grid_propagate(False)
+
+        self._arc_tree_expanded = False
+        self._arc_expand_btn = tk.Button(
+            toolbar, text="⊞ Expand All",
+            bg=BG_PANEL, fg=TEXT_MAIN, activebackground=BG_HOVER,
+            relief="flat", font=(_theme.FONT_FAMILY, _theme.FS10),
+            bd=0, cursor="hand2", highlightthickness=0,
+            command=self._toggle_arc_tree_expand,
+        )
+        self._arc_expand_btn.pack(side="right", padx=(0, 8), pady=2)
+
+        if self._arc_only_conflicts_var is None:
+            self._arc_only_conflicts_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            toolbar, text="Show only conflicts",
+            variable=self._arc_only_conflicts_var,
+            width=140, height=20,
+            checkbox_width=16, checkbox_height=16,
+            font=("Cantarell", _theme.FS10),
+            text_color=TEXT_MAIN,
+            fg_color=ACCENT, hover_color=ACCENT_HOV,
+            border_color=BORDER, checkmark_color="white",
+            bg_color=BG_HEADER,
+            command=lambda: self._render_archive_tree(self._archive_mod_name),
+        ).pack(side="right", padx=(0, 8), pady=2)
+
+        self._archive_label = tk.Label(
+            toolbar, text="(no mod selected)",
+            bg=BG_HEADER, fg=TEXT_DIM,
+            font=(_theme.FONT_FAMILY, _theme.FS10),
+            anchor="w",
+        )
+        self._archive_label.pack(side="left", padx=8, pady=4, fill="x", expand=True)
+
+        style = ttk.Style()
+        _bg = BG_DEEP
+        _fg = TEXT_MAIN
+        style.configure("Archive.Treeview",
+            background=_bg, foreground=_fg,
+            fieldbackground=_bg, borderwidth=0,
+            rowheight=scaled(22), font=("Cantarell", _theme.FS10),
+            focuscolor=_bg,
+        )
+        style.map("Archive.Treeview",
+            background=[("selected", _bg), ("focus", _bg)],
+            foreground=[("selected", ACCENT)],
+        )
+
+        self._arc_tree = ttk.Treeview(
+            tab,
+            style="Archive.Treeview",
+            selectmode="browse",
+            show="tree",
+        )
+        self._arc_tree.column("#0", stretch=True, minwidth=150)
+
+        _sb_bg = "#383838"
+        _sb_trough = "#1a1a1a"
+        _sb_active = "#0078d4"
+        vsb = tk.Scrollbar(
+            tab, orient="vertical", command=self._arc_tree.yview,
+            bg=_sb_bg, troughcolor=_sb_trough, activebackground=_sb_active,
+            highlightthickness=0, bd=0,
+        )
+        self._arc_tree.configure(yscrollcommand=vsb.set)
+        self._arc_tree.grid(row=1, column=0, sticky="nsew")
+        vsb.grid(row=1, column=1, sticky="ns")
+
+        self._arc_tree.bind("<Button-4>", lambda e: self._arc_tree.yview_scroll(-3, "units"))
+        self._arc_tree.bind("<Button-5>", lambda e: self._arc_tree.yview_scroll(3, "units"))
+
+        self._arc_tree.tag_configure("bsa", foreground="#d8a657")
+        self._arc_tree.tag_configure("folder", foreground="#56b6c2")
+        self._arc_tree.tag_configure("conflict_win", foreground="#4caf50")
+        self._arc_tree.tag_configure("conflict_lose", foreground="#f44336")
+        self._arc_tree.tag_configure("dim", foreground=TEXT_DIM)
+
+    def _toggle_arc_tree_expand(self):
+        if self._arc_tree is None:
+            return
+        self._arc_tree_expanded = not self._arc_tree_expanded
+        open_state = self._arc_tree_expanded
+
+        def _set_all(item):
+            children = self._arc_tree.get_children(item)
+            if children:
+                self._arc_tree.item(item, open=open_state)
+                for child in children:
+                    _set_all(child)
+
+        for top in self._arc_tree.get_children(""):
+            _set_all(top)
+        if self._arc_expand_btn is not None:
+            self._arc_expand_btn.configure(
+                text="⊟ Collapse All" if self._arc_tree_expanded else "⊞ Expand All"
+            )
+
+    def _bsa_owning_plugin_set(self, mod_names: set[str]) -> set[str]:
+        """Return {plugin_filename_lower} for plugins in mod_names that own
+        a BSA via basename match (exact, or '<stem> - <anything>').
+
+        Plugins without a matching BSA don't load archive contents and so
+        aren't participants in a BSA conflict.
+        """
+        if not mod_names:
+            return set()
+        bsa_path = self._bsa_index_path
+        if bsa_path is None or not bsa_path.is_file():
+            return set()
+        from Utils.bsa_filemap import read_bsa_index, _bsa_owning_plugin
+        bsa_index = read_bsa_index(bsa_path) or {}
+        result: set[str] = set()
+        for mod in mod_names:
+            archives = bsa_index.get(mod)
+            if not archives:
+                continue
+            # Plugin basenames (lowercase, no ext) owned by this mod.
+            mod_plugins: set[str] = set()
+            for plugin_name, pmod in self._plugin_mod_map.items():
+                if pmod != mod:
+                    continue
+                stem = plugin_name.rsplit(".", 1)[0].lower()
+                mod_plugins.add(stem)
+            if not mod_plugins:
+                continue
+            # For each BSA, find the plugin that owns it and add that plugin
+            # (with its original extension) to the result.
+            for bsa_name, _mt, _paths in archives:
+                bsa_stem = bsa_name.rsplit(".", 1)[0]
+                owning_stem = _bsa_owning_plugin(bsa_stem, mod_plugins)
+                if owning_stem is None:
+                    continue
+                for plugin_name, pmod in self._plugin_mod_map.items():
+                    if pmod == mod and plugin_name.rsplit(".", 1)[0].lower() == owning_stem:
+                        result.add(plugin_name.lower())
+        return result
+
+    def _get_bsa_conflict_cache(self):
+        """Return (bsa_winner, loose_winner, contested) for the current profile.
+
+        Cached on (bsa_index mtime, filemap mtime, modlist mtime) so repeated
+        mod selections don't re-walk the index.
+        """
+        bsa_path = self._bsa_index_path
+        fm_str = self._get_filemap_path()
+        fm_path = Path(fm_str) if fm_str else None
+        profile_dir = getattr(self._game, "_active_profile_dir", None)
+        modlist_path = (profile_dir / "modlist.txt") if profile_dir else None
+
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime if p and p.is_file() else 0.0
+            except OSError:
+                return 0.0
+
+        # Include plugin load order in the cache signature so reorders
+        # invalidate this cache (BSA winners depend on plugin load order).
+        plugin_order_sig = tuple(
+            (e.name, e.enabled) for e in getattr(self, "_plugin_entries", [])
+        )
+        sig = (
+            str(bsa_path) if bsa_path else None,
+            _mtime(bsa_path) if bsa_path else 0.0,
+            _mtime(fm_path) if fm_path else 0.0,
+            _mtime(modlist_path) if modlist_path else 0.0,
+            plugin_order_sig,
+        )
+        cached = self._bsa_conflict_cache
+        if cached is not None and cached[0] == sig:
+            return cached[1], cached[2], cached[3]
+
+        from Utils.bsa_filemap import read_bsa_index, _compute_bsa_load_order
+        from Utils.modlist import read_modlist
+
+        bsa_index = read_bsa_index(bsa_path) if bsa_path else None
+        bsa_winner: dict[str, str] = {}
+        path_counts: dict[str, int] = {}
+        if bsa_index and modlist_path and modlist_path.is_file():
+            entries_ml = read_modlist(modlist_path)
+            enabled = [e for e in entries_ml if not e.is_separator and e.enabled]
+            priority_low_to_high = [e.name for e in reversed(enabled)]
+            plugin_order = [e.name for e in getattr(self, "_plugin_entries", []) if e.enabled]
+            plugin_exts = frozenset(
+                e.lower() for e in getattr(self, "_plugin_extensions", []) or []
+            )
+            loose_index_path = (
+                Path(fm_str).parent / "modindex.bin"
+                if fm_str else None
+            )
+            scan_units = _compute_bsa_load_order(
+                bsa_index, priority_low_to_high,
+                plugin_order or None, plugin_exts or None,
+                loose_index_path,
+            )
+            # path_counts tracks how many distinct mods ship a given BSA path
+            # (for "contested" display). A mod with multiple BSAs appears as
+            # multiple scan units, and two BSAs in the same mod overlapping
+            # on a path must only count once — hence the per-mod seen set.
+            seen_by_mod: dict[str, set[str]] = {}
+            for name, mod_archives in scan_units:
+                if not mod_archives:
+                    continue
+                sset = seen_by_mod.setdefault(name, set())
+                for _bsa, _mt, paths in mod_archives:
+                    for fp in paths:
+                        bsa_winner[fp] = name
+                        if fp not in sset:
+                            sset.add(fp)
+                            path_counts[fp] = path_counts.get(fp, 0) + 1
+
+        loose_winner: dict[str, str] = {}
+        if fm_path and fm_path.is_file():
+            try:
+                for line in fm_path.read_text(encoding="utf-8").splitlines():
+                    if "\t" in line:
+                        rk, mn = line.split("\t", 1)
+                        loose_winner[rk.lower()] = mn
+            except Exception:
+                pass
+
+        contested = {p for p, c in path_counts.items() if c > 1}
+        contested.update(p for p in bsa_winner if p in loose_winner)
+
+        self._bsa_conflict_cache = (sig, bsa_winner, loose_winner, contested)
+        return bsa_winner, loose_winner, contested
+
+    def show_mod_archives(self, mod_name: str | None):
+        """Populate the Archive tab for the given mod name (lazy: only renders
+        when the Archive tab is visible; otherwise flags dirty)."""
+        self._archive_mod_name = mod_name
+        if self._arc_tree is None:
+            return
+        try:
+            current = self._tabs.get()
+        except Exception:
+            current = ""
+        if current != "Archive":
+            self._archive_tab_dirty = True
+            return
+        self._archive_tab_dirty = False
+        self._render_archive_tree(mod_name)
+
+    def _render_archive_tree(self, mod_name: str | None):
+        """Actually populate the Archive treeview."""
+        if self._arc_tree is None or self._archive_label is None:
+            return
+        self._arc_tree.delete(*self._arc_tree.get_children())
+
+        if mod_name is None:
+            self._archive_label.configure(text="(no mod selected)")
+            return
+
+        bsa_path = self._bsa_index_path
+        if bsa_path is None or not bsa_path.is_file():
+            self._archive_label.configure(text="(no BSA index yet — refresh to scan)")
+            return
+
+        from Utils.bsa_filemap import read_bsa_index
+        bsa_index = read_bsa_index(bsa_path) or {}
+        my_archives = bsa_index.get(mod_name) or []
+        if not my_archives:
+            self._archive_label.configure(text=f"{mod_name} — no BSA archives")
+            return
+
+        self._archive_label.configure(text=mod_name)
+        self._arc_tree_expanded = False
+        if self._arc_expand_btn is not None:
+            self._arc_expand_btn.configure(text="⊞ Expand All")
+
+        bsa_winner, loose_winner, contested = self._get_bsa_conflict_cache()
+
+        def _conflict_tag(path: str) -> str | None:
+            if path not in contested:
+                return None
+            loose_mod = loose_winner.get(path)
+            if loose_mod is not None and loose_mod != mod_name:
+                return "conflict_lose"
+            winner = bsa_winner.get(path)
+            if winner is None:
+                return None
+            if loose_mod == mod_name:
+                return "conflict_win"
+            return "conflict_win" if winner == mod_name else "conflict_lose"
+
+        only_conflicts = bool(
+            self._arc_only_conflicts_var and self._arc_only_conflicts_var.get()
+        )
+
+        rendered_any = False
+        for bsa_name, _mt, paths in sorted(my_archives, key=lambda a: a[0].lower()):
+            # Build nested folder tree for this BSA (filtered if only_conflicts)
+            subtree: dict = {}
+            for p in paths:
+                if only_conflicts and _conflict_tag(p) is None:
+                    continue
+                parts = p.split("/")
+                node = subtree
+                for part in parts[:-1]:
+                    node = node.setdefault(part, {})
+                node.setdefault("__files__", []).append((parts[-1], p))
+
+            if only_conflicts and not subtree:
+                continue
+
+            rendered_any = True
+            bsa_iid = self._arc_tree.insert(
+                "", "end", text=bsa_name, open=False, tags=("bsa",),
+            )
+
+            def _insert(parent_iid, name, node):
+                folder_iid = self._arc_tree.insert(
+                    parent_iid, "end", text=name, open=False, tags=("folder",),
+                )
+                for child in sorted(k for k in node if k != "__files__"):
+                    _insert(folder_iid, child, node[child])
+                for fname, full_path in sorted(node.get("__files__", [])):
+                    tag = _conflict_tag(full_path)
+                    self._arc_tree.insert(
+                        folder_iid, "end", text=fname,
+                        tags=(tag,) if tag else (),
+                    )
+
+            for top in sorted(k for k in subtree if k != "__files__"):
+                _insert(bsa_iid, top, subtree[top])
+            for fname, full_path in sorted(subtree.get("__files__", [])):
+                tag = _conflict_tag(full_path)
+                self._arc_tree.insert(
+                    bsa_iid, "end", text=fname,
+                    tags=(tag,) if tag else (),
+                )
+
+        if only_conflicts and not rendered_any:
+            self._arc_tree.insert("", "end", text="  (no conflicts)", tags=("dim",))
+
     def _build_data_tab(self):
         tab = self._tabs.tab("Data")
         tab.grid_rowconfigure(1, weight=1)
@@ -2305,6 +2733,20 @@ class PluginPanel(ctk.CTkFrame):
             command=self._toggle_data_tree_expand,
         )
         self._data_expand_btn.pack(side="left", padx=(0, 8), pady=2)
+
+        self._data_only_conflicts_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            toolbar, text="Show only conflicts",
+            variable=self._data_only_conflicts_var,
+            width=140, height=20,
+            checkbox_width=16, checkbox_height=16,
+            font=("Cantarell", _theme.FS10),
+            text_color=TEXT_MAIN,
+            fg_color=ACCENT, hover_color=ACCENT_HOV,
+            border_color=BORDER, checkmark_color="white",
+            bg_color=BG_HEADER,
+            command=self._refresh_data_tab,
+        ).pack(side="left", padx=(0, 8), pady=2)
 
         self._data_tree = CTkTreeview(
             tab,
@@ -2524,14 +2966,20 @@ class PluginPanel(ctk.CTkFrame):
         self._data_tree.delete(*self._data_tree.get_children())
         contested_keys = contested_keys or set()
 
+        only_conflicts = bool(
+            self._data_only_conflicts_var and self._data_only_conflicts_var.get()
+        )
+
         tree_dict: dict = {}
         for rel_path, mod_name in entries:
+            rel_key_lower = rel_path.replace("\\", "/").lower()
+            if only_conflicts and rel_key_lower not in contested_keys:
+                continue
             parts = rel_path.replace("\\", "/").split("/")
             node = tree_dict
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
             # Store (fname, mod_name, rel_key_lower) so leaf nodes can be tagged
-            rel_key_lower = rel_path.replace("\\", "/").lower()
             node.setdefault("__files__", []).append((parts[-1], mod_name, rel_key_lower))
 
         self._data_tree.tag_configure("folder",       foreground="#56b6c2")
@@ -3106,19 +3554,19 @@ class PluginPanel(ctk.CTkFrame):
         ).pack(side="left", padx=(8, 4), pady=3)
         self._plugin_search_var = tk.StringVar()
         self._plugin_search_var.trace_add("write", self._on_plugin_search_changed)
-        _psearch_entry = tk.Entry(
+        self._plugin_search_entry = tk.Entry(
             search_bar, textvariable=self._plugin_search_var,
             bg=BG_DEEP, fg=TEXT_MAIN, insertbackground=TEXT_MAIN,
             relief="flat", font=(_theme.FONT_FAMILY, _theme.FS10),
             highlightthickness=0, highlightbackground=BG_DEEP,
         )
-        _psearch_entry.pack(side="left", padx=(0, 8), pady=3, fill="x", expand=True)
-        _psearch_entry.bind("<Escape>", lambda e: self._plugin_search_var.set(""))
+        self._plugin_search_entry.pack(side="left", padx=(0, 8), pady=3, fill="x", expand=True)
+        self._plugin_search_entry.bind("<Escape>", lambda e: self._plugin_search_var.set(""))
         def _psearch_select_all(evt):
             evt.widget.select_range(0, tk.END)
             evt.widget.icursor(tk.END)
             return "break"
-        _psearch_entry.bind("<Control-a>", _psearch_select_all)
+        self._plugin_search_entry.bind("<Control-a>", _psearch_select_all)
 
         # Userlist inline panel (hidden until triggered)
         self._userlist_panel_plugin: str = ""
@@ -3744,21 +4192,54 @@ class PluginPanel(ctk.CTkFrame):
             self._master_highlights = set()
             self._predraw()
 
-    def set_highlighted_plugins(self, mod_name: str | None, mod_names: set[str] | None = None):
+    def set_highlighted_plugins(
+        self,
+        mod_name: str | None,
+        mod_names: set[str] | None = None,
+        bsa_higher_mods: set[str] | None = None,
+        bsa_lower_mods: set[str] | None = None,
+    ):
         """Highlight plugins belonging to the given mod(s) (orange), e.g. when a mod is selected.
 
         *mod_names* — when provided, highlight plugins belonging to **any** of
         the given mods (used for multi-selection).  Falls back to *mod_name*
         for single-selection compatibility.
+        *bsa_higher_mods* / *bsa_lower_mods* — mods in a BSA conflict with the
+        selection. Their plugins get painted green (higher = selection beats
+        them) / red (lower = they beat selection), matching the modlist panel
+        row-colour convention.
         """
         names = mod_names if mod_names else ({mod_name} if mod_name else set())
         if not names:
             new_highlighted = set()
         else:
             new_highlighted = {p for p, m in self._plugin_mod_map.items() if m in names}
-        changed = new_highlighted != self._highlighted_plugins or self._master_highlights
+        # Only plugins that actually own a BSA participate in BSA conflict
+        # colouring — a standalone plugin with no matching BSA doesn't load
+        # any archive contents, so it shouldn't be painted red/green.
+        bsa_plugin_filter = self._bsa_owning_plugin_set(
+            (bsa_higher_mods or set()) | (bsa_lower_mods or set())
+        )
+        new_bsa_higher = (
+            {p for p, m in self._plugin_mod_map.items()
+             if m in bsa_higher_mods and p.lower() in bsa_plugin_filter}
+            if bsa_higher_mods else set()
+        )
+        new_bsa_lower = (
+            {p for p, m in self._plugin_mod_map.items()
+             if m in bsa_lower_mods and p.lower() in bsa_plugin_filter}
+            if bsa_lower_mods else set()
+        )
+        changed = (
+            new_highlighted != self._highlighted_plugins
+            or bool(self._master_highlights)
+            or new_bsa_higher != self._bsa_conflict_higher_plugins
+            or new_bsa_lower != self._bsa_conflict_lower_plugins
+        )
         self._highlighted_plugins = new_highlighted
         self._master_highlights = set()
+        self._bsa_conflict_higher_plugins = new_bsa_higher
+        self._bsa_conflict_lower_plugins = new_bsa_lower
         if changed:
             self._predraw()
         # Also update Ini Files tab: marker strip and row highlight
@@ -3900,6 +4381,8 @@ class PluginPanel(ctk.CTkFrame):
         self._master_highlights = set()
         self._drag_idx = -1
         self._highlighted_plugins = set()
+        self._bsa_conflict_higher_plugins = set()
+        self._bsa_conflict_lower_plugins = set()
         self._highlighted_ini_mod = None
         if hasattr(self, "_ini_marker_strip"):
             self._apply_ini_row_highlight()
@@ -4003,6 +4486,11 @@ class PluginPanel(ctk.CTkFrame):
         # correctly (e.g. Oblivion Remastered requires all plugins in plugins.txt).
         if self._plugins_include_vanilla:
             self._save_plugins()
+        elif self._plugin_order_on_change is not None:
+            # _save_plugins() fires the order-change hook; when it isn't called
+            # (non-vanilla-plugins games), still notify so BSA conflicts can
+            # recompute from the freshly-loaded plugin order.
+            self._plugin_order_on_change()
 
         self._apply_plugin_search_filter()
         self._refresh_userlist_set()
@@ -4024,6 +4512,8 @@ class PluginPanel(ctk.CTkFrame):
                 mod_entries.append(entry)
         write_plugins(self._plugins_path, mod_entries, star_prefix=self._plugins_star_prefix)
         write_loadorder(self._plugins_path.parent / "loadorder.txt", self._plugin_entries)
+        if self._plugin_order_on_change is not None:
+            self._plugin_order_on_change()
 
     # ------------------------------------------------------------------
     # Keyboard reorder
@@ -4124,12 +4614,17 @@ class PluginPanel(ctk.CTkFrame):
                 actual_idx = filtered[row] if filtered is not None else row
 
                 is_sel = (actual_idx in self._psel_set) or (actual_idx == self._drag_idx and self._drag_moved)
+                name_lower = entry.name.lower()
                 if is_sel:
                     bg = BG_SELECT
-                elif entry.name.lower() in master_names_lower:
+                elif name_lower in master_names_lower:
                     bg = "#1a5c1a"
-                elif entry.name.lower() in self._highlighted_plugins:
+                elif name_lower in self._highlighted_plugins:
                     bg = plugin_mod
+                elif name_lower in self._bsa_conflict_higher_plugins:
+                    bg = conflict_higher
+                elif name_lower in self._bsa_conflict_lower_plugins:
+                    bg = conflict_lower
                 elif actual_idx == self._phover_idx:
                     bg = BG_HOVER_ROW
                 else:
@@ -4289,7 +4784,9 @@ class PluginPanel(ctk.CTkFrame):
         entries = self._plugin_entries
         n = len(entries)
         has_any = (self._highlighted_plugins or self._master_highlights
-                   or self._missing_masters)
+                   or self._missing_masters
+                   or self._bsa_conflict_higher_plugins
+                   or self._bsa_conflict_lower_plugins)
         if not n or not has_any:
             return
         strip_h = c.winfo_height()
@@ -4304,12 +4801,17 @@ class PluginPanel(ctk.CTkFrame):
             c.create_rectangle(0, y, 4, y + 3, fill=color, outline="", tags="marker")
 
         for i, e in enumerate(entries):
+            name_lower = e.name.lower()
             if e.name in self._missing_masters:
                 _tick(i, "#c0392b")
-            elif e.name.lower() in self._highlighted_plugins:
+            elif name_lower in self._highlighted_plugins:
                 _tick(i, plugin_mod)
-            elif e.name.lower() in master_names_lower:
+            elif name_lower in master_names_lower:
                 _tick(i, "#2a8c2a")
+            elif name_lower in self._bsa_conflict_higher_plugins:
+                _tick(i, conflict_higher)
+            elif name_lower in self._bsa_conflict_lower_plugins:
+                _tick(i, conflict_lower)
 
     def _schedule_predraw(self) -> None:
         """Debounced _predraw — coalesces rapid scroll/resize events."""
@@ -4541,12 +5043,17 @@ class PluginPanel(ctk.CTkFrame):
             if self._pool_data_idx[s] == data_row:
                 entry = self._plugin_entries[data_row] if data_row < len(self._plugin_entries) else None
                 is_sel = data_row in self._psel_set
+                name_lower = entry.name.lower() if entry else ""
                 if is_sel:
                     bg = BG_SELECT
-                elif entry and entry.name.lower() in {m.lower() for m in self._master_highlights}:
+                elif entry and name_lower in {m.lower() for m in self._master_highlights}:
                     bg = "#1a5c1a"
-                elif entry and entry.name.lower() in self._highlighted_plugins:
+                elif entry and name_lower in self._highlighted_plugins:
                     bg = plugin_mod
+                elif entry and name_lower in self._bsa_conflict_higher_plugins:
+                    bg = conflict_higher
+                elif entry and name_lower in self._bsa_conflict_lower_plugins:
+                    bg = conflict_lower
                 elif data_row == self._phover_idx:
                     bg = BG_HOVER_ROW
                 else:
@@ -4720,6 +5227,8 @@ class PluginPanel(ctk.CTkFrame):
         self._drag_moved = False
         self._drag_slot = -1
         self._highlighted_plugins = set()  # clear mod→plugin highlight when selecting a plugin
+        self._bsa_conflict_higher_plugins = set()
+        self._bsa_conflict_lower_plugins = set()
         self._highlighted_ini_mod = None
         self._apply_ini_row_highlight()
         self._draw_ini_marker_strip()

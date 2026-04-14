@@ -1230,11 +1230,25 @@ class App(ctk.CTk):
                             child = self._mod_panel._entries[ci]
                             if not child.is_separator:
                                 all_mod_names.add(child.name)
+            # BSA conflict: gather the mods the selection beats (higher) and
+            # mods that beat the selection (lower), minus the selected mods
+            # themselves, so their plugins can be painted green/red.
+            bsa_higher: set[str] = set()
+            bsa_lower: set[str] = set()
+            for mn in all_mod_names or ({mod_name} if mod_name else set()):
+                bsa_higher.update(self._mod_panel._bsa_overrides.get(mn, set()))
+                bsa_lower.update(self._mod_panel._bsa_overridden_by.get(mn, set()))
+            sel_names_set = all_mod_names or ({mod_name} if mod_name else set())
+            bsa_higher -= sel_names_set
+            bsa_lower -= sel_names_set
             self._plugin_panel.set_highlighted_plugins(
                 mod_name if mod_name and mod_name != _OVERWRITE_NAME else None,
                 mod_names=all_mod_names if all_mod_names else None,
+                bsa_higher_mods=bsa_higher or None,
+                bsa_lower_mods=bsa_lower or None,
             )
             self._plugin_panel.show_mod_files(mod_name)
+            self._plugin_panel.show_mod_archives(mod_name)
             # If the missing-requirements panel is currently open and the newly
             # selected mod also has missing requirements, switch the panel to it.
             if (getattr(self, "_missing_reqs_panel", None) is not None
@@ -1281,6 +1295,11 @@ class App(ctk.CTk):
                 _exc_raw = _read_exc(_profile_dir, None)
                 self._plugin_panel._mod_files_excluded = {k: set(v) for k, v in _exc_raw.items()}
                 self._plugin_panel._mod_files_on_change = self._mod_panel._rebuild_filemap
+                self._plugin_panel._plugin_order_on_change = self._mod_panel.recompute_bsa_conflicts
+                # Archive tab — gated on game.archive_extensions
+                self._plugin_panel._bsa_index_path = _staging.parent / "bsa_index.bin"
+                self._plugin_panel._bsa_conflict_cache = None
+                self._plugin_panel._update_archive_tab_visibility()
                 self._mod_panel.load_game(initial_game, profile)
                 self._plugin_panel.refresh_exe_list()
             except (FileNotFoundError, OSError) as e:

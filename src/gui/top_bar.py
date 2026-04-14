@@ -489,7 +489,13 @@ class TopBar(ctk.CTkFrame):
                 _exc_raw = _read_exc(profile_dir, None)
                 app._plugin_panel._mod_files_excluded = {k: set(v) for k, v in _exc_raw.items()}
                 app._plugin_panel._mod_files_on_change = app._mod_panel._rebuild_filemap
+                app._plugin_panel._plugin_order_on_change = app._mod_panel.recompute_bsa_conflicts
                 app._plugin_panel.show_mod_files(None)
+                # Archive tab — gated on game.archive_extensions
+                app._plugin_panel._bsa_index_path = _staging.parent / "bsa_index.bin"
+                app._plugin_panel._bsa_conflict_cache = None
+                app._plugin_panel._update_archive_tab_visibility()
+                app._plugin_panel.show_mod_archives(None)
             try:
                 app._mod_panel.load_game(game, self._profile_var.get())
             except (FileNotFoundError, OSError) as e:

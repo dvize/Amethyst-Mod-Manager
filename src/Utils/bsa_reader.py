@@ -161,25 +161,32 @@ def _read_bsa_v104_v105(f) -> list[str]:
     if not file_name_data:
         return []
 
-    # Split on null bytes — last entry may have trailing null
-    file_names = file_name_data.split(b"\x00")
-    # Remove trailing empty string from final null
-    if file_names and file_names[-1] == b"":
+    # One-shot decode + lowercase of the entire name block, then split on NUL.
+    # BSA names are ASCII in practice; latin-1 is a safe, non-allocating
+    # superset that avoids per-name decode/allocate cycles.
+    names_text = file_name_data.decode("latin-1").lower()
+    file_names = names_text.split("\x00")
+    if file_names and file_names[-1] == "":
         file_names.pop()
 
     # Build full paths: pair file names with folder names
     result: list[str] = []
     name_idx = 0
+    total_names = len(file_names)
     for folder_idx, count in enumerate(file_records_per_folder):
         folder = folder_names[folder_idx]
-        for _ in range(count):
-            if name_idx >= len(file_names):
-                break
-            fname = file_names[name_idx].decode("utf-8", errors="replace").lower()
-            name_idx += 1
-            if folder:
-                result.append(folder + "/" + fname)
-            else:
-                result.append(fname)
+        end = name_idx + count
+        if end > total_names:
+            end = total_names
+        if folder:
+            prefix = folder + "/"
+            for i in range(name_idx, end):
+                result.append(prefix + file_names[i])
+        else:
+            for i in range(name_idx, end):
+                result.append(file_names[i])
+        name_idx = end
+        if name_idx >= total_names:
+            break
 
     return result

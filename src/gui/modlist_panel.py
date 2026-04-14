@@ -368,6 +368,12 @@ class ModListPanel(ctk.CTkFrame):
 
         self._overrides:     dict[str, set[str]] = {}  # mod beats these mods
         self._overridden_by: dict[str, set[str]] = {}  # these mods beat this mod
+        # Loose-only conflict state — kept un-merged so the BSA-only recompute
+        # path (triggered on plugin reorder) can re-fold loose↔BSA relationships
+        # without redoing the full filemap scan.
+        self._conflict_map_base:  dict[str, int]      = {}
+        self._overrides_base:     dict[str, set[str]] = {}
+        self._overridden_by_base: dict[str, set[str]] = {}
         # BSA-vs-BSA conflicts (separate pipeline, Bethesda games only)
         self._bsa_conflict_map:  dict[str, int]      = {}
         self._bsa_overrides:     dict[str, set[str]] = {}
@@ -438,6 +444,7 @@ class ModListPanel(ctk.CTkFrame):
         self._filter_has_disabled_files: bool = False
         self._filter_has_updates: bool = False
         self._filter_fomod_only: bool = False
+        self._filter_has_bsa: bool = False
         self._filter_categories: frozenset[str] = frozenset()  # when non-empty, show only these categories
         self._disabled_plugins_map: dict[str, list[str]] = {}  # mod_name → [plugin, ...]
         self._excluded_mod_files_map: dict[str, list[str]] = {}  # mod_name → [rel_key, ...]
@@ -757,7 +764,7 @@ class ModListPanel(ctk.CTkFrame):
             width=30, height=26,
             fg_color=BG_HEADER, hover_color=BG_HOVER,
             text_color=TEXT_MAIN, font=_theme.FONT_SMALL,
-            command=self._reload
+            command=self._on_refresh_clicked
         ).pack(side="left", padx=4, pady=5)
 
         ctk.CTkButton(
@@ -888,6 +895,7 @@ class ModListPanel(ctk.CTkFrame):
             ("filter_has_disabled_files",  "Show mods with disabled files"),
             ("filter_has_updates",         "Show only mods with updates"),
             ("filter_fomod_only",          "Show only FOMOD mods"),
+            ("filter_has_bsa",             "Show only mods with BSA archives"),
         ]
 
         self._fsp_vars: dict[str, tk.BooleanVar] = {}
@@ -1812,6 +1820,14 @@ class ModListPanel(ctk.CTkFrame):
         self._redraw()
         self._update_info()
 
+    def _on_refresh_clicked(self):
+        """Refresh button handler: reload and show a notification."""
+        self._reload()
+        try:
+            _show_mod_notification(self.winfo_toplevel(), "Modlist Refreshed", state="info")
+        except Exception:
+            pass
+
     def _scan_meta_flags(self):
         """Single pass over meta.ini: update, missing_reqs, endorsed, install_dates (sync)."""
         results = _scan_meta_flags_impl(self._entries, self._staging_root)
@@ -2109,6 +2125,15 @@ class ModListPanel(ctk.CTkFrame):
         n = len(vis)
         total_h = n * self.ROW_H
         row_h = self.ROW_H
+
+        # If the viewport now sits past the end of the (possibly shrunken) content
+        # — e.g. after collapse-all or a filter that hides rows — clamp the scroll
+        # position so rows remain visible instead of going blank until the user scrolls.
+        max_top = max(0, total_h - canvas_h)
+        if canvas_top > max_top:
+            c.configure(scrollregion=(0, 0, self._canvas_w, max(total_h, canvas_h)))
+            c.yview_moveto(max_top / max(total_h, canvas_h, 1))
+            canvas_top = max_top
 
         # Viewport slice: only reconfigure pool slots for visible rows.
         first_row = max(0, canvas_top // row_h)
@@ -3080,6 +3105,22 @@ class ModListPanel(ctk.CTkFrame):
                     result.append(i)
             base = result
 
+        # Step 4e3: BSA archive filter (show only mods that contain BSA/BA2 archives)
+        if self._filter_has_bsa:
+            mods_with_bsa = self._get_mods_with_bsa()
+            if mods_with_bsa:
+                result = []
+                for i in base:
+                    entry = self._entries[i]
+                    if entry.is_separator:
+                        if self._sep_block_has_bsa(i, mods_with_bsa):
+                            result.append(i)
+                    elif entry.name in mods_with_bsa:
+                        result.append(i)
+                base = result
+            else:
+                base = []
+
         # Step 4f: category filter (show only mods in selected categories)
         if self._filter_categories:
             allowed = self._filter_categories
@@ -3943,6 +3984,31 @@ class ModListPanel(ctk.CTkFrame):
         for i in self._sep_block_range(sep_idx):
             if not self._entries[i].is_separator:
                 if self._entries[i].name in self._fomod_mods:
+                    return True
+        return False
+
+    def _get_mods_with_bsa(self) -> set[str]:
+        """Return the set of mod names that contain at least one BSA/BA2 archive with files."""
+        if self._filemap_path is None:
+            return set()
+        index_path = self._filemap_path.parent / "bsa_index.bin"
+        if not index_path.is_file():
+            return set()
+        try:
+            from Utils.bsa_filemap import read_bsa_index
+            index = read_bsa_index(index_path) or {}
+        except Exception:
+            return set()
+        return {
+            name for name, archives in index.items()
+            if any(paths for _bsa, _mt, paths in archives)
+        }
+
+    def _sep_block_has_bsa(self, sep_idx: int, mods_with_bsa: set[str]) -> bool:
+        """True if this separator's block contains at least one mod with a BSA archive."""
+        for i in self._sep_block_range(sep_idx):
+            if not self._entries[i].is_separator:
+                if self._entries[i].name in mods_with_bsa:
                     return True
         return False
 
@@ -6518,6 +6584,16 @@ class ModListPanel(ctk.CTkFrame):
         _archive_exts: frozenset[str] = getattr(_captured_game, "archive_extensions", frozenset())
         bsa_index_path = (filemap_path.parent / "bsa_index.bin") if filemap_path else None
         mod_index_path = (staging_root.parent / "modindex.bin") if staging_root else None
+        # Snapshot plugin load order so the BSA conflict replay in the worker
+        # matches the engine load order used everywhere else.
+        _plugin_order_snap: list[str] = []
+        _plugin_exts_snap: frozenset[str] = frozenset()
+        _pp = getattr(self.winfo_toplevel(), "_plugin_panel", None)
+        if _pp is not None:
+            _plugin_order_snap = [e.name for e in getattr(_pp, "_plugin_entries", []) if e.enabled]
+            _plugin_exts_snap = frozenset(
+                e.lower() for e in getattr(_pp, "_plugin_extensions", []) or []
+            )
         _ckfn = None
         if isinstance(_captured_game, _UE5Game):
             def _ckfn(rel: str, _g=_captured_game) -> str:
@@ -6676,41 +6752,37 @@ class ModListPanel(ctk.CTkFrame):
             # can tell it comes from an archive, e.g. "SkyUI_SE.bsa : interface/foo.swf".
             if _archive_exts and bsa_index_path is not None and bsa_index_path.is_file():
                 try:
-                    from Utils.bsa_filemap import read_bsa_index
+                    from Utils.bsa_filemap import read_bsa_index, compute_bsa_winner_map
                     from Utils.modlist import read_modlist as _read_ml
                     bsa_index = read_bsa_index(bsa_index_path) or {}
                     entries_ml = _read_ml(modlist_path)
                     enabled_ml = [e for e in entries_ml if not e.is_separator and e.enabled]
                     priority_low_to_high = [e.name for e in reversed(enabled_ml)]
 
-                    # Replay the priority merge to compute per-path winners.
-                    bsa_winner: dict[str, str] = {}
-                    for _name in priority_low_to_high:
-                        _archives = bsa_index.get(_name)
-                        if not _archives:
-                            continue
-                        for _bsa, _mt, _paths in _archives:
-                            for _fp in _paths:
-                                bsa_winner[_fp] = _name
-
-                    # Also collect per-path losers so we can annotate our wins.
-                    bsa_losers: dict[str, list[str]] = {}
-                    for _name in priority_low_to_high:
-                        _archives = bsa_index.get(_name)
-                        if not _archives:
-                            continue
-                        for _bsa, _mt, _paths in _archives:
-                            for _fp in _paths:
-                                if bsa_winner.get(_fp) != _name:
-                                    bsa_losers.setdefault(_fp, []).append(_name)
+                    # Use the shared engine-load-order helper so the dialog
+                    # winners match the modlist dot and the Archive tab.
+                    bsa_winner, bsa_losers = compute_bsa_winner_map(
+                        bsa_index, priority_low_to_high,
+                        _plugin_order_snap or None, _plugin_exts_snap or None,
+                        mod_index_path,
+                    )
 
                     # Walk this mod's archives and classify each file.
+                    # Engine behavior: a loose file at the same path always wins
+                    # over any BSA entry, regardless of load order, so a BSA
+                    # entry also loses whenever another mod has a loose file
+                    # at that path.
                     my_archives = bsa_index.get(mod_name, [])
                     for _bsa_name, _mt, _paths in my_archives:
                         for _fp in sorted(_paths):
                             _display = f"{_bsa_name} : {_fp}"
                             winner = bsa_winner.get(_fp)
                             if winner is None:
+                                continue
+                            _loose = winning_map.get(_fp)
+                            _loose_winner = _loose[1] if _loose else None
+                            if _loose_winner is not None and _loose_winner != mod_name:
+                                files_i_lose.append((_display, _loose_winner))
                                 continue
                             if winner == mod_name:
                                 _losers = [
@@ -6720,6 +6792,8 @@ class ModListPanel(ctk.CTkFrame):
                                     files_i_win_final.append(
                                         (_display, ", ".join(_losers))
                                     )
+                                else:
+                                    files_no_conflict.append(_display)
                             else:
                                 files_i_lose.append((_display, winner))
                 except Exception:
@@ -7275,6 +7349,7 @@ class ModListPanel(ctk.CTkFrame):
         self._fsp_vars["filter_has_disabled_files"].set(self._filter_has_disabled_files)
         self._fsp_vars["filter_has_updates"].set(self._filter_has_updates)
         self._fsp_vars["filter_fomod_only"].set(self._filter_fomod_only)
+        self._fsp_vars["filter_has_bsa"].set(self._filter_has_bsa)
         self._refresh_filter_category_list()
         self._filter_btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOV)
 
@@ -7328,6 +7403,7 @@ class ModListPanel(ctk.CTkFrame):
         self._filter_has_disabled_files = state.get("filter_has_disabled_files", False)
         self._filter_has_updates = state.get("filter_has_updates", False)
         self._filter_fomod_only = state.get("filter_fomod_only", False)
+        self._filter_has_bsa = state.get("filter_has_bsa", False)
         self._filter_categories = state.get("filter_categories") or frozenset()
         self._invalidate_derived_caches()
         self._redraw()
@@ -7504,6 +7580,15 @@ class ModListPanel(ctk.CTkFrame):
         _archive_exts: frozenset[str] = frozenset()
         if _captured_game is not None:
             _archive_exts = frozenset(getattr(_captured_game, "archive_extensions", frozenset()) or frozenset())
+        # Plugin load order + extensions — used so BSA conflicts resolve by
+        # plugin load order (the engine loads BSAs via their owning plugin),
+        # not by mod priority. Snapshot on the main thread.
+        _plugin_order_snap: list[str] = []
+        _plugin_exts_snap: frozenset[str] = frozenset()
+        _pp = getattr(self.winfo_toplevel(), "_plugin_panel", None)
+        if _pp is not None:
+            _plugin_order_snap = [e.name for e in getattr(_pp, "_plugin_entries", []) if e.enabled]
+            _plugin_exts_snap = frozenset(e.lower() for e in getattr(_pp, "_plugin_extensions", []) or [])
         staging_requires_subdir = self._staging_requires_subdir
         normalize_folder_case   = self._normalize_folder_case
         self._filemap_rescan_index = False
@@ -7587,36 +7672,53 @@ class ModListPanel(ctk.CTkFrame):
                             bsa_index_path, staging, _archive_exts,
                             log_fn=_log_thread_safe,
                         )
-                    bsa_conflict_map, bsa_overrides, bsa_overridden_by = build_bsa_conflicts(
+                    (bsa_conflict_map, bsa_overrides, bsa_overridden_by,
+                     loose_over_bsa, bsa_over_loose) = build_bsa_conflicts(
                         modlist_path, bsa_index_path, _archive_exts,
+                        loose_index_path=output.parent / "modindex.bin",
+                        plugin_order=_plugin_order_snap or None,
+                        plugin_extensions=_plugin_exts_snap or None,
                         log_fn=_log_thread_safe,
                     )
-                self.after(0, lambda: _done(count, conflict_map, overrides, overridden_by,
+                # Preserve the untransformed loose dicts; _done will fold
+                # loose↔BSA relationships (idempotently) on top of them.
+                base_conflict_map  = dict(conflict_map)
+                base_overrides     = {k: set(v) for k, v in overrides.items()}
+                base_overridden_by = {k: set(v) for k, v in overridden_by.items()}
+                self.after(0, lambda: _done(count,
+                                             base_conflict_map, base_overrides, base_overridden_by,
                                              bsa_conflict_map, bsa_overrides, bsa_overridden_by,
+                                             loose_over_bsa, bsa_over_loose,
                                              None, prertx_mods))
             except Exception as exc:
-                self.after(0, lambda e=exc: _done(0, {}, {}, {}, {}, {}, {}, e, set()))
+                self.after(0, lambda e=exc: _done(0, {}, {}, {}, {}, {}, {}, {}, {}, e, set()))
 
-        def _done(count, conflict_map, overrides, overridden_by,
+        def _done(count,
+                  base_conflict_map, base_overrides, base_overridden_by,
                   bsa_conflict_map, bsa_overrides, bsa_overridden_by,
+                  loose_over_bsa, bsa_over_loose,
                   exc, prertx_mods=set()):
             self._filemap_pending = False
             if exc is not None:
                 self._conflict_map = {}
                 self._overrides = {}
                 self._overridden_by = {}
+                self._conflict_map_base = {}
+                self._overrides_base = {}
+                self._overridden_by_base = {}
                 self._bsa_conflict_map = {}
                 self._bsa_overrides = {}
                 self._bsa_overridden_by = {}
                 self._log(f"Filemap error: {exc}")
             else:
-                self._conflict_map  = conflict_map
-                self._overrides     = overrides
-                self._overridden_by = overridden_by
+                self._conflict_map_base  = base_conflict_map
+                self._overrides_base     = base_overrides
+                self._overridden_by_base = base_overridden_by
                 self._bsa_conflict_map  = bsa_conflict_map
                 self._bsa_overrides     = bsa_overrides
                 self._bsa_overridden_by = bsa_overridden_by
                 self._prertx_mods   = prertx_mods
+                self._apply_loose_bsa_fold(loose_over_bsa, bsa_over_loose)
                 self._log(f"Filemap updated: {count} file(s).")
             self._vis_dirty = True  # conflict filters depend on conflict_map
             self._redraw()
@@ -7630,6 +7732,89 @@ class ModListPanel(ctk.CTkFrame):
             # If something changed while we were running, rebuild again.
             if self._filemap_dirty:
                 self._rebuild_filemap()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_loose_bsa_fold(
+        self,
+        loose_over_bsa: dict[str, set[str]],
+        bsa_over_loose: dict[str, set[str]],
+    ) -> None:
+        """Re-derive self._conflict_map / _overrides / _overridden_by from the
+        base (loose-only) state plus the loose↔BSA cross-relationships.
+        """
+        conflict_map  = dict(self._conflict_map_base)
+        overrides     = {k: set(v) for k, v in self._overrides_base.items()}
+        overridden_by = {k: set(v) for k, v in self._overridden_by_base.items()}
+        for loose_mod, bsa_mods in loose_over_bsa.items():
+            overrides.setdefault(loose_mod, set()).update(bsa_mods)
+            cur = conflict_map.get(loose_mod, CONFLICT_NONE)
+            if cur == CONFLICT_NONE:
+                conflict_map[loose_mod] = CONFLICT_WINS
+            elif cur == CONFLICT_LOSES:
+                conflict_map[loose_mod] = CONFLICT_PARTIAL
+        for bsa_mod, loose_mods in bsa_over_loose.items():
+            overridden_by.setdefault(bsa_mod, set()).update(loose_mods)
+        self._conflict_map  = conflict_map
+        self._overrides     = overrides
+        self._overridden_by = overridden_by
+
+    def recompute_bsa_conflicts(self) -> None:
+        """Recompute BSA conflicts only — no loose-file disk scan.
+
+        Call this when plugin load order changes so BSA winners (which
+        depend on their owning plugin's load position) stay in sync.
+        Runs the merge on a background thread since very large BSA
+        indices can be sluggish.
+        """
+        if self._modlist_path is None or self._filemap_path is None:
+            return
+        _captured_game = getattr(self, "_game", None)
+        _archive_exts: frozenset[str] = frozenset()
+        if _captured_game is not None:
+            _archive_exts = frozenset(getattr(_captured_game, "archive_extensions", frozenset()) or frozenset())
+        if not _archive_exts:
+            return
+        bsa_index_path = self._filemap_path.parent / "bsa_index.bin"
+        if not bsa_index_path.is_file():
+            return
+        modlist_path = self._modlist_path
+        loose_index_path = self._filemap_path.parent / "modindex.bin"
+
+        _plugin_order_snap: list[str] = []
+        _plugin_exts_snap: frozenset[str] = frozenset()
+        _pp = getattr(self.winfo_toplevel(), "_plugin_panel", None)
+        if _pp is not None:
+            _plugin_order_snap = [e.name for e in getattr(_pp, "_plugin_entries", []) if e.enabled]
+            _plugin_exts_snap = frozenset(e.lower() for e in getattr(_pp, "_plugin_extensions", []) or [])
+
+        def _worker():
+            try:
+                result = build_bsa_conflicts(
+                    modlist_path, bsa_index_path, _archive_exts,
+                    loose_index_path=loose_index_path,
+                    plugin_order=_plugin_order_snap or None,
+                    plugin_extensions=_plugin_exts_snap or None,
+                )
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._log(f"BSA recompute error: {e}"))
+                return
+            self.after(0, lambda r=result: _apply(r))
+
+        def _apply(result):
+            (bsa_conflict_map, bsa_overrides, bsa_overridden_by,
+             loose_over_bsa, bsa_over_loose) = result
+            self._bsa_conflict_map  = bsa_conflict_map
+            self._bsa_overrides     = bsa_overrides
+            self._bsa_overridden_by = bsa_overridden_by
+            self._apply_loose_bsa_fold(loose_over_bsa, bsa_over_loose)
+            self._vis_dirty = True
+            self._redraw()
+            # Invalidate plugin panel's BSA cache so its Archive/Data tabs
+            # reflect the new winners.
+            pp = getattr(self.winfo_toplevel(), "_plugin_panel", None)
+            if pp is not None:
+                pp._bsa_conflict_cache = None
 
         threading.Thread(target=_worker, daemon=True).start()
 
