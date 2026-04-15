@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -60,7 +61,8 @@ class _FileChooserOverlay(tk.Frame):
     Placed over the parent widget instead of opening a separate window,
     which works better on Steam Deck gaming mode."""
 
-    _WIDTH = 550
+    _MIN_WIDTH = 550
+    _MAX_WIDTH = 1100
 
     def __init__(self, parent, mod_name: str, files: list, on_pick=None):
         """``on_pick(file_or_none)`` is called when the user picks or cancels."""
@@ -73,12 +75,39 @@ class _FileChooserOverlay(tk.Frame):
         self._backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._backdrop.bind("<Button-1>", lambda e: self._dismiss(None))
 
+        pad = 14
+
+        # Auto-size the card to fit the widest row, clamped to [_MIN_WIDTH, _MAX_WIDTH]
+        # and the parent's available width.
+        try:
+            bold_font = tkfont.Font(font=FONT_BOLD)
+            small_font = tkfont.Font(font=FONT_SMALL)
+            header_w = bold_font.measure(f"'{mod_name}' has multiple main files.")
+            row_w = 0
+            for f in files:
+                name_text = f.name or f.file_name or ""
+                size_bytes = f.size_in_bytes or (f.size_kb * 1024 if f.size_kb else 0)
+                parts = []
+                if f.version:
+                    parts.append(f"v{f.version}")
+                if size_bytes > 0:
+                    parts.append(_fmt_size(size_bytes))
+                detail = "  —  ".join(parts)
+                w = bold_font.measure(name_text) + (small_font.measure(detail) if detail else 0) + 40
+                row_w = max(row_w, w)
+            content_w = max(header_w, row_w) + pad * 2 + 4
+            try:
+                parent_w = parent.winfo_width() or self._MAX_WIDTH
+            except Exception:
+                parent_w = self._MAX_WIDTH
+            card_w = max(self._MIN_WIDTH, min(content_w, self._MAX_WIDTH, parent_w - 40))
+        except Exception:
+            card_w = self._MIN_WIDTH
+
         # Card
         card = tk.Frame(self._backdrop, bg=BG_DEEP, bd=1, relief="solid",
                         highlightbackground=BORDER, highlightthickness=1)
-        card.place(relx=0.5, rely=0.5, anchor="center", width=self._WIDTH)
-
-        pad = 14
+        card.place(relx=0.5, rely=0.5, anchor="center", width=card_w)
 
         # Header
         tk.Label(
