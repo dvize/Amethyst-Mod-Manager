@@ -26,6 +26,7 @@ from Utils.ui_config import (
     load_steam_libraries_vdf_path, save_steam_libraries_vdf_path,
     load_default_staging_path, save_default_staging_path,
     load_font_family, save_font_family, get_font_family,
+    THEME_DEFAULTS, get_theme_color, save_theme_color,
 )
 from gui.ctk_components import CTkProgressPopup, CTkAlert, CTkNotification
 from gui.theme import (
@@ -853,6 +854,98 @@ class SettingsPanel(ctk.CTkFrame):
                  "Collection installs are never prompted.",
             font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
         ).pack(anchor="w", pady=(2, 0))
+
+        # ==== Theme ====
+        theme_sec = _begin_section("Theme")
+
+        ctk.CTkLabel(
+            theme_sec,
+            text="Customise row-highlight colours. Changes apply immediately.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
+        self._theme_swatches: dict[str, ctk.CTkFrame] = {}
+
+        def _broadcast_theme_change() -> None:
+            """Re-read theme colours in gui.theme and refresh affected panels."""
+            try:
+                import gui.theme as _theme_mod
+                _theme_mod.refresh_theme_colors()
+            except Exception:
+                pass
+            try:
+                app = self.winfo_toplevel()
+                ml = getattr(app, "_mod_panel", None)
+                if ml is not None and hasattr(ml, "refresh_theme"):
+                    ml.refresh_theme()
+                pp = getattr(app, "_plugin_panel", None)
+                if pp is not None and hasattr(pp, "refresh_theme"):
+                    pp.refresh_theme()
+            except Exception:
+                pass
+
+        def _set_color(key: str, hex_value: str) -> None:
+            save_theme_color(key, hex_value)
+            swatch = self._theme_swatches.get(key)
+            if swatch is not None:
+                try:
+                    swatch.configure(fg_color=hex_value)
+                except Exception:
+                    pass
+            _broadcast_theme_change()
+
+        def _color_row(label: str, key: str) -> None:
+            default_hex = THEME_DEFAULTS[key]
+            current = get_theme_color(key)
+
+            row = ctk.CTkFrame(theme_sec, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 6))
+
+            ctk.CTkLabel(
+                row, text=label, font=FONT_NORMAL, text_color=TEXT_MAIN,
+                anchor="w", width=scaled(220),
+            ).pack(side="left")
+
+            swatch = ctk.CTkFrame(
+                row, width=scaled(28), height=scaled(22),
+                fg_color=current, corner_radius=4,
+                border_width=1, border_color=BORDER,
+            )
+            swatch.pack(side="left", padx=(0, 8))
+            swatch.pack_propagate(False)
+            self._theme_swatches[key] = swatch
+
+            def _pick(_key=key, _label=label, _default=default_hex):
+                app = self.winfo_toplevel()
+                show = getattr(app, "show_theme_color_panel", None)
+                if show is None:
+                    return
+                def _on_result(hex_color, reset, __k=_key, __d=_default):
+                    if reset:
+                        _set_color(__k, __d)
+                    elif hex_color:
+                        _set_color(__k, hex_color)
+                    # cancel (hex_color=None, reset=False) → no change
+                show(_label, get_theme_color(_key), _on_result)
+
+            ctk.CTkButton(
+                row, text="Choose", width=scaled(60), height=scaled(28),
+                font=FONT_SMALL, fg_color=BG_DEEP, hover_color=BG_HOVER,
+                text_color=TEXT_MAIN, command=_pick,
+            ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                row, text="Default", width=scaled(70), height=scaled(28),
+                font=FONT_SMALL, fg_color=BG_DEEP, hover_color=BG_HOVER,
+                text_color=TEXT_DIM,
+                command=lambda _k=key, _d=default_hex: _set_color(_k, _d),
+            ).pack(side="left")
+
+        _color_row("Conflict winner (green)",     "conflict_higher")
+        _color_row("Conflict loser (red)",        "conflict_lower")
+        _color_row("Cross-panel highlight",       "plugin_mod")
+        _color_row("Plugin separator highlight",  "plugin_separator")
+        _color_row("Separator conflict (gray)",   "conflict_separator")
 
         # ==== Paths ====
         paths_sec = _begin_section("Paths")

@@ -8,7 +8,10 @@ from pathlib import Path
 import customtkinter as ctk
 from PIL import Image as PilImage
 
-from Utils.ui_config import get_ui_scale, get_font_family, load_font_family
+from Utils.ui_config import (
+    get_ui_scale, get_font_family, load_font_family,
+    load_theme_colors, get_theme_color,
+)
 
 # ---------------------------------------------------------------------------
 # Color palette
@@ -52,12 +55,29 @@ def contrasting_text_color(hex_bg: str) -> str:
     except Exception:
         return TEXT_SEP
 
-# Highlight colours
-plugin_separator = "#A45500"
-plugin_mod = "#A45500"
-conflict_separator = "#5A5A5A"
-conflict_higher = "#108d00"
-conflict_lower = "#9a0e0e"
+# Highlight colours — user-customisable via Settings → Theme, persisted in amethyst.ini.
+load_theme_colors()
+plugin_separator   = get_theme_color("plugin_separator")
+plugin_mod         = get_theme_color("plugin_mod")
+conflict_separator = get_theme_color("conflict_separator")
+conflict_higher    = get_theme_color("conflict_higher")
+conflict_lower     = get_theme_color("conflict_lower")
+
+
+def refresh_theme_colors() -> None:
+    """Re-read theme colours from amethyst.ini and rebind the module globals.
+
+    Callers that captured names via `from gui.theme import X` will still see
+    their old binding — rendering sites should use `theme.X` attribute access
+    for the values to update live.
+    """
+    global plugin_separator, plugin_mod, conflict_separator, conflict_higher, conflict_lower
+    load_theme_colors()
+    plugin_separator   = get_theme_color("plugin_separator")
+    plugin_mod         = get_theme_color("plugin_mod")
+    conflict_separator = get_theme_color("conflict_separator")
+    conflict_higher    = get_theme_color("conflict_higher")
+    conflict_lower     = get_theme_color("conflict_lower")
 
 # ---------------------------------------------------------------------------
 # Fonts

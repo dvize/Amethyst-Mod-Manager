@@ -1759,6 +1759,26 @@ class App(ctk.CTk):
             )
         self._show_plugin_overlay("_sep_color_panel", _factory)
 
+    # -- Theme color panel (reuses SepColorPanel) ---------------------------
+
+    def show_theme_color_panel(self, title: str, initial_color: str | None, on_result):
+        """Show the wheel/slider/hex colour picker over the plugin panel for
+        Theme settings. Reuses SepColorPanel; *title* is displayed in the
+        header (e.g. "Theme Color — Conflict winner").
+        """
+        self._ensure_plugin_panel_visible()
+        from gui.dialogs import SepColorPanel
+        def _factory():
+            def _done(panel):
+                self._hide_plugin_overlay("_theme_color_panel")
+            return SepColorPanel(
+                self._plugin_panel_container,
+                sep_name=title, initial_color=initial_color,
+                on_result=on_result, on_done=_done,
+                title=f"Theme Color \u2014 {title}",
+            )
+        self._show_plugin_overlay("_theme_color_panel", _factory)
+
     # -- Disable plugins panel (overlays plugin panel) ----------------------
 
     def show_disable_plugins_panel(self, mod_name, plugin_names, disabled, on_done):

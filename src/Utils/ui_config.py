@@ -691,3 +691,73 @@ def save_default_staging_path(value: str) -> None:
     parser[_PATHS_SECTION]["default_staging_path"] = value.strip()
     with path.open("w") as f:
         parser.write(f)
+
+
+# ---------------------------------------------------------------------------
+# Theme colours
+# ---------------------------------------------------------------------------
+import re as _re
+
+_THEME_SECTION = "theme"
+
+THEME_DEFAULTS: dict[str, str] = {
+    "conflict_higher":    "#108d00",
+    "conflict_lower":     "#9a0e0e",
+    "plugin_mod":         "#A45500",
+    "plugin_separator":   "#A45500",
+    "conflict_separator": "#5A5A5A",
+}
+
+_HEX_RE = _re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+_theme_colors: dict[str, str] = dict(THEME_DEFAULTS)
+
+
+def _valid_hex(s: str) -> bool:
+    return isinstance(s, str) and bool(_HEX_RE.match(s.strip()))
+
+
+def load_theme_colors() -> dict[str, str]:
+    """Load [theme] from INI, falling back to defaults for missing/invalid values."""
+    global _theme_colors
+    result = dict(THEME_DEFAULTS)
+    path = get_ui_config_path()
+    if path.is_file():
+        try:
+            parser = configparser.ConfigParser()
+            parser.read(path)
+            if parser.has_section(_THEME_SECTION):
+                for key in THEME_DEFAULTS:
+                    raw = parser.get(_THEME_SECTION, key, fallback="").strip()
+                    if _valid_hex(raw):
+                        result[key] = raw
+        except Exception:
+            pass
+    _theme_colors = result
+    return _theme_colors
+
+
+def save_theme_color(key: str, value: str) -> None:
+    """Persist a single theme colour under [theme] in amethyst.ini.
+
+    Silently ignores unknown keys or invalid hex values to prevent corruption.
+    """
+    if key not in THEME_DEFAULTS or not _valid_hex(value):
+        return
+    value = value.strip()
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _THEME_SECTION not in parser:
+        parser[_THEME_SECTION] = {}
+    parser[_THEME_SECTION][key] = value
+    with path.open("w") as f:
+        parser.write(f)
+    _theme_colors[key] = value
+
+
+def get_theme_color(key: str) -> str:
+    """Return the current cached value for *key*, or its default if unknown."""
+    return _theme_colors.get(key, THEME_DEFAULTS.get(key, "#000000"))

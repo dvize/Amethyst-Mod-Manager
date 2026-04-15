@@ -34,16 +34,13 @@ from gui.theme import (
     TEXT_MAIN,
     TEXT_OK,
     TEXT_SEP,
-    conflict_higher,
-    conflict_lower,
-    plugin_mod,
     scaled,
     _ICONS_DIR,
     load_icon as _load_icon,
 )
 import gui.theme as _theme
 from gui.game_helpers import _GAMES, _vanilla_plugins_for_game
-from gui.dialogs import _PriorityDialog, _ExeConfigDialog, _ExeFilterDialog
+from gui.dialogs import _PriorityDialog, _ExeConfigDialog, _ExeFilterDialog, confirm_deploy_appdata
 from gui.install_mod import install_mod_from_archive
 from gui.mod_name_utils import _suggest_mod_names as suggest_mod_names
 from gui.downloads_panel import DownloadsPanel
@@ -1210,6 +1207,10 @@ class PluginPanel(ctk.CTkFrame):
         from Utils.filemap import build_filemap
         from Utils.deploy import LinkMode, deploy_root_folder, restore_root_folder, load_per_mod_strip_prefixes
 
+        if not confirm_deploy_appdata(self.winfo_toplevel(), game):
+            self._log("Run EXE: deploy cancelled — AppData folder missing.")
+            return
+
         try:
             topbar = self.winfo_toplevel()._topbar
             profile = topbar._profile_var.get()
@@ -1920,7 +1921,7 @@ class PluginPanel(ctk.CTkFrame):
         self._ini_files_tree.heading("mod", text="Mod", anchor="w")
         self._ini_files_tree.column("#0", minwidth=150, stretch=True)
         self._ini_files_tree.column("mod", minwidth=120, stretch=True)
-        self._ini_files_tree.tag_configure("mod_highlight", background=plugin_mod, foreground=TEXT_MAIN)
+        self._ini_files_tree.tag_configure("mod_highlight", background=_theme.plugin_mod, foreground=TEXT_MAIN)
         self._ini_files_tree.tag_configure("game_folder", foreground=TEXT_OK)
 
         self._ini_marker_strip = tk.Canvas(
@@ -2154,7 +2155,7 @@ class PluginPanel(ctk.CTkFrame):
         for row_idx in highlighted_rows:
             frac = row_idx / n
             y = max(2, min(int(frac * strip_h), strip_h - 4))
-            c.create_rectangle(0, y, 4, y + 3, fill=plugin_mod, outline="", tags="marker")
+            c.create_rectangle(0, y, 4, y + 3, fill=_theme.plugin_mod, outline="", tags="marker")
 
     def _on_ini_file_select(self, _event=None):
         self._on_ini_file_edit()
@@ -2376,8 +2377,8 @@ class PluginPanel(ctk.CTkFrame):
 
         # Configure conflict highlight tags
         self._mf_tree.tag_configure("dim", foreground=TEXT_DIM)
-        self._mf_tree.tag_configure("conflict_win",  foreground="#4caf50")
-        self._mf_tree.tag_configure("conflict_lose", foreground="#f44336")
+        self._mf_tree.tag_configure("conflict_win",  foreground=_theme.conflict_higher)
+        self._mf_tree.tag_configure("conflict_lose", foreground=_theme.conflict_lower)
 
         def _conflict_tag(rel_key: str) -> str | None:
             if rel_key not in contested_keys:
@@ -2559,8 +2560,8 @@ class PluginPanel(ctk.CTkFrame):
         self._arc_tree.tag_configure("bsa", foreground="#d8a657")
         self._arc_tree.tag_configure("bsa_neutral", foreground=TEXT_MAIN)
         self._arc_tree.tag_configure("folder", foreground="#56b6c2")
-        self._arc_tree.tag_configure("conflict_win", foreground="#4caf50")
-        self._arc_tree.tag_configure("conflict_lose", foreground="#f44336")
+        self._arc_tree.tag_configure("conflict_win", foreground=_theme.conflict_higher)
+        self._arc_tree.tag_configure("conflict_lose", foreground=_theme.conflict_lower)
         self._arc_tree.tag_configure("conflict_mixed", foreground="#d8a657")
         self._arc_tree.tag_configure("dim", foreground=TEXT_DIM)
 
@@ -3153,7 +3154,7 @@ class PluginPanel(ctk.CTkFrame):
 
         self._data_tree.tag_configure("folder",       foreground="#56b6c2")
         self._data_tree.tag_configure("file",         foreground=TEXT_MAIN)
-        self._data_tree.tag_configure("conflict_win", foreground="#4caf50")
+        self._data_tree.tag_configure("conflict_win", foreground=_theme.conflict_higher)
 
         def insert_node(parent_id, name, subtree):
             node_id = self._data_tree.insert(
@@ -4418,6 +4419,44 @@ class PluginPanel(ctk.CTkFrame):
             self._apply_ini_row_highlight()
             self._draw_ini_marker_strip()
 
+    def refresh_theme(self) -> None:
+        """Re-apply theme-dependent tags and force a redraw after a colour change.
+
+        Several trees cache theme colours in their tag config; this re-runs
+        those `tag_configure` calls so edits take effect without a restart.
+        """
+        try:
+            self._ini_files_tree.tag_configure(
+                "mod_highlight", background=_theme.plugin_mod, foreground=TEXT_MAIN,
+            )
+        except Exception:
+            pass
+        # Mod Files, Archive, Data tabs use conflict_win / conflict_lose tags.
+        for tree_attr in ("_mf_tree", "_arc_tree", "_data_tree"):
+            tree = getattr(self, tree_attr, None)
+            if tree is None:
+                continue
+            try:
+                tree.tag_configure("conflict_win",  foreground=_theme.conflict_higher)
+            except Exception:
+                pass
+            try:
+                tree.tag_configure("conflict_lose", foreground=_theme.conflict_lower)
+            except Exception:
+                pass
+        try:
+            self._predraw()
+        except Exception:
+            pass
+        try:
+            self._draw_ini_marker_strip()
+        except Exception:
+            pass
+        try:
+            self._apply_ini_row_highlight()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Plugins tab refresh (canvas-based)
     # ------------------------------------------------------------------
@@ -4789,11 +4828,11 @@ class PluginPanel(ctk.CTkFrame):
                 elif name_lower in master_names_lower:
                     bg = "#1a5c1a"
                 elif name_lower in self._highlighted_plugins:
-                    bg = plugin_mod
+                    bg = _theme.plugin_mod
                 elif name_lower in self._bsa_conflict_higher_plugins:
-                    bg = conflict_higher
+                    bg = _theme.conflict_higher
                 elif name_lower in self._bsa_conflict_lower_plugins:
-                    bg = conflict_lower
+                    bg = _theme.conflict_lower
                 elif actual_idx == self._phover_idx:
                     bg = BG_HOVER_ROW
                 else:
@@ -4809,10 +4848,13 @@ class PluginPanel(ctk.CTkFrame):
                 else:
                     c.itemconfigure(self._pool_missing_strip[s], state="hidden")
 
-                if not entry.enabled:
-                    name_color = TEXT_DIM
-                elif entry.name in self._missing_masters:
+                _theme_bgs = (_theme.conflict_higher, _theme.conflict_lower, _theme.plugin_mod)
+                if entry.name in self._missing_masters:
                     name_color = "#e74c3c"
+                elif bg in _theme_bgs:
+                    name_color = _theme.contrasting_text_color(bg)
+                elif not entry.enabled:
+                    name_color = TEXT_DIM
                 else:
                     name_color = TEXT_MAIN
                 name_max_px = self._pcol_x[2] - self._pcol_x[1] - scaled(4)
@@ -4974,13 +5016,13 @@ class PluginPanel(ctk.CTkFrame):
             if e.name in self._missing_masters:
                 _tick(i, "#c0392b")
             elif name_lower in self._highlighted_plugins:
-                _tick(i, plugin_mod)
+                _tick(i, _theme.plugin_mod)
             elif name_lower in master_names_lower:
                 _tick(i, "#2a8c2a")
             elif name_lower in self._bsa_conflict_higher_plugins:
-                _tick(i, conflict_higher)
+                _tick(i, _theme.conflict_higher)
             elif name_lower in self._bsa_conflict_lower_plugins:
-                _tick(i, conflict_lower)
+                _tick(i, _theme.conflict_lower)
 
     def _schedule_predraw(self) -> None:
         """Debounced _predraw — coalesces rapid scroll/resize events."""
@@ -5218,16 +5260,27 @@ class PluginPanel(ctk.CTkFrame):
                 elif entry and name_lower in {m.lower() for m in self._master_highlights}:
                     bg = "#1a5c1a"
                 elif entry and name_lower in self._highlighted_plugins:
-                    bg = plugin_mod
+                    bg = _theme.plugin_mod
                 elif entry and name_lower in self._bsa_conflict_higher_plugins:
-                    bg = conflict_higher
+                    bg = _theme.conflict_higher
                 elif entry and name_lower in self._bsa_conflict_lower_plugins:
-                    bg = conflict_lower
+                    bg = _theme.conflict_lower
                 elif data_row == self._phover_idx:
                     bg = BG_HOVER_ROW
                 else:
                     bg = BG_ROW if view_row % 2 == 0 else BG_ROW_ALT
                 self._pcanvas.itemconfigure(self._pool_bg[s], fill=bg)
+                if entry is not None:
+                    _theme_bgs = (_theme.conflict_higher, _theme.conflict_lower, _theme.plugin_mod)
+                    if entry.name in self._missing_masters:
+                        name_color = "#e74c3c"
+                    elif bg in _theme_bgs:
+                        name_color = _theme.contrasting_text_color(bg)
+                    elif not entry.enabled:
+                        name_color = TEXT_DIM
+                    else:
+                        name_color = TEXT_MAIN
+                    self._pcanvas.itemconfigure(self._pool_name[s], fill=name_color)
                 break
 
     def _on_pmouse_motion(self, event) -> None:

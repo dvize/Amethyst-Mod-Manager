@@ -37,11 +37,6 @@ from gui.theme import (
     TEXT_DIM,
     TEXT_MAIN,
     TEXT_SEP,
-    plugin_separator,
-    plugin_mod,
-    conflict_separator,
-    conflict_higher,
-    conflict_lower,
     _ICONS_DIR,
     load_icon as _load_icon,
 )
@@ -2301,11 +2296,14 @@ class ModListPanel(ctk.CTkFrame):
                     if is_sel_row:
                         row_bg = BG_SELECT
                     elif (not is_synthetic or is_overwrite) and i in conflict_sep_higher:
-                        row_bg = conflict_higher
+                        row_bg = _theme.conflict_higher
+                        txt_col = _theme.contrasting_text_color(row_bg)
                     elif (not is_synthetic or is_overwrite) and i in conflict_sep_lower:
-                        row_bg = conflict_lower
+                        row_bg = _theme.conflict_lower
+                        txt_col = _theme.contrasting_text_color(row_bg)
                     elif not is_synthetic and i == highlighted_sep_idx:
-                        row_bg = plugin_separator
+                        row_bg = _theme.plugin_separator
+                        txt_col = _theme.contrasting_text_color(row_bg)
                     elif i == self._hover_idx and self._drag_idx < 0:
                         if custom_color:
                             # Lighten the custom colour slightly on hover
@@ -2528,21 +2526,21 @@ class ModListPanel(ctk.CTkFrame):
                     if is_sel:
                         bg = BG_SELECT
                     elif entry.name == self._highlighted_mod:
-                        bg = plugin_mod
+                        bg = _theme.plugin_mod
                     elif i == self._hover_idx and self._drag_idx < 0:
                         bg = BG_HOVER_ROW
                     elif sel_entry and (not sel_entry.is_separator
                                         or sel_entry.name == OVERWRITE_NAME):
                         if entry.name in conflict_sel_higher:
-                            bg = conflict_higher
+                            bg = _theme.conflict_higher
                         elif entry.name in conflict_sel_lower:
-                            bg = conflict_lower
+                            bg = _theme.conflict_lower
                         else:
                             bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
                     elif entry.name in conflict_mod_higher:
-                        bg = conflict_higher
+                        bg = _theme.conflict_higher
                     elif entry.name in conflict_mod_lower:
-                        bg = conflict_lower
+                        bg = _theme.conflict_lower
                     else:
                         bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
 
@@ -2551,7 +2549,14 @@ class ModListPanel(ctk.CTkFrame):
                     c.itemconfigure(self._pool_bg[s], fill=bg, outline="", state="normal")
 
                     # Name text (truncate if it would overlap the category column)
-                    name_color = TEXT_DIM if not entry.enabled else TEXT_MAIN
+                    _theme_bgs = (_theme.conflict_higher, _theme.conflict_lower,
+                                  _theme.plugin_mod, _theme.plugin_separator)
+                    if bg in _theme_bgs:
+                        name_color = _theme.contrasting_text_color(bg)
+                    elif not entry.enabled:
+                        name_color = TEXT_DIM
+                    else:
+                        name_color = TEXT_MAIN
                     name_font = _FONT_NAME
                     _bname_valid = self._bundle_name_of(i)
                     is_bundle_variant = _bname_valid is not None
@@ -7898,6 +7903,14 @@ class ModListPanel(ctk.CTkFrame):
             self._highlighted_mod = mod_name
             self._redraw()  # _redraw calls _draw_marker_strip internally
 
+    def refresh_theme(self) -> None:
+        """Force a redraw after theme colours change. Rendering reads live via
+        `_theme.<name>`, so a redraw is enough to apply new colours."""
+        try:
+            self._redraw()
+        except Exception:
+            pass
+
     def _on_marker_strip_resize(self, _event):
         if self._marker_strip_after_id is not None:
             self.after_cancel(self._marker_strip_after_id)
@@ -7944,7 +7957,7 @@ class ModListPanel(ctk.CTkFrame):
         if self._highlighted_mod:
             row = _row_for_mod(self._highlighted_mod)
             if row is not None:
-                _tick(row, plugin_mod)
+                _tick(row, _theme.plugin_mod)
 
         # Green/red ticks for conflict highlights when mod(s) are selected.
         sel_indices = sorted(self._sel_set) if self._sel_set else (
@@ -7973,11 +7986,11 @@ class ModListPanel(ctk.CTkFrame):
         for mod_name in all_higher:
             row = _row_for_mod(mod_name)
             if row is not None:
-                _tick(row, conflict_higher)
+                _tick(row, _theme.conflict_higher)
         for mod_name in all_lower:
             row = _row_for_mod(mod_name)
             if row is not None:
-                _tick(row, conflict_lower)
+                _tick(row, _theme.conflict_lower)
 
     def clear_selection(self):
         """Clear the mod list selection, e.g. when a plugin is selected."""
