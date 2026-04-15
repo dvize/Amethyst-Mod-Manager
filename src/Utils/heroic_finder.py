@@ -101,26 +101,23 @@ def _find_epic_game(heroic_root: Path, app_names: list[str]) -> Path | None:
 # GOG (heroic-gogdl backend)
 # ---------------------------------------------------------------------------
 
-def _load_gog_library(heroic_root: Path) -> list[dict]:
+def _load_gog_installed(heroic_root: Path) -> list[dict]:
     """
-    Parse store_cache/gog_library.json from a Heroic config root.
-    Returns the list of game entries, or an empty list on any error.
-
-    Note: the is_installed field in this file is unreliable; we check
-    install_path exists on disk instead.
+    Parse gog_store/installed.json from a Heroic config root.
+    The file has shape {"installed": [ {appName, install_path, executable, ...}, ... ]}.
+    Returns the list of entries, or an empty list on any error.
     """
-    library_json = heroic_root / "store_cache" / "gog_library.json"
-    if not library_json.is_file():
+    installed_json = heroic_root / "gog_store" / "installed.json"
+    if not installed_json.is_file():
         return []
     try:
-        data = json.loads(library_json.read_text(encoding="utf-8", errors="replace"))
-        # The file is either a list of games or {"games": [...]}
+        data = json.loads(installed_json.read_text(encoding="utf-8", errors="replace"))
+        if isinstance(data, dict):
+            entries = data.get("installed", [])
+            if isinstance(entries, list):
+                return entries
         if isinstance(data, list):
             return data
-        if isinstance(data, dict):
-            games = data.get("games", [])
-            if isinstance(games, list):
-                return games
     except (OSError, json.JSONDecodeError):
         pass
     return []
@@ -128,23 +125,16 @@ def _load_gog_library(heroic_root: Path) -> list[dict]:
 
 def _find_gog_game(heroic_root: Path, app_names: list[str]) -> Path | None:
     """
-    Search GOG library cache for any of the given app_names (GOG product IDs
-    as strings, or title substrings).  Returns the install_path as a Path if
-    found and the directory exists on disk.
+    Search gog_store/installed.json for any of the given app_names (GOG product
+    IDs as strings).  Returns the install_path as a Path if found and the
+    directory exists on disk.
     """
-    library = _load_gog_library(heroic_root)
-    app_names_lower = [n.lower() for n in app_names]
-    for entry in library:
+    app_names_lower = {n.lower() for n in app_names}
+    for entry in _load_gog_installed(heroic_root):
         if not isinstance(entry, dict):
             continue
-        # Match on app_name / appName / title
-        entry_id = str(entry.get("app_name") or entry.get("appName") or "")
-        entry_title = str(entry.get("title") or "")
-        if (
-            entry_id in app_names
-            or entry_id.lower() in app_names_lower
-            or entry_title.lower() in app_names_lower
-        ):
+        entry_id = str(entry.get("appName") or entry.get("app_name") or "")
+        if entry_id and entry_id.lower() in app_names_lower:
             install_path = entry.get("install_path", "")
             if install_path:
                 p = Path(install_path)
@@ -259,22 +249,15 @@ def find_heroic_launch_info(app_names: list[str]) -> "tuple[str, str] | None":
                 install_path = installed[app_name].get("install_path", "")
                 if install_path and Path(install_path).is_dir():
                     return ("legendary", app_name)
-        library = _load_gog_library(heroic_root)
-        app_names_lower = [n.lower() for n in app_names]
-        for entry in library:
+        app_names_lower = {n.lower() for n in app_names}
+        for entry in _load_gog_installed(heroic_root):
             if not isinstance(entry, dict):
                 continue
-            entry_id = str(entry.get("app_name") or entry.get("appName") or "")
-            entry_title = str(entry.get("title") or "")
-            for app_name in app_names:
-                if (
-                    entry_id == app_name
-                    or entry_id.lower() == app_name.lower()
-                    or entry_title.lower() == app_name.lower()
-                ):
-                    install_path = entry.get("install_path", "")
-                    if install_path and Path(install_path).is_dir():
-                        return ("gog", entry_id or app_name)
+            entry_id = str(entry.get("appName") or entry.get("app_name") or "")
+            if entry_id and entry_id.lower() in app_names_lower:
+                install_path = entry.get("install_path", "")
+                if install_path and Path(install_path).is_dir():
+                    return ("gog", entry_id)
     return None
 
 
@@ -330,42 +313,43 @@ def find_heroic_game_info_by_exe(exe_name: str) -> "tuple[Path, Path | None, str
             # caller can retry prefix later
             return (install_path, None, app_name)
 
-        # 3. GOG: check gog_store/installed.json for executable match
-        gog_installed = heroic_root / "gog_store" / "installed.json"
-        if gog_installed.is_file():
-            try:
-                gog_data = json.loads(gog_installed.read_text(encoding="utf-8", errors="replace"))
-                if isinstance(gog_data, dict):
-                    for app_id, entry in gog_data.items():
-                        if not isinstance(entry, dict):
-                            continue
-                        # GOG may store executable in different keys
-                        exe = (
-                            entry.get("executable", "")
-                            or entry.get("exe", "")
-                            or ""
-                        )
-                        if not exe:
-                            # Fallback: check install_path + exe
-                            inst = entry.get("install_path", "")
-                            if inst and exe_name:
-                                inst_path = Path(inst)
-                                if (inst_path / exe_name).exists():
-                                    exe = exe_name
-                        if exe.lower() != exe_lower:
-                            continue
-                        install_path_raw = entry.get("install_path", entry.get("path", ""))
-                        if not install_path_raw:
-                            continue
-                        install_path = Path(install_path_raw)
-                        if not install_path.is_dir():
-                            continue
-                        prefix_path = _find_heroic_prefix_for_app(heroic_root, app_id)
-                        if prefix_path:
-                            return (install_path, prefix_path, app_id)
-                        return (install_path, None, app_id)
-            except (OSError, json.JSONDecodeError):
-                pass
+        # 3. GOG: check gog_store/installed.json for executable match.
+        #    Heroic's GOG entries often have an empty "executable" field, so
+        #    fall back to probing install_path for the exe filename.
+        for entry in _load_gog_installed(heroic_root):
+            if not isinstance(entry, dict):
+                continue
+            app_id = str(entry.get("appName") or entry.get("app_name") or "")
+            install_path_raw = entry.get("install_path", entry.get("path", ""))
+            if not install_path_raw:
+                continue
+            install_path = Path(install_path_raw)
+            if not install_path.is_dir():
+                continue
+
+            stored_exe = entry.get("executable", "") or entry.get("exe", "")
+            stored_bare = stored_exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+            matched = False
+            if stored_bare and stored_bare == exe_lower:
+                matched = True
+            elif not stored_bare:
+                # Scan install_path for the exe (case-insensitive, recursive).
+                try:
+                    for candidate in install_path.rglob("*"):
+                        if candidate.is_file() and candidate.name.lower() == exe_lower:
+                            matched = True
+                            break
+                except OSError:
+                    pass
+
+            if not matched:
+                continue
+
+            prefix_path = _find_heroic_prefix_for_app(heroic_root, app_id)
+            if prefix_path:
+                return (install_path, prefix_path, app_id)
+            return (install_path, None, app_id)
 
     return None
 
