@@ -24,6 +24,7 @@ from Utils.ui_config import (
     load_rename_mod_after_install, save_rename_mod_after_install,
     load_heroic_config_path, save_heroic_config_path,
     load_steam_libraries_vdf_path, save_steam_libraries_vdf_path,
+    load_default_staging_path, save_default_staging_path,
     load_font_family, save_font_family, get_font_family,
 )
 from gui.ctk_components import CTkProgressPopup, CTkAlert, CTkNotification
@@ -856,6 +857,41 @@ class SettingsPanel(ctk.CTkFrame):
         # ==== Paths ====
         paths_sec = _begin_section("Paths")
 
+        ctk.CTkLabel(paths_sec, text="Default Mod Staging Folder:", font=FONT_NORMAL,
+                     text_color=TEXT_MAIN, anchor="w").pack(anchor="w", pady=(0, 4))
+
+        staging_entry_row = ctk.CTkFrame(paths_sec, fg_color="transparent")
+        staging_entry_row.pack(fill="x")
+
+        self._default_staging_var = tk.StringVar(value=load_default_staging_path())
+        ctk.CTkEntry(
+            staging_entry_row, textvariable=self._default_staging_var,
+            font=FONT_NORMAL,
+            placeholder_text=f"Default: {get_profiles_dir()}",
+            height=scaled(28),
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            staging_entry_row, text="Browse", width=scaled(70), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_HOVER, hover_color=ACCENT, text_color=TEXT_MAIN,
+            command=self._browse_default_staging,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            staging_entry_row, text="Clear", width=scaled(56), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_DEEP, hover_color=BG_HOVER, text_color=TEXT_DIM,
+            command=lambda: self._default_staging_var.set(""),
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            paths_sec,
+            text="When set, new games added after this point use <this>/<game name>\n"
+                 "as their mod staging folder. Existing games are unaffected.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(6, 0))
+
+        ctk.CTkFrame(paths_sec, fg_color=BORDER, height=1).pack(fill="x", pady=(12, 8))
+
         ctk.CTkLabel(paths_sec, text="Heroic Config Location (Folder Containing config.json):", font=FONT_NORMAL,
                      text_color=TEXT_MAIN, anchor="w").pack(anchor="w", pady=(0, 4))
 
@@ -1062,6 +1098,18 @@ class SettingsPanel(ctk.CTkFrame):
 
         threading.Thread(target=_size_worker, daemon=True).start()
 
+    def _browse_default_staging(self):
+        from Utils.portal_filechooser import pick_folder
+
+        def _on_chosen(chosen):
+            if chosen:
+                try:
+                    self._default_staging_var.set(str(chosen))
+                except Exception:
+                    pass
+
+        pick_folder("Select Default Mod Staging Folder", _on_chosen)
+
     def _browse_heroic_path(self):
         from Utils.portal_filechooser import pick_folder
 
@@ -1129,6 +1177,7 @@ class SettingsPanel(ctk.CTkFrame):
         )
         save_heroic_config_path(self._heroic_path_var.get())
         save_steam_libraries_vdf_path(self._steam_vdf_var.get())
+        save_default_staging_path(self._default_staging_var.get())
         self._on_done(self)
 
     def _on_close(self):
@@ -1153,6 +1202,7 @@ class SettingsPanel(ctk.CTkFrame):
         )
         save_heroic_config_path(self._heroic_path_var.get())
         save_steam_libraries_vdf_path(self._steam_vdf_var.get())
+        save_default_staging_path(self._default_staging_var.get())
         self._on_done(self)
         python = sys.executable
         os.execv(python, [python] + sys.argv)

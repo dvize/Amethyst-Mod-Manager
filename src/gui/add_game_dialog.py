@@ -56,7 +56,7 @@ from gui.theme import (
     FONT_MONO,
     scaled,
 )
-from Utils.ui_config import get_ui_scale
+from Utils.ui_config import get_ui_scale, load_default_staging_path
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,12 @@ class ReconfigureGamePanel(ctk.CTkFrame):
                 self._profile_ini_files_var.set(game.profile_ini_files)
         else:
             self._start_scan()
-            self._set_staging_text(str(game.get_mod_staging_path()))
+            default_root = load_default_staging_path()
+            if default_root:
+                preset = Path(default_root) / game.name
+                self._set_staging(preset, status="found")
+            else:
+                self._set_staging_text(str(game.get_mod_staging_path()))
 
     # ------------------------------------------------------------------
     # UI

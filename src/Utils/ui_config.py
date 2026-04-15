@@ -660,3 +660,34 @@ def save_steam_libraries_vdf_path(value: str) -> None:
     parser[_PATHS_SECTION]["steam_libraries_vdf"] = value.strip()
     with path.open("w") as f:
         parser.write(f)
+
+
+def load_default_staging_path() -> str:
+    """Return the user-configured default mod staging folder, or '' if unset.
+
+    When set, adding a new game uses ``<this>/<game_name>`` as its mod staging
+    folder instead of the built-in default (~/.config/AmethystModManager/Profiles).
+    """
+    path = get_ui_config_path()
+    if not path.is_file():
+        return ""
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.get(_PATHS_SECTION, "default_staging_path", fallback="").strip()
+    except Exception:
+        return ""
+
+
+def save_default_staging_path(value: str) -> None:
+    """Persist the default mod staging folder to amethyst.ini. Pass '' to clear."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _PATHS_SECTION not in parser:
+        parser[_PATHS_SECTION] = {}
+    parser[_PATHS_SECTION]["default_staging_path"] = value.strip()
+    with path.open("w") as f:
+        parser.write(f)

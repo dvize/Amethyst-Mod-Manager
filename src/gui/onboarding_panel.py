@@ -15,8 +15,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import customtkinter as ctk
+import tkinter as tk
 
 from Nexus.nexus_oauth import NexusOAuthClient, OAuthTokens, CLIENT_ID
+from Utils.config_paths import get_profiles_dir
+from Utils.ui_config import load_default_staging_path, save_default_staging_path
 from Utils.xdg import open_url
 from gui.theme import (
     BG_DEEP,
@@ -407,6 +410,57 @@ class OnboardingPanel(ctk.CTkFrame):
         body = ctk.CTkFrame(inner, fg_color="transparent")
         body.grid(row=0, column=0, sticky="", padx=scaled(40), pady=scaled(30))
 
+        # --- Default mod staging folder ---
+        ctk.CTkLabel(
+            body,
+            text="Default Mod Staging Folder",
+            font=FONT_BOLD,
+            text_color=TEXT_MAIN,
+        ).pack(pady=(0, 4))
+
+        default_root = get_profiles_dir()
+        ctk.CTkLabel(
+            body,
+            text=f"Default: {default_root}",
+            font=FONT_SMALL,
+            text_color=TEXT_DIM,
+            justify="center",
+            wraplength=scaled(480),
+        ).pack(pady=(0, 6))
+
+        staging_row = ctk.CTkFrame(body, fg_color="transparent")
+        staging_row.pack(pady=(0, 4))
+
+        self._onb_staging_var = tk.StringVar(value=load_default_staging_path())
+        ctk.CTkEntry(
+            staging_row, textvariable=self._onb_staging_var,
+            font=FONT_NORMAL, width=scaled(340),
+            placeholder_text="Leave blank to use the default",
+            height=scaled(28),
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            staging_row, text="Browse", width=scaled(70), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_HOVER, hover_color=ACCENT, text_color=TEXT_MAIN,
+            command=self._browse_staging,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            staging_row, text="Clear", width=scaled(56), height=scaled(28),
+            font=FONT_NORMAL, fg_color=BG_DEEP, hover_color=BG_HOVER, text_color=TEXT_DIM,
+            command=lambda: self._onb_staging_var.set(""),
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            body,
+            text="When set, new games will use <this>/<game name> as their\n"
+                 "mod staging folder. You can change this later in Settings.",
+            font=FONT_SMALL,
+            text_color=TEXT_DIM,
+            justify="center",
+            wraplength=scaled(480),
+        ).pack(pady=(0, 24))
+
         ctk.CTkLabel(
             body,
             text="Add Your First Game",
@@ -421,7 +475,7 @@ class OnboardingPanel(ctk.CTkFrame):
             text_color=TEXT_DIM,
             justify="center",
             wraplength=scaled(480),
-        ).pack(pady=(0, 28))
+        ).pack(pady=(0, 20))
 
         ctk.CTkButton(
             body,
@@ -437,7 +491,23 @@ class OnboardingPanel(ctk.CTkFrame):
 
         return frame
 
+    def _browse_staging(self):
+        from Utils.portal_filechooser import pick_folder
+
+        def _on_chosen(chosen):
+            if chosen:
+                try:
+                    self._onb_staging_var.set(str(chosen))
+                except Exception:
+                    pass
+
+        pick_folder("Select Default Mod Staging Folder", _on_chosen)
+
     def _on_add_game_clicked(self):
+        try:
+            save_default_staging_path(self._onb_staging_var.get())
+        except Exception:
+            pass
         if self._oauth_client:
             self._oauth_client.cancel()
             self._oauth_client = None
