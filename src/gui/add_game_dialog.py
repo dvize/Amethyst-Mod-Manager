@@ -856,6 +856,12 @@ class ReconfigureGamePanel(ctk.CTkFrame):
             if chosen:
                 if chosen.name.lower() != "pfx" and (chosen / "pfx").is_dir():
                     chosen = chosen / "pfx"
+                if chosen.name.lower() != "pfx":
+                    self._prefix_status_label.configure(
+                        text="Selected folder must be a pfx folder or contain one.",
+                        text_color=TEXT_ERR
+                    )
+                    return
                 self._set_prefix(chosen, status="found")
                 self._prefix_status_label.configure(
                     text="Prefix folder selected manually.", text_color=TEXT_OK
