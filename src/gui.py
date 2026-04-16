@@ -2055,9 +2055,50 @@ if __name__ == "__main__":
             sys.exit(0)
         # Otherwise no instance is running; continue and open the app.
 
+    def _restore_all_on_close():
+        """Synchronously restore every configured game that has an active deployment."""
+        from Utils.deploy import restore_root_folder
+
+        games = [g for g in _GAMES.values() if g.is_configured() and g.get_deploy_active()]
+        if not games:
+            return
+
+        status = getattr(app, "_status", None)
+        log_fn = getattr(status, "log", None) or (lambda _msg: None)
+        log_fn(f"Restore-on-close: restoring {len(games)} game(s)...")
+
+        for game in games:
+            try:
+                game_root = game.get_game_path()
+                last_deployed = game.get_last_deployed_profile()
+                original_profile_dir = game._active_profile_dir if hasattr(game, "_active_profile_dir") else None
+                if last_deployed:
+                    game.set_active_profile_dir(
+                        game.get_profile_root() / "profiles" / last_deployed
+                    )
+                try:
+                    if hasattr(game, "restore"):
+                        game.restore(log_fn=log_fn)
+                    root_folder_dir = game.get_effective_root_folder_path()
+                    if root_folder_dir.is_dir() and game_root:
+                        restore_root_folder(root_folder_dir, game_root, log_fn=log_fn)
+                    game.clear_deploy_active()
+                finally:
+                    if original_profile_dir is not None:
+                        game.set_active_profile_dir(original_profile_dir)
+            except Exception as e:
+                log_fn(f"Restore-on-close error for {game.name}: {e}")
+
     app = App()
     from Utils.portal_filechooser import set_main_thread_dispatcher
     set_main_thread_dispatcher(app.call_threadsafe)
     app._start_nxm_ipc()          # listen for NXM links from future instances
-    app.protocol("WM_DELETE_WINDOW", lambda: (NxmIPC.shutdown(), app.destroy()))
+    def _on_app_close():
+        from Utils.ui_config import load_restore_on_close
+        if load_restore_on_close():
+            _restore_all_on_close()
+        NxmIPC.shutdown()
+        app.destroy()
+
+    app.protocol("WM_DELETE_WINDOW", _on_app_close)
     app.mainloop()

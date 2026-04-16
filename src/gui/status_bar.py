@@ -22,6 +22,7 @@ from Utils.ui_config import (
     load_clear_archive_after_install, save_clear_archive_after_install,
     load_keep_fomod_archives, save_keep_fomod_archives,
     load_rename_mod_after_install, save_rename_mod_after_install,
+    load_restore_on_close, save_restore_on_close,
     load_heroic_config_path, save_heroic_config_path,
     load_steam_libraries_vdf_path, save_steam_libraries_vdf_path,
     load_default_staging_path, save_default_staging_path,
@@ -849,9 +850,20 @@ class SettingsPanel(ctk.CTkFrame):
 
         ctk.CTkLabel(
             gen_sec,
-            text="After installing a mod, show a prompt to rename it. A dropdown of\n"
-                 "suggestions is built by stripping Nexus/metadata from the archive name.\n"
-                 "Collection installs are never prompted.",
+            text="Show a rename prompt after installing a mod.",
+            font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
+        self._restore_on_close_var = tk.BooleanVar(value=load_restore_on_close())
+        ctk.CTkCheckBox(
+            gen_sec, text="Restore on close",
+            variable=self._restore_on_close_var,
+            font=FONT_NORMAL, text_color=TEXT_MAIN,
+        ).pack(anchor="w", pady=(10, 0))
+
+        ctk.CTkLabel(
+            gen_sec,
+            text="Restore all deployed games to vanilla when the app is closed.",
             font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
@@ -1261,6 +1273,7 @@ class SettingsPanel(ctk.CTkFrame):
         save_clear_archive_after_install(self._clear_archive_var.get())
         save_keep_fomod_archives(self._keep_fomod_archives_var.get())
         save_rename_mod_after_install(self._rename_after_install_var.get())
+        save_restore_on_close(self._restore_on_close_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),
@@ -1286,6 +1299,7 @@ class SettingsPanel(ctk.CTkFrame):
         save_clear_archive_after_install(self._clear_archive_var.get())
         save_keep_fomod_archives(self._keep_fomod_archives_var.get())
         save_rename_mod_after_install(self._rename_after_install_var.get())
+        save_restore_on_close(self._restore_on_close_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),
