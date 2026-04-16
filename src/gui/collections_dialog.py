@@ -1097,7 +1097,12 @@ class CollectionDetailDialog(tk.Frame):
                 ))
                 continue
 
+            details = m.get("details") or {}
             cat = m.get("category") or {}
+            # collection.json stores the category as a string under
+            # details.category; fall back to the older object-shaped field.
+            cat_name = (details.get("category") or cat.get("name") or "").strip()
+            cat_id = int(cat.get("id") or 0)
             mods.append(_NCM(
                 mod_id=mid,
                 file_id=fid,
@@ -1107,8 +1112,10 @@ class CollectionDetailDialog(tk.Frame):
                 optional=bool(m.get("optional", False)),
                 source_type="nexus",
                 version=m.get("version") or "",
-                category_id=int(cat.get("id") or 0),
-                category_name=cat.get("name") or "",
+                category_id=cat_id,
+                category_name=cat_name,
+                install_type=(details.get("type") or "").strip(),
+                md5=(src.get("md5") or "").strip().lower(),
             ))
 
         self._offsite_mods = offsite
@@ -1874,6 +1881,7 @@ class CollectionDetailDialog(tk.Frame):
         schema_pos_to_name: dict[int, str] = {}  # collection.json logical name
         schema_file_id_to_logical: dict[int, str] = {}  # file_id → logicalFilename
         schema_file_id_to_mod_id: dict[int, int] = {}   # file_id → mod_id from collection.json
+        schema_file_id_to_install_type: dict[int, str] = {}  # file_id → details.type (e.g. "dinput")
         fomod_by_file_id: dict[int, dict] = {}   # file_id → saved_selections dict
         # First pass: collect raw logicalFilename values to detect duplicates
         _raw_logical: dict[int, str] = {}   # file_id → raw logicalFilename from source
@@ -1911,6 +1919,9 @@ class CollectionDetailDialog(tk.Frame):
                 mid = src.get("modId")
                 if mid:
                     schema_file_id_to_mod_id[fid] = int(mid)
+                _det_type = ((schema_mod.get("details") or {}).get("type") or "").strip()
+                if _det_type:
+                    schema_file_id_to_install_type[fid] = _det_type
                 choices = schema_mod.get("choices") or {}
                 if choices.get("type") == "fomod":
                     fomod_by_file_id[fid] = _fomod_choices_from_collection(choices)
@@ -2208,6 +2219,7 @@ class CollectionDetailDialog(tk.Frame):
                     getattr(mod, "size_bytes", 0) or 0,
                     mod.mod_id,
                     mod.file_id,
+                    expected_md5=getattr(mod, "md5", "") or "",
                 )
                 if _ext_found and _ext_complete:
                     self._log(
@@ -2343,6 +2355,8 @@ class CollectionDetailDialog(tk.Frame):
                     _pmeta.category_id = mod.category_id
                 if mod.category_name:
                     _pmeta.category_name = mod.category_name
+                if schema_file_id_to_install_type.get(mod.file_id, "").lower() == "dinput":
+                    _pmeta.root_folder = True
             except Exception:
                 _pmeta = None
 
@@ -2598,6 +2612,8 @@ class CollectionDetailDialog(tk.Frame):
                             _def_pmeta.category_id = _def_mod.category_id
                         if _def_mod.category_name:
                             _def_pmeta.category_name = _def_mod.category_name
+                        if schema_file_id_to_install_type.get(_def_mod.file_id, "").lower() == "dinput":
+                            _def_pmeta.root_folder = True
                     except Exception:
                         _def_pmeta = None
                     _def_logical = schema_file_id_to_logical.get(_def_mod.file_id, "") or ""
@@ -3451,6 +3467,7 @@ class CollectionDetailDialog(tk.Frame):
         schema_pos_to_name: dict[int, str] = {}
         schema_file_id_to_logical: dict[int, str] = {}
         schema_file_id_to_mod_id: dict[int, int] = {}
+        schema_file_id_to_install_type: dict[int, str] = {}
         fomod_by_file_id: dict[int, dict] = {}
 
         _raw_logical: dict[int, str] = {}
@@ -3484,6 +3501,9 @@ class CollectionDetailDialog(tk.Frame):
                 mid = src.get("modId")
                 if mid:
                     schema_file_id_to_mod_id[fid] = int(mid)
+                _det_type = ((sm.get("details") or {}).get("type") or "").strip()
+                if _det_type:
+                    schema_file_id_to_install_type[fid] = _det_type
                 choices = sm.get("choices") or {}
                 if choices.get("type") == "fomod":
                     fomod_by_file_id[fid] = _fomod_choices_from_collection(choices)
@@ -3646,6 +3666,7 @@ class CollectionDetailDialog(tk.Frame):
                         getattr(mod, "size_bytes", 0) or 0,
                         mod.mod_id,
                         mod.file_id,
+                        expected_md5=getattr(mod, "md5", "") or "",
                     )
                     if found and is_complete:
                         return found
@@ -3701,6 +3722,8 @@ class CollectionDetailDialog(tk.Frame):
                     _pmeta.category_id = mod.category_id
                 if mod.category_name:
                     _pmeta.category_name = mod.category_name
+                if schema_file_id_to_install_type.get(mod.file_id, "").lower() == "dinput":
+                    _pmeta.root_folder = True
             except Exception:
                 _pmeta = None
 

@@ -3579,15 +3579,21 @@ class ModListPanel(ctk.CTkFrame):
             def _flags_key(i):
                 name = self._entries[i].name
                 # Lower number = flagged (sorts first when ascending)
-                has_warning = (name in self._missing_reqs
-                              and name not in self._ignored_missing_reqs)
-                has_update = name in self._update_mods
+                has_warning  = (name in self._missing_reqs
+                               and name not in self._ignored_missing_reqs)
+                is_locked    = self._entries[i].locked
+                has_update   = name in self._update_mods
+                has_root     = name in self._root_folder_mods
+                has_disabled = name in self._excluded_mod_files_map
+                has_info     = name in self._prertx_mods
                 has_endorsed = name in self._endorsed_mods
-                is_locked = self._entries[i].locked
                 score = 0
-                if has_warning:  score |= 8
-                if is_locked:    score |= 4
-                if has_update:   score |= 2
+                if has_warning:  score |= 64
+                if is_locked:    score |= 32
+                if has_update:   score |= 16
+                if has_root:     score |= 8
+                if has_disabled: score |= 4
+                if has_info:     score |= 2
                 if has_endorsed: score |= 1
                 return -score  # negate so flagged mods sort first in ascending
             return _flags_key
@@ -3794,6 +3800,8 @@ class ModListPanel(ctk.CTkFrame):
                     _items.append("prertx")
                 if entry.name in self._excluded_mod_files_map:
                     _items.append("disabled_files")
+                if entry.name in self._root_folder_mods:
+                    _items.append("root")
                 _n = len(_items)
                 if _n > 0:
                     _group_w = (_n - 1) * _FLAG_ICON_SPACING
@@ -4571,6 +4579,8 @@ class ModListPanel(ctk.CTkFrame):
                     _items.append("prertx")
                 if entry.name in self._excluded_mod_files_map:
                     _items.append("disabled_files")
+                if entry.name in self._root_folder_mods:
+                    _items.append("root")
                 _n = len(_items)
                 if _n > 0:
                     _group_w = (_n - 1) * _FLAG_ICON_SPACING
@@ -4587,6 +4597,8 @@ class ModListPanel(ctk.CTkFrame):
                             tip = "Pre-RTX mod"
                         elif _kind == "disabled_files":
                             tip = "Has disabled files"
+                        elif _kind == "root":
+                            tip = "This mod is sent to the root folder"
                         else:
                             tip = ""
                         if tip:
