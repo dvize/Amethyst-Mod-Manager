@@ -309,7 +309,9 @@ class Fallout_3(BaseGame):
     # -----------------------------------------------------------------------
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Fallout3")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Fallout3 GOG")
     _MYGAMES_SUBPATH = Path("Fallout3")
+    _MYGAMES_SUBPATH_GOG = Path("Fallout3 GOG")
     _ARCHIVE_INI_FILENAME = "FALLOUT.ini"
     archive_invalidation_enabled = True
 
@@ -321,11 +323,18 @@ class Fallout_3(BaseGame):
     def frameworks(self) -> dict[str, str]:
         return {"Script Extender": self._script_extender_exe}
 
+    _APPDATA_SUBPATH_GOG: Path | None = None
+
     def _plugins_txt_target(self) -> Path | None:
-        """Return the in-prefix path where Fallout 3 expects plugins.txt."""
+        """Return the in-prefix path where the game expects plugins.txt."""
         if self._prefix_path is None:
             return None
-        return self._prefix_path / self._APPDATA_SUBPATH / "plugins.txt"
+        steam_dir = self._prefix_path / self._APPDATA_SUBPATH
+        if self._APPDATA_SUBPATH_GOG is not None:
+            gog_dir = self._prefix_path / self._APPDATA_SUBPATH_GOG
+            if not steam_dir.is_dir() and gog_dir.is_dir():
+                return gog_dir / "plugins.txt"
+        return steam_dir / "plugins.txt"
 
     def _symlink_plugins_txt(self, profile: str, log_fn) -> None:
         """Symlink the active profile's plugins.txt into the Proton prefix."""
@@ -364,22 +373,25 @@ class Fallout_3(BaseGame):
 
     _MYGAMES_DOCS = Path("drive_c/users/steamuser/Documents/My Games")
 
+    _MYGAMES_SUBPATH_GOG: Path | None = None
+
     def _get_archive_ini_path(self) -> "Path | None":
         """Return the full path to the game INI used for archive invalidation."""
-        if self._prefix_path is None:
+        mygames = self._mygames_path()
+        if mygames is None:
             return None
-        return (
-            self._prefix_path
-            / self._MYGAMES_DOCS
-            / self._MYGAMES_SUBPATH
-            / self._ARCHIVE_INI_FILENAME
-        )
+        return mygames / self._ARCHIVE_INI_FILENAME
 
     def _mygames_path(self) -> "Path | None":
         """Return the My Games folder for this game inside the Proton prefix."""
         if self._prefix_path is None:
             return None
-        return self._prefix_path / self._MYGAMES_DOCS / self._MYGAMES_SUBPATH
+        steam_dir = self._prefix_path / self._MYGAMES_DOCS / self._MYGAMES_SUBPATH
+        if self._MYGAMES_SUBPATH_GOG is not None:
+            gog_dir = self._prefix_path / self._MYGAMES_DOCS / self._MYGAMES_SUBPATH_GOG
+            if not steam_dir.is_dir() and gog_dir.is_dir():
+                return gog_dir
+        return steam_dir
 
     def _symlink_profile_ini_files(self, profile: str, log_fn) -> None:
         """Symlink *.ini files from the profile folder into the My Games directory.
@@ -763,7 +775,9 @@ class Fallout_NV(Fallout_3):
         return "https://raw.githubusercontent.com/loot/falloutnv/v0.26/masterlist.yaml"
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/FalloutNV")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/FalloutNV GOG")
     _MYGAMES_SUBPATH = Path("FalloutNV")
+    _MYGAMES_SUBPATH_GOG = Path("FalloutNV GOG")
     _ARCHIVE_INI_FILENAME = "FALLOUT.ini"
 
     @property
@@ -848,7 +862,9 @@ class Fallout_4(Fallout_3):
         return "https://raw.githubusercontent.com/loot/fallout4/v0.21/masterlist.yaml"
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Fallout4")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Fallout4 GOG")
     _MYGAMES_SUBPATH = Path("Fallout4")
+    _MYGAMES_SUBPATH_GOG = Path("Fallout4 GOG")
     _ARCHIVE_INI_FILENAME = "Fallout4.ini"
 
     @property
@@ -1001,6 +1017,7 @@ class Oblivion(Fallout_3):
         ]
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Oblivion")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Oblivion GOG")
     archive_invalidation_enabled = False
 
     @property
@@ -1011,7 +1028,12 @@ class Oblivion(Fallout_3):
         """Return the in-prefix path where Oblivion expects Plugins.txt (capital P)."""
         if self._prefix_path is None:
             return None
-        return self._prefix_path / self._APPDATA_SUBPATH / "Plugins.txt"
+        steam_dir = self._prefix_path / self._APPDATA_SUBPATH
+        if self._APPDATA_SUBPATH_GOG is not None:
+            gog_dir = self._prefix_path / self._APPDATA_SUBPATH_GOG
+            if not steam_dir.is_dir() and gog_dir.is_dir():
+                return gog_dir / "Plugins.txt"
+        return steam_dir / "Plugins.txt"
 
     def apply_archive_invalidation(self, log_fn) -> None:
         """Generate ArchiveInvalidation.txt listing all deployed .dds paths."""
@@ -1111,7 +1133,9 @@ class Skyrim(Fallout_3):
         ]
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Skyrim")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Skyrim GOG")
     _MYGAMES_SUBPATH = Path("Skyrim")
+    _MYGAMES_SUBPATH_GOG = Path("Skyrim GOG")
     _ARCHIVE_INI_FILENAME = "Skyrim.ini"
 
     @property
@@ -1350,7 +1374,9 @@ class Enderal(Fallout_3):
         return "https://raw.githubusercontent.com/loot/enderal/v0.26/masterlist.yaml"
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/enderal")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/enderal GOG")
     _MYGAMES_SUBPATH = Path("Enderal")
+    _MYGAMES_SUBPATH_GOG = Path("Enderal GOG")
     _ARCHIVE_INI_FILENAME = "Skyrim.ini"
 
     @property
@@ -1401,7 +1427,9 @@ class EnderalSE(Fallout_3):
         return "https://raw.githubusercontent.com/loot/enderal/v0.26/masterlist.yaml"
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Enderal Special Edition")
+    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Enderal Special Edition GOG")
     _MYGAMES_SUBPATH = Path("Enderal Special Edition")
+    _MYGAMES_SUBPATH_GOG = Path("Enderal Special Edition GOG")
     _ARCHIVE_INI_FILENAME = "Skyrim.ini"
 
     @property
