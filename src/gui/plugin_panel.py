@@ -69,7 +69,12 @@ from Utils.plugins import (
     prune_plugins_from_filemap,
 )
 from Utils.plugin_parser import check_missing_masters, check_late_masters, check_version_mismatched_masters, read_masters, is_esl_flagged, set_esl_flag, check_esl_eligible
-from LOOT.loot_sorter import sort_plugins as loot_sort, is_available as loot_available
+from LOOT.loot_sorter import (
+    sort_plugins as loot_sort,
+    is_available as loot_available,
+    write_loot_info as loot_write_info,
+    read_loot_info as loot_read_info,
+)
 from Nexus.nexus_meta import write_meta, read_meta
 
 
@@ -266,6 +271,13 @@ class PluginPanel(ctk.CTkFrame):
             _img3 = PilImage.open(_vmm_path).convert("RGBA").resize((_flag_icon_sz, _flag_icon_sz), PilImage.LANCZOS)
             self._version_mismatch_icon = ImageTk.PhotoImage(_img3)
 
+        # LOOT info icon — shown when a plugin has one or more masterlist messages
+        self._loot_info_icon: ImageTk.PhotoImage | None = None
+        _loot_info_path = _ICONS_DIR / "Loot_info.png"
+        if _loot_info_path.is_file():
+            _img4 = PilImage.open(_loot_info_path).convert("RGBA").resize((_flag_icon_sz, _flag_icon_sz), PilImage.LANCZOS)
+            self._loot_info_icon = ImageTk.PhotoImage(_img4)
+
         # Lock icon
         self._icon_lock: ImageTk.PhotoImage | None = None
         _lock_path = _ICONS_DIR / "lock.png"
@@ -320,6 +332,10 @@ class PluginPanel(ctk.CTkFrame):
         self._pool_lock_marks: list[int] = []
         self._pool_ul_dot: list[int] = []
         self._pool_esl_badge: list[int] = []
+        self._pool_loot_info: list[int | None] = []
+        # lowercase plugin name -> full info dict persisted to loot.json:
+        # {messages, dirty, requirements, incompatibilities, locations}
+        self._loot_info: dict[str, dict] = {}
         self._esl_flagged_plugins: set[str] = set()  # lowercase plugin names with ESL flag set
         self._esl_safe_plugins: set[str] = set()    # lowercase plugin names eligible for ESL flag
         self._esl_unsafe_plugins: set[str] = set()  # lowercase plugin names ineligible for ESL flag
@@ -4189,6 +4205,12 @@ class PluginPanel(ctk.CTkFrame):
                                       state="hidden")
             self._pool_esl_badge.append(esl_badge)
 
+            loot_info_id: int | None = None
+            if self._loot_info_icon:
+                loot_info_id = c.create_image(0, -200, image=self._loot_info_icon,
+                                              anchor="center", state="hidden")
+            self._pool_loot_info.append(loot_info_id)
+
             def _lk_release(e, slot=s):
                 self._on_pool_lock_toggle(slot)
                 return "break"
@@ -4357,58 +4379,90 @@ class PluginPanel(ctk.CTkFrame):
             _global_ul = get_loot_game_dir(game.game_id) / "userlist.yaml"
             userlist_path = _global_ul if _global_ul.is_file() else None
 
-        try:
-            result = loot_sort(
-                plugin_names=plugin_names,
-                enabled_set=enabled_set,
-                game_name=game_name,
-                game_path=game_path,
-                staging_root=staging_root,
-                log_fn=self._log,
-                game_type_attr=game.loot_game_type,
-                game_id=game.game_id,
-                masterlist_url=game.loot_masterlist_url,
-                game_data_dir=game.get_vanilla_plugins_path() if hasattr(game, "get_vanilla_plugins_path") else None,
-                userlist_path=userlist_path,
+        # Snapshot everything the worker needs — no Tk access from the thread.
+        _profile_dir = self._plugins_path.parent
+        _game_id = game.game_id
+        _game_type_attr = game.loot_game_type
+        _masterlist_url = game.loot_masterlist_url
+        _game_data_dir = (game.get_vanilla_plugins_path()
+                          if hasattr(game, "get_vanilla_plugins_path") else None)
+
+        def _worker():
+            try:
+                result = loot_sort(
+                    plugin_names=plugin_names,
+                    enabled_set=enabled_set,
+                    game_name=game_name,
+                    game_path=game_path,
+                    staging_root=staging_root,
+                    log_fn=lambda m: self._safe_after(0, lambda msg=m: self._log(msg)),
+                    game_type_attr=_game_type_attr,
+                    game_id=_game_id,
+                    masterlist_url=_masterlist_url,
+                    game_data_dir=_game_data_dir,
+                    userlist_path=userlist_path,
+                )
+            except RuntimeError as e:
+                self._safe_after(0, lambda err=e: self._log(f"LOOT sort failed: {err}"))
+                return
+            except Exception as e:
+                self._safe_after(0, lambda err=e: self._log(f"LOOT sort crashed: {err}"))
+                return
+            self._safe_after(0, lambda r=result: _apply_result(r))
+
+        def _apply_result(result):
+            for w in result.warnings:
+                self._log(f"Warning: {w}")
+
+            # Persist evaluated LOOT metadata to <profile>/loot.json so the UI
+            # can surface it without re-running a sort.
+            try:
+                loot_write_info(
+                    _profile_dir,
+                    result.plugin_info,
+                    result.general_messages,
+                    game_id=_game_id,
+                )
+                self._loot_info = {
+                    k.lower(): v for k, v in result.plugin_info.items()
+                }
+            except OSError as e:
+                self._log(f"Could not write loot.json: {e}")
+
+            if result.moved_count == 0 and not locked_indices:
+                self._log("Load order is already sorted.")
+                self._refresh_plugins_tab()
+                return
+
+            # Re-interleave: place locked plugins back at their original indices,
+            # filling remaining slots with the LOOT-sorted unlocked plugins.
+            name_to_enabled = {e.name: e.enabled for e in self._plugin_entries}
+            sorted_unlocked = iter(
+                PluginEntry(name=n, enabled=name_to_enabled.get(n, True))
+                for n in result.sorted_names
             )
-        except RuntimeError as e:
-            self._log(f"LOOT sort failed: {e}")
-            return
+            total = len(self._plugin_entries)
+            new_entries: list[PluginEntry] = []
+            for i in range(total):
+                if i in locked_indices:
+                    new_entries.append(locked_indices[i])
+                else:
+                    new_entries.append(next(sorted_unlocked))
 
-        for w in result.warnings:
-            self._log(f"Warning: {w}")
+            self._plugin_entries = new_entries
+            _include_vanilla = self._plugins_include_vanilla
+            write_plugins(self._plugins_path, [
+                e for e in new_entries
+                if _include_vanilla or e.name.lower() not in self._vanilla_plugins
+            ], star_prefix=self._plugins_star_prefix)
+            write_loadorder(
+                self._plugins_path.parent / "loadorder.txt", new_entries,
+            )
+            self._refresh_plugins_tab()
+            self._log(f"Sorted — {result.moved_count} plugin(s) changed position.")
 
-        if result.moved_count == 0 and not locked_indices:
-            self._log("Load order is already sorted.")
-            return
-
-        # Re-interleave: place locked plugins back at their original indices,
-        # filling remaining slots with the LOOT-sorted unlocked plugins.
-        name_to_enabled = {e.name: e.enabled for e in self._plugin_entries}
-        sorted_unlocked = iter(
-            PluginEntry(name=n, enabled=name_to_enabled.get(n, True))
-            for n in result.sorted_names
-        )
-        total = len(self._plugin_entries)
-        new_entries: list[PluginEntry] = []
-        for i in range(total):
-            if i in locked_indices:
-                new_entries.append(locked_indices[i])
-            else:
-                new_entries.append(next(sorted_unlocked))
-
-        self._plugin_entries = new_entries
-        # Write mod plugins to plugins.txt, full order to loadorder.txt
-        _include_vanilla = self._plugins_include_vanilla
-        write_plugins(self._plugins_path, [
-            e for e in new_entries
-            if _include_vanilla or e.name.lower() not in self._vanilla_plugins
-        ], star_prefix=self._plugins_star_prefix)
-        write_loadorder(
-            self._plugins_path.parent / "loadorder.txt", new_entries,
-        )
-        self._refresh_plugins_tab()
-        self._log(f"Sorted — {result.moved_count} plugin(s) changed position.")
+        self._log("Sorting plugins with LOOT (running in background)...")
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Plugin column layout
@@ -4474,6 +4528,292 @@ class PluginPanel(ctk.CTkFrame):
             self._plugin_locks = {}
             return
         self._plugin_locks = read_plugin_locks(self._plugins_path.parent)
+
+    def _format_loot_tooltip(self, info: dict) -> str:
+        """Render a loot.json plugin-info dict into a multi-section tooltip string."""
+        sections: list[str] = []
+
+        msgs = info.get("messages") or []
+        if msgs:
+            lines = []
+            for m in msgs:
+                prefix = {"error": "[!]", "warn": "[!]", "say": "[i]"}.get(
+                    m.get("type", "say"), "[i]")
+                lines.append(f"{prefix} {m.get('text', '')}")
+            sections.append("LOOT messages:\n" + "\n".join(lines))
+
+        # Cache sets used by both requirements and incompatibilities blocks.
+        enabled_lower = {
+            e.name.lower() for e in self._plugin_entries if e.enabled
+        }
+        enabled_mod_ids = self._get_enabled_nexus_mod_ids()
+
+        reqs = info.get("requirements") or []
+        if reqs:
+            staged_paths = self._get_staged_paths()
+            lines = []
+            for r in reqs:
+                raw = r.get("name", "")
+                display = r.get("display_name") or raw
+                if self._is_requirement_satisfied(
+                    raw, display, enabled_lower, enabled_mod_ids, staged_paths
+                ):
+                    continue
+                # Clean a Filename(...) wrapper if it leaked into display.
+                dm = re.match(r'^Filename\(["\'](.+?)["\']\)$', display)
+                if dm:
+                    display = dm.group(1)
+                line = f"  - {display}"
+                detail = r.get("detail", "")
+                if detail:
+                    line += f" ({detail})"
+                lines.append(line)
+            if lines:
+                sections.append("Requires (missing):\n" + "\n".join(lines))
+
+        incs = info.get("incompatibilities") or []
+        if incs:
+            # Only surface incompatibilities that are actually active — i.e.
+            # the other plugin is present and enabled in this profile.
+            lines = []
+            for i in incs:
+                raw = i.get("name", "")
+                display = i.get("display_name") or raw
+                # libloot Filename names come through as Filename("foo.esp"); extract the inner name.
+                m = re.match(r'^Filename\(["\'](.+?)["\']\)$', raw)
+                fname = m.group(1) if m else raw
+                fname_lower = fname.lower().lstrip("./").lstrip("../")
+                if fname_lower not in enabled_lower:
+                    continue
+                # If display is still the Filename(...) wrapper, show the clean name instead.
+                dm = re.match(r'^Filename\(["\'](.+?)["\']\)$', display)
+                if dm:
+                    display = dm.group(1)
+                line = f"  - {display}"
+                detail = i.get("detail", "")
+                if detail:
+                    line += f" ({detail})"
+                lines.append(line)
+            if lines:
+                sections.append("Incompatible with (currently active):\n" + "\n".join(lines))
+
+        return "\n\n".join(sections)
+
+    def _get_enabled_nexus_mod_ids(self) -> set[int]:
+        """Return the set of Nexus mod_ids for mods enabled in the current profile.
+
+        Cached on self; invalidated via _invalidate_enabled_mod_ids() whenever
+        the modlist, profile, or staging root changes.
+        """
+        cached = getattr(self, "_enabled_mod_ids_cache", None)
+        if cached is not None:
+            return cached
+        ids: set[int] = set()
+        if self._plugins_path is not None:
+            staging_root = self._staging_root
+            modlist_path = self._plugins_path.parent / "modlist.txt"
+            if staging_root and staging_root.is_dir() and modlist_path.is_file():
+                try:
+                    from Utils.modlist import read_modlist
+                    entries = read_modlist(modlist_path)
+                    for e in entries:
+                        if not e.enabled:
+                            continue
+                        meta_path = staging_root / e.name / "meta.ini"
+                        if not meta_path.is_file():
+                            continue
+                        try:
+                            meta = read_meta(meta_path)
+                        except Exception:
+                            continue
+                        if meta.mod_id:
+                            ids.add(int(meta.mod_id))
+                except Exception:
+                    pass
+        self._enabled_mod_ids_cache = ids
+        return ids
+
+    def _invalidate_enabled_mod_ids(self) -> None:
+        self._enabled_mod_ids_cache = None
+        self._staged_paths_cache = None
+        self._game_root_files_cache = None
+
+    def _get_staged_paths(self) -> set[str]:
+        """Return the lowercase set of relative paths currently staged.
+
+        Used to resolve LOOT "Requires" entries that name a specific file
+        (e.g. 'SKSE/Plugins/PapyrusUtil.dll') rather than a plugin or a
+        Nexus link. Paths are normalised to forward slashes and lowercased.
+        """
+        cached = getattr(self, "_staged_paths_cache", None)
+        if cached is not None:
+            return cached
+        paths: set[str] = set()
+        if self._staging_root is not None and self._staging_root.is_dir():
+            filemap_path = self._staging_root.parent / "filemap.txt"
+            if filemap_path.is_file():
+                try:
+                    for line in filemap_path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        rel = line.split("\t", 1)[0].strip()
+                        if rel:
+                            paths.add(rel.replace("\\", "/").lower())
+                except OSError:
+                    pass
+        self._staged_paths_cache = paths
+        return paths
+
+    def _get_game_root_files(self) -> set[str]:
+        """Return lowercase filenames sitting directly in the game's root folder.
+
+        Many users drop loaders like skse64_loader.exe straight into the game
+        root rather than deploying them as a mod, so LOOT requirements such as
+        "Skyrim Script Extender" should be treated as satisfied if that file is
+        present. Top-level only — we don't recurse into subfolders.
+        """
+        cached = getattr(self, "_game_root_files_cache", None)
+        if cached is not None:
+            return cached
+        names: set[str] = set()
+        game = getattr(self, "_game", None)
+        if game is not None and hasattr(game, "get_game_path"):
+            try:
+                game_path = game.get_game_path()
+            except Exception:
+                game_path = None
+            if game_path is not None:
+                root = Path(game_path)
+                if root.is_dir():
+                    try:
+                        for entry in root.iterdir():
+                            if entry.is_file():
+                                names.add(entry.name.lower())
+                    except OSError:
+                        pass
+        self._game_root_files_cache = names
+        return names
+
+    @staticmethod
+    def _extract_nexus_mod_id(text: str) -> int | None:
+        """Pull a Nexus mod_id out of a URL or markdown link, if present."""
+        if not text:
+            return None
+        m = re.search(r"nexusmods\.com/[^/\s)]+/mods/(\d+)", text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def _is_requirement_satisfied(
+        self,
+        raw: str,
+        display: str,
+        enabled_lower: set[str],
+        enabled_mod_ids: set[int],
+        staged_paths: set[str],
+    ) -> bool:
+        """True if a LOOT requirement entry is met in the current profile.
+
+        Checks these forms in order:
+          1. Filename("foo.esp") → an enabled plugin by that name
+          2. Filename("SKSE/Plugins/foo.dll") → a staged file by that rel path,
+             or a top-level file in the game root (basename match)
+          3. Nexus URL → an enabled mod with that mod_id
+          4. Script-extender heuristic → skse/skyui/f4se loader in game root
+        """
+        m = re.match(r'^Filename\(["\'](.+?)["\']\)$', raw)
+        if m:
+            inner = m.group(1).replace("\\", "/").lstrip("./").lstrip("../")
+            inner_lower = inner.lower()
+            if inner_lower in enabled_lower:
+                return True
+            if inner_lower in staged_paths:
+                return True
+            # Basename-only check against files in the game root (top-level).
+            base = inner_lower.rsplit("/", 1)[-1]
+            if base and base in self._get_game_root_files():
+                return True
+        mod_id = self._extract_nexus_mod_id(display) or self._extract_nexus_mod_id(raw)
+        if mod_id is not None and mod_id in enabled_mod_ids:
+            return True
+        # Heuristic for script extenders (SKSE/SKSE64/F4SE/OBSE/etc.) which
+        # users often drop straight into the game root instead of a mod folder.
+        text = f"{display} {raw}".lower()
+        if "script extender" in text or re.search(r"\bsk?se\b|\bf4se\b|\bobse\b|\bnvse\b", text):
+            for fname in self._get_game_root_files():
+                if "_loader.exe" in fname or fname.endswith("se_loader.exe"):
+                    return True
+        return False
+
+    def _has_loot_tooltip_content(self, plugin_name: str) -> bool:
+        """True if the LOOT info for this plugin would render any tooltip section.
+
+        Mirrors the filtering done in _format_loot_tooltip so the flag icon
+        only lights up when there's something to show:
+          - messages always count
+          - a requirement counts only if not satisfied by an enabled plugin,
+            staged file, or enabled Nexus mod
+          - an incompatibility counts only if the conflicting plugin is enabled
+        """
+        info = self._loot_info.get(plugin_name.lower())
+        if not info:
+            return False
+        if info.get("messages"):
+            return True
+
+        enabled_lower: set[str] | None = None
+        enabled_mod_ids: set[int] | None = None
+        staged_paths: set[str] | None = None
+
+        reqs = info.get("requirements") or []
+        for r in reqs:
+            raw = r.get("name", "")
+            display = r.get("display_name") or raw
+            if enabled_lower is None:
+                enabled_lower = {e.name.lower() for e in self._plugin_entries if e.enabled}
+            if enabled_mod_ids is None:
+                enabled_mod_ids = self._get_enabled_nexus_mod_ids()
+            if staged_paths is None:
+                staged_paths = self._get_staged_paths()
+            if not self._is_requirement_satisfied(
+                raw, display, enabled_lower, enabled_mod_ids, staged_paths
+            ):
+                return True
+
+        incs = info.get("incompatibilities") or []
+        if incs:
+            if enabled_lower is None:
+                enabled_lower = {e.name.lower() for e in self._plugin_entries if e.enabled}
+            for i in incs:
+                raw = i.get("name", "")
+                m = re.match(r'^Filename\(["\'](.+?)["\']\)$', raw)
+                fname = (m.group(1) if m else raw).lower().lstrip("./").lstrip("../")
+                if fname in enabled_lower:
+                    return True
+        return False
+
+    def _load_loot_messages(self) -> None:
+        """Populate self._loot_info from <profile>/loot.json (if present)."""
+        if self._plugins_path is None:
+            self._loot_info = {}
+            return
+        data = loot_read_info(self._plugins_path.parent)
+        plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
+        version = data.get("version", 1) if isinstance(data, dict) else 1
+        out: dict[str, dict] = {}
+        if version >= 2:
+            for k, v in plugins.items():
+                if isinstance(v, dict) and v:
+                    out[k.lower()] = v
+        else:
+            # v1: plugin value was a raw message list
+            for k, v in plugins.items():
+                if isinstance(v, list) and v:
+                    out[k.lower()] = {"messages": v}
+        self._loot_info = out
 
     def _save_plugin_locks(self) -> None:
         if self._plugins_path is None:
@@ -4734,11 +5074,14 @@ class PluginPanel(ctk.CTkFrame):
 
         if self._plugins_path is None or not self._plugin_extensions:
             self._plugin_entries = []
+            self._loot_info = {}
             self._apply_plugin_search_filter()
             self._predraw()
             return
 
         self._load_plugin_locks()
+        self._load_loot_messages()
+        self._invalidate_enabled_mod_ids()
         mod_entries = read_plugins(self._plugins_path, star_prefix=self._plugins_star_prefix)
         mod_map = {e.name.lower(): e for e in mod_entries}
 
@@ -5009,14 +5352,16 @@ class PluginPanel(ctk.CTkFrame):
                 has_vmm = entry.name in self._version_mismatch_masters
                 has_ul = entry.name.lower() in self._userlist_plugins
                 has_esl = entry.name.lower() in self._esl_flagged_plugins
+                has_loot = self._has_loot_tooltip_content(entry.name)
                 flags_x0 = self._pcol_x[2]
                 flags_x1 = self._pcol_x[3]
-                active_flags = [f for f in [has_missing, has_late, has_vmm, has_ul, has_esl] if f]
+                active_flags = [f for f in [has_missing, has_late, has_vmm, has_ul, has_esl, has_loot] if f]
                 n_flags = len(active_flags)
-                flags_step = (flags_x1 - flags_x0) // (n_flags + 1) if n_flags else 0
-                _flag_pos = iter(
-                    flags_x0 + flags_step * (i + 1) for i in range(n_flags)
-                )
+                # Pack flags tightly with a fixed gap, centered in the column.
+                flag_gap = scaled(20)
+                flags_center = (flags_x0 + flags_x1) // 2
+                pack_start = flags_center - (flag_gap * (n_flags - 1)) // 2 if n_flags else flags_center
+                _flag_pos = iter(pack_start + flag_gap * i for i in range(n_flags))
 
                 warn_id = self._pool_warn[s]
                 if warn_id is not None:
@@ -5059,6 +5404,14 @@ class PluginPanel(ctk.CTkFrame):
                         c.itemconfigure(esl_badge_id, state="normal")
                     else:
                         c.itemconfigure(esl_badge_id, state="hidden")
+
+                loot_info_id = self._pool_loot_info[s] if s < len(self._pool_loot_info) else None
+                if loot_info_id is not None:
+                    if has_loot:
+                        c.coords(loot_info_id, next(_flag_pos), y_mid)
+                        c.itemconfigure(loot_info_id, state="normal")
+                    else:
+                        c.itemconfigure(loot_info_id, state="hidden")
 
                 self._pool_data_idx[s] = actual_idx
 
@@ -5107,6 +5460,8 @@ class PluginPanel(ctk.CTkFrame):
                     c.itemconfigure(self._pool_ul_dot[s], state="hidden")
                 if s < len(self._pool_esl_badge):
                     c.itemconfigure(self._pool_esl_badge[s], state="hidden")
+                if s < len(self._pool_loot_info) and self._pool_loot_info[s] is not None:
+                    c.itemconfigure(self._pool_loot_info[s], state="hidden")
                 c.itemconfigure(self._pool_check_rects[s], state="hidden")
                 c.itemconfigure(self._pool_check_marks[s], state="hidden")
                 c.itemconfigure(self._pool_lock_rects[s], state="hidden")
@@ -5431,6 +5786,11 @@ class PluginPanel(ctk.CTkFrame):
                 parts.append(ul_msg)
             if entry.name.lower() in self._esl_flagged_plugins:
                 parts.append("This plugin is marked as Light (ESL)")
+            loot_info = self._loot_info.get(entry.name.lower())
+            if loot_info:
+                loot_text = self._format_loot_tooltip(loot_info)
+                if loot_text:
+                    parts.append(loot_text)
             if parts:
                 text = "\n\n".join(parts)
                 # TkTooltip.show() is idempotent for the same text — no stale check needed.
@@ -6018,6 +6378,16 @@ class PluginPanel(ctk.CTkFrame):
             if plugin_name.lower() in self._userlist_plugins:
                 items.append(("Remove from userlist",
                                lambda n=plugin_name: self._remove_plugin_from_userlist(n)))
+
+            # LOOT locations (mod page / author links from the masterlist)
+            loot_locs = (self._loot_info.get(plugin_name.lower(), {}).get("locations") or [])
+            for loc in loot_locs:
+                url = loc.get("url", "")
+                if not url:
+                    continue
+                label_name = loc.get("name") or url
+                items.append((f"Open: {label_name}",
+                               lambda u=url: webbrowser.open(u)))
         else:
             items.append((f"Enable selected ({count})",
                            lambda idxs=toggleable: self._enable_selected_plugins(idxs)))

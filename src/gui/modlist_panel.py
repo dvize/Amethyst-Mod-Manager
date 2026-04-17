@@ -609,7 +609,7 @@ class ModListPanel(ctk.CTkFrame):
         self._new_profile_entry.bind("<Escape>", lambda _e: self.hide_new_profile_bar())
 
         self._new_profile_specific_mods_var = tk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        _specific_cb = ctk.CTkCheckBox(
             bar,
             text="Use Profile Specific Mods",
             variable=self._new_profile_specific_mods_var,
@@ -620,7 +620,13 @@ class ModListPanel(ctk.CTkFrame):
             border_color=BORDER,
             checkmark_color="white",
             width=22, height=22,
-        ).pack(side="left", padx=(0, 12), pady=6)
+        )
+        _specific_cb.pack(side="left", padx=(0, 12), pady=6)
+        self._tooltip.attach(
+            _specific_cb,
+            "Profiles with this setting use their own mods folders",
+            offset_x=scaled(12), offset_y=scaled(12),
+        )
 
         ctk.CTkButton(
             bar, text="Create", width=72, height=26, font=_theme.FONT_BOLD,
@@ -4561,6 +4567,21 @@ class ModListPanel(ctk.CTkFrame):
                     else:
                         tip = f"BSA conflict - {_conflict_label[bsa]}"
                     self._tooltip.show(event.x_root, event.y_root, tip)
+                    return
+
+        # Show tooltip when hovering over the separator lock checkbox.
+        if 0 <= row < len(vis):
+            entry = self._entries[vis[row]]
+            if entry.is_separator and entry.name not in (OVERWRITE_NAME, ROOT_FOLDER_NAME):
+                cw = self._canvas_w
+                lock_w = scaled(28)
+                lk_cx = cw - lock_w - scaled(8) + lock_w // 2
+                cb_size2 = scaled(14)
+                if abs(x - lk_cx) <= cb_size2 // 2 + scaled(2):
+                    self._tooltip.show(
+                        event.x_root, event.y_root,
+                        "Lock Separator - Mods in this separator are attached to it",
+                    )
                     return
 
         self._tooltip.hide()
