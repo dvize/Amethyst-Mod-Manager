@@ -419,8 +419,10 @@ class PluginPanel(ctk.CTkFrame):
             command=self.refresh_exe_list,
         ).pack(side="right", padx=(0, scaled(4)), pady=scaled(6))
 
+        settings_icon = _load_icon("settings.png", size=(16, 16))
         ctk.CTkButton(
-            exe_bar, text="⚙", width=30, height=30, font=_theme.FONT_SMALL,
+            exe_bar, text="" if settings_icon else "⚙", image=settings_icon,
+            width=30, height=30, font=_theme.FONT_SMALL,
             fg_color=BG_PANEL, hover_color=BG_HOVER, text_color=TEXT_MAIN,
             command=self._on_configure_exe,
         ).pack(side="right", padx=(0, scaled(4)), pady=scaled(6))
