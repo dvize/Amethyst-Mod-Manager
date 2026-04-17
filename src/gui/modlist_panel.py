@@ -7999,6 +7999,11 @@ class ModListPanel(ctk.CTkFrame):
             pp = getattr(self.winfo_toplevel(), "_plugin_panel", None)
             if pp is not None:
                 pp._bsa_conflict_cache = None
+                # Re-render (or mark dirty) so the Archive tab reflects the
+                # freshly built bsa_index — it may have gone from "no index"
+                # to "all archives" after this rebuild.
+                if hasattr(pp, "show_mod_archives"):
+                    pp.show_mod_archives(pp._archive_mod_name)
 
         threading.Thread(target=_worker, daemon=True).start()
 

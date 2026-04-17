@@ -354,6 +354,7 @@ class PluginPanel(ctk.CTkFrame):
         self._arc_expand_btn: tk.Button | None = None
         self._archive_label: tk.Label | None = None
         self._bsa_conflict_cache: tuple | None = None
+        self._arc_search_var: tk.StringVar | None = None
 
         # "Show only conflicts" filter state (per-tab)
         self._mf_only_conflicts_var: tk.BooleanVar | None = None
@@ -1894,9 +1895,10 @@ class PluginPanel(ctk.CTkFrame):
             selectmode="browse",
             show="tree headings",
         )
-        self._mf_tree.heading("check", text="")
+        self._mf_tree.heading("#0", text="File name", anchor="w")
+        self._mf_tree.heading("check", text="Disable", anchor="center")
         self._mf_tree.column("#0", stretch=True, minwidth=150)
-        self._mf_tree.column("check", width=30, minwidth=30, stretch=False, anchor="center")
+        self._mf_tree.column("check", width=60, minwidth=60, stretch=False, anchor="center")
 
         _sb_bg     = "#383838"
         _sb_trough = "#1a1a1a"
@@ -2548,8 +2550,7 @@ class PluginPanel(ctk.CTkFrame):
                 self._tabs.add("Archive")
             self._build_archive_tab()
             self._archive_tab_dirty = False
-            if self._archive_mod_name is not None:
-                self._render_archive_tree(self._archive_mod_name)
+            self._render_archive_tree(self._archive_mod_name)
         elif not want and present:
             try:
                 self._tabs.delete("Archive")
@@ -2638,6 +2639,29 @@ class PluginPanel(ctk.CTkFrame):
 
         self._arc_tree.bind("<Button-4>", lambda e: self._arc_tree.yview_scroll(-3, "units"))
         self._arc_tree.bind("<Button-5>", lambda e: self._arc_tree.yview_scroll(3, "units"))
+
+        # Search bar (bottom) — filter by archive, folder or file name
+        arc_search_bar = tk.Frame(tab, bg=BG_HEADER, highlightthickness=0)
+        arc_search_bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        tk.Label(
+            arc_search_bar, text="Search:", bg=BG_HEADER, fg=TEXT_DIM,
+            font=(_theme.FONT_FAMILY, _theme.FS10),
+        ).pack(side="left", padx=(8, 4), pady=3)
+        self._arc_search_var = tk.StringVar()
+        self._arc_search_var.trace_add("write", self._on_arc_search_changed)
+        _arc_search_entry = tk.Entry(
+            arc_search_bar, textvariable=self._arc_search_var,
+            bg=BG_DEEP, fg=TEXT_MAIN, insertbackground=TEXT_MAIN,
+            relief="flat", font=(_theme.FONT_FAMILY, _theme.FS10),
+            highlightthickness=0, highlightbackground=BG_DEEP,
+        )
+        _arc_search_entry.pack(side="left", padx=(0, 8), pady=3, fill="x", expand=True)
+        _arc_search_entry.bind("<Escape>", lambda e: self._arc_search_var.set(""))
+        def _arc_select_all(evt):
+            evt.widget.select_range(0, tk.END)
+            evt.widget.icursor(tk.END)
+            return "break"
+        _arc_search_entry.bind("<Control-a>", _arc_select_all)
 
         self._arc_tree.tag_configure("bsa", foreground="#d8a657")
         self._arc_tree.tag_configure("bsa_neutral", foreground=TEXT_MAIN)
@@ -2818,10 +2842,6 @@ class PluginPanel(ctk.CTkFrame):
             return
         self._arc_tree.delete(*self._arc_tree.get_children())
 
-        if mod_name is None:
-            self._archive_label.configure(text="(no mod selected)")
-            return
-
         bsa_path = self._bsa_index_path
         if bsa_path is None or not bsa_path.is_file():
             self._archive_label.configure(text="(no BSA index yet — refresh to scan)")
@@ -2829,7 +2849,7 @@ class PluginPanel(ctk.CTkFrame):
 
         from Utils.bsa_filemap import read_bsa_index
         bsa_index = read_bsa_index(bsa_path) or {}
-        my_archives = bsa_index.get(mod_name) or []
+        my_archives = bsa_index.get(mod_name) if mod_name else None
 
         bsa_winner, loose_winner, contested = self._get_bsa_conflict_cache()
 
@@ -2849,40 +2869,36 @@ class PluginPanel(ctk.CTkFrame):
         only_conflicts = bool(
             self._arc_only_conflicts_var and self._arc_only_conflicts_var.get()
         )
+        query = ""
+        if self._arc_search_var is not None:
+            query = self._arc_search_var.get().casefold()
 
-        # If the selected mod has no BSAs, fall back to listing every BSA in
-        # the modlist so the user can browse archive contents regardless of
-        # selection. Conflict colouring is still per-BSA-owner.
+        # If the selected mod has BSAs, scope the view to that mod. Otherwise
+        # (no selection, or the selected mod has no BSAs) show every BSA in
+        # the modlist alphabetically so the user can always browse archives.
+        # Conflict colouring is per-BSA-owner.
         if my_archives:
             self._archive_label.configure(text=mod_name)
             render_units = [(mod_name, my_archives)]
             show_owner = False
         else:
-            profile_dir = getattr(self._game, "_active_profile_dir", None)
-            modlist_path = (profile_dir / "modlist.txt") if profile_dir else None
-            ordered_mods: list[str] = []
-            if modlist_path and modlist_path.is_file():
-                from Utils.modlist import read_modlist
-                entries_ml = read_modlist(modlist_path)
-                for e in entries_ml:
-                    if e.is_separator or not e.enabled:
-                        continue
-                    if bsa_index.get(e.name):
-                        ordered_mods.append(e.name)
-            seen = set(ordered_mods)
-            for m in bsa_index:
-                if m not in seen and bsa_index.get(m):
-                    ordered_mods.append(m)
-                    seen.add(m)
-
-            render_units = [(m, bsa_index[m]) for m in ordered_mods]
+            all_mods = [m for m in bsa_index if bsa_index.get(m)]
+            all_mods.sort(key=str.casefold)
+            render_units = [(m, bsa_index[m]) for m in all_mods]
             show_owner = True
             if render_units:
-                self._archive_label.configure(
-                    text=f"{mod_name} — no BSA archives (showing all {len(render_units)} mods with BSAs)"
-                )
+                if mod_name:
+                    self._archive_label.configure(
+                        text=f"{mod_name} — no BSA archives (showing all {len(render_units)} mods with BSAs)"
+                    )
+                else:
+                    self._archive_label.configure(
+                        text=f"(all {len(render_units)} mods with BSAs)"
+                    )
             else:
-                self._archive_label.configure(text=f"{mod_name} — no BSA archives")
+                self._archive_label.configure(
+                    text=f"{mod_name} — no BSA archives" if mod_name else "(no BSA archives)"
+                )
                 return
 
         self._arc_tree_expanded = False
@@ -2903,62 +2919,100 @@ class PluginPanel(ctk.CTkFrame):
                 )
 
         rendered_any = False
+        # Flatten (owner, bsa_name, paths) across all render units. When
+        # show_owner is True we display every mod's BSAs together, so sort
+        # by BSA filename (case-insensitive) for a true alphabetical list.
+        # Otherwise (scoped to one mod) we keep per-BSA alphabetical order.
+        flat_archives: list[tuple[str, str, list[str]]] = []
         for owner_mod, archives in render_units:
-            for bsa_name, _mt, paths in sorted(archives, key=lambda a: a[0].lower()):
-                subtree: dict = {}
-                for p in paths:
-                    if only_conflicts and _conflict_tag(p, owner_mod) is None:
-                        continue
-                    parts = p.split("/")
-                    node = subtree
-                    for part in parts[:-1]:
-                        node = node.setdefault(part, {})
-                    node.setdefault("__files__", []).append((parts[-1], p))
+            for bsa_name, _mt, paths in archives:
+                flat_archives.append((owner_mod, bsa_name, paths))
+        flat_archives.sort(key=lambda t: t[1].casefold())
 
-                if only_conflicts and not subtree:
+        for owner_mod, bsa_name, paths in flat_archives:
+            bsa_matches_query = bool(query) and query in bsa_name.casefold()
+            subtree: dict = {}
+            for p in paths:
+                if only_conflicts and _conflict_tag(p, owner_mod) is None:
                     continue
+                if query and not bsa_matches_query and query not in p.casefold():
+                    continue
+                parts = p.split("/")
+                node = subtree
+                for part in parts[:-1]:
+                    node = node.setdefault(part, {})
+                node.setdefault("__files__", []).append((parts[-1], p))
 
-                rendered_any = True
-                # Detect conflict status at the BSA level so the archive node
-                # itself is coloured (any file in the BSA that loses/wins a
-                # contested path colours the BSA row).
-                has_win = False
-                has_lose = False
-                for p in paths:
-                    t = _conflict_tag(p, owner_mod)
-                    if t == "conflict_win":
-                        has_win = True
-                    elif t == "conflict_lose":
-                        has_lose = True
-                    if has_win and has_lose:
-                        break
-                if has_lose and has_win:
-                    bsa_tag = "conflict_mixed"
-                elif has_lose:
-                    bsa_tag = "conflict_lose"
-                elif has_win:
-                    bsa_tag = "conflict_win"
-                elif show_owner:
-                    bsa_tag = "bsa_neutral"
-                else:
-                    bsa_tag = "bsa"
+            if only_conflicts and not subtree:
+                continue
+            if query and not bsa_matches_query and not subtree:
+                continue
 
-                label = f"{bsa_name}  [{owner_mod}]" if show_owner else bsa_name
-                bsa_iid = self._arc_tree.insert(
-                    "", "end", text=label, open=False, tags=(bsa_tag,),
+            rendered_any = True
+            # Detect conflict status at the BSA level so the archive node
+            # itself is coloured (any file in the BSA that loses/wins a
+            # contested path colours the BSA row).
+            has_win = False
+            has_lose = False
+            for p in paths:
+                t = _conflict_tag(p, owner_mod)
+                if t == "conflict_win":
+                    has_win = True
+                elif t == "conflict_lose":
+                    has_lose = True
+                if has_win and has_lose:
+                    break
+            if has_lose and has_win:
+                bsa_tag = "conflict_mixed"
+            elif has_lose:
+                bsa_tag = "conflict_lose"
+            elif has_win:
+                bsa_tag = "conflict_win"
+            elif show_owner:
+                bsa_tag = "bsa_neutral"
+            else:
+                bsa_tag = "bsa"
+
+            label = f"{bsa_name}  [{owner_mod}]" if show_owner else bsa_name
+            bsa_iid = self._arc_tree.insert(
+                "", "end", text=label, open=False, tags=(bsa_tag,),
+            )
+
+            for top in sorted(k for k in subtree if k != "__files__"):
+                _insert(bsa_iid, top, subtree[top], owner_mod)
+            for fname, full_path in sorted(subtree.get("__files__", [])):
+                tag = _conflict_tag(full_path, owner_mod)
+                self._arc_tree.insert(
+                    bsa_iid, "end", text=fname,
+                    tags=(tag,) if tag else (),
                 )
 
-                for top in sorted(k for k in subtree if k != "__files__"):
-                    _insert(bsa_iid, top, subtree[top], owner_mod)
-                for fname, full_path in sorted(subtree.get("__files__", [])):
-                    tag = _conflict_tag(full_path, owner_mod)
-                    self._arc_tree.insert(
-                        bsa_iid, "end", text=fname,
-                        tags=(tag,) if tag else (),
-                    )
+        if not rendered_any:
+            if query:
+                self._arc_tree.insert("", "end", text="  (no matches)", tags=("dim",))
+            elif only_conflicts:
+                self._arc_tree.insert("", "end", text="  (no conflicts)", tags=("dim",))
 
-        if only_conflicts and not rendered_any:
-            self._arc_tree.insert("", "end", text="  (no conflicts)", tags=("dim",))
+        # When searching, expand everything so hits are visible without
+        # the user having to click through folders.
+        if query:
+            self._arc_tree_expanded = True
+            if self._arc_expand_btn is not None:
+                self._arc_expand_btn.configure(text="⊟ Collapse All")
+
+            def _open_all(item):
+                self._arc_tree.item(item, open=True)
+                for child in self._arc_tree.get_children(item):
+                    _open_all(child)
+
+            for top in self._arc_tree.get_children(""):
+                _open_all(top)
+
+    def _on_arc_search_changed(self, *_):
+        """Re-render the Archive tree when the search query changes."""
+        if self._arc_tree is None:
+            return
+        self._render_archive_tree(self._archive_mod_name)
 
     def _build_data_tab(self):
         tab = self._tabs.tab("Data")
