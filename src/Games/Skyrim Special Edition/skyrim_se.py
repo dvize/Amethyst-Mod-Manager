@@ -68,6 +68,9 @@ class SkyrimSE(Fallout_3):
             "source",
             "calientetools",
             "data",
+            "PBRNifPatcher",
+            "PBRTextureSets",
+            
         }
 
     @property
