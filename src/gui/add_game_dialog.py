@@ -782,17 +782,17 @@ class ReconfigureGamePanel(ctk.CTkFrame):
                     for exe in all_exes
                     if exe
                 )
+                self._set_path(chosen, status="found")
                 if not found_exe:
                     exe_list = ", ".join(e for e in all_exes if e)
                     self._status_label.configure(
-                        text=f"Game executable not found in that folder ({exe_list}).",
-                        text_color=TEXT_ERR
+                        text=f"Warning: game executable not found in that folder ({exe_list}). You can still save this path.",
+                        text_color=TEXT_WARN
                     )
-                    return
-                self._set_path(chosen, status="found")
-                self._status_label.configure(
-                    text="Folder selected manually.", text_color=TEXT_OK
-                )
+                else:
+                    self._status_label.configure(
+                        text="Folder selected manually.", text_color=TEXT_OK
+                    )
             else:
                 self._status_label.configure(
                     text="No folder selected or folder picker unavailable.",
@@ -985,19 +985,17 @@ class ReconfigureGamePanel(ctk.CTkFrame):
             return
         all_exes = [self._game.exe_name] + list(self._game.exe_name_alts)
         found_exe = any((chosen / exe).is_file() for exe in all_exes if exe)
+        self._set_path(chosen, status="found")
         if not found_exe:
             exe_list = ", ".join(e for e in all_exes if e)
             self._status_label.configure(
-                text=f"Game executable not found in that folder ({exe_list}).",
-                text_color=TEXT_ERR
+                text=f"Warning: game executable not found in that folder ({exe_list}). You can still save this path.",
+                text_color=TEXT_WARN
             )
-            self._add_btn.configure(state="disabled")
-            self._open_btn.configure(state="disabled")
-            return
-        self._set_path(chosen, status="found")
-        self._status_label.configure(
-            text="Folder entered manually.", text_color=TEXT_OK
-        )
+        else:
+            self._status_label.configure(
+                text="Folder entered manually.", text_color=TEXT_OK
+            )
 
     def _on_prefix_return(self, _event=None):
         self._on_prefix_typed()
