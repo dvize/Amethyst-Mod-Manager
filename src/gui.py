@@ -2171,12 +2171,55 @@ if __name__ == "__main__":
     from Utils.portal_filechooser import set_main_thread_dispatcher
     set_main_thread_dispatcher(app.call_threadsafe)
     app._start_nxm_ipc()          # listen for NXM links from future instances
+
+    _shutdown_done = {"v": False}
+
+    def _run_shutdown():
+        if _shutdown_done["v"]:
+            return
+        _shutdown_done["v"] = True
+        try:
+            from Utils.ui_config import load_restore_on_close
+            if load_restore_on_close():
+                _restore_all_on_close()
+        except Exception:
+            pass
+        try:
+            NxmIPC.shutdown()
+        except Exception:
+            pass
+
     def _on_app_close():
-        from Utils.ui_config import load_restore_on_close
-        if load_restore_on_close():
-            _restore_all_on_close()
-        NxmIPC.shutdown()
-        app.destroy()
+        _run_shutdown()
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+    # WM_DELETE_WINDOW only fires on a graceful window close (clicking X).
+    # Some desktop environments / session managers close the app via SIGTERM
+    # or SIGHUP instead, which would skip restore-on-close. atexit + signal
+    # handlers catch those paths too.
+    import atexit
+    import signal
+    atexit.register(_run_shutdown)
+
+    def _on_signal(signum, _frame):
+        _run_shutdown()
+        # Re-raise default behaviour so the process actually exits.
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        except Exception:
+            sys.exit(0)
+
+    for _sig_name in ("SIGTERM", "SIGHUP", "SIGINT"):
+        _sig = getattr(signal, _sig_name, None)
+        if _sig is not None:
+            try:
+                signal.signal(_sig, _on_signal)
+            except (ValueError, OSError):
+                pass
 
     app.protocol("WM_DELETE_WINDOW", _on_app_close)
     app.mainloop()
