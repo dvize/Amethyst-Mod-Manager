@@ -1588,25 +1588,45 @@ class NexusAPI:
 
     # -- Top mods (GraphQL v2) -----------------------------------------------
 
+    _TOP_MODS_SORT_KEYS = {"downloads", "endorsements", "createdAt", "updatedAt"}
+
     def get_top_mods(
         self, game_domain: str, count: int = 10, offset: int = 0,
         category_names: list[str] | None = None,
+        created_since_days: int | None = None,
+        sort_key: str = "downloads",
     ) -> list[NexusModInfo]:
         """
-        Fetch the all-time most-downloaded mods for a game via the GraphQL v2 API.
+        Fetch top mods for a game via the GraphQL v2 API.
 
-        Results are sorted by total downloads descending.
+        Results are sorted by `sort_key` descending. Valid sort_key values:
+        "downloads" (default), "endorsements", "createdAt", "updatedAt".
         Pass category_names to restrict results to specific categories.
+        Pass created_since_days to restrict to mods uploaded within the last N days
+        (None = all time).
         """
-        query = """
-        query TopMods($filter: ModsFilter, $count: Int, $offset: Int) {
+        if sort_key not in self._TOP_MODS_SORT_KEYS:
+            sort_key = "downloads"
+        base_filter = self._build_mods_filter(game_domain, category_names)
+        if created_since_days is not None and created_since_days > 0:
+            cutoff = int(time.time()) - (created_since_days * 24 * 60 * 60)
+            date_clause = {"createdAt": [{"value": str(cutoff), "op": "GTE"}]}
+            if "filter" in base_filter:
+                base_filter["filter"].append(date_clause)
+            else:
+                base_filter = {
+                    "op": "AND",
+                    "filter": [base_filter, date_clause],
+                }
+        query = f"""
+        query TopMods($filter: ModsFilter, $count: Int, $offset: Int) {{
             mods(
                 filter: $filter
-                sort: [{ downloads: { direction: DESC } }]
+                sort: [{{ {sort_key}: {{ direction: DESC }} }}]
                 count: $count
                 offset: $offset
-            ) {
-                nodes {
+            ) {{
+                nodes {{
                     modId
                     name
                     summary
@@ -1617,12 +1637,12 @@ class NexusAPI:
                     downloads
                     pictureUrl
                     adultContent
-                }
-            }
-        }
+                }}
+            }}
+        }}
         """
         variables = {
-            "filter": self._build_mods_filter(game_domain, category_names),
+            "filter": base_filter,
             "count": count,
             "offset": offset,
         }
