@@ -264,7 +264,15 @@ def _select_all_in_separator(app):
             end = i
             break
 
-    new_sel = {i for i in range(start, end) if not entries[i].is_separator}
+    visible_indices = getattr(panel, "_visible_indices", None)
+    if visible_indices:
+        visible_set = set(visible_indices)
+        new_sel = {
+            i for i in range(start, end)
+            if not entries[i].is_separator and i in visible_set
+        }
+    else:
+        new_sel = {i for i in range(start, end) if not entries[i].is_separator}
     if not new_sel:
         return
     panel._sel_set = new_sel
