@@ -33,6 +33,7 @@ from Utils.config_paths import get_game_config_path
 from Utils.heroic_finder import find_heroic_game, find_heroic_prefix, find_heroic_app_name_by_exe, find_heroic_game_info_by_exe
 from Utils.app_log import app_log
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     BG_DEEP,
     BG_PANEL,
@@ -476,8 +477,9 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         if widget is None:
             widget = self._scroll_frame
         try:
-            widget.bind("<Button-4>", lambda e=None: self._scroll_frame._parent_canvas.yview_scroll(-3, "units"), add="+")
-            widget.bind("<Button-5>", lambda e=None: self._scroll_frame._parent_canvas.yview_scroll( 3, "units"), add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                widget.bind("<Button-4>", lambda e=None: self._scroll_frame._parent_canvas.yview_scroll(-3, "units"), add="+")
+                widget.bind("<Button-5>", lambda e=None: self._scroll_frame._parent_canvas.yview_scroll( 3, "units"), add="+")
             widget.bind("<MouseWheel>", lambda e=None: self._scroll_frame._parent_canvas.yview_scroll(
                 -3 if (getattr(e, "delta", 0) or 0) > 0 else 3, "units"), add="+")
         except Exception:

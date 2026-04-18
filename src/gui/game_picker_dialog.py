@@ -13,6 +13,7 @@ from PIL import Image as _PilImage, ImageTk as _PilTk
 
 import customtkinter as ctk
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
     ACCENT_HOV,
@@ -282,8 +283,9 @@ class GamePickerPanel(tk.Frame):
         # Bind on the canvas and inner frame directly — scroll events are delivered
         # to the widget under the cursor, not the ancestor frame.
         for _w in (self._canvas, self._inner):
-            _w.bind("<Button-4>",   _fwd_scroll, add="+")
-            _w.bind("<Button-5>",   _fwd_scroll, add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                _w.bind("<Button-4>",   _fwd_scroll, add="+")
+                _w.bind("<Button-5>",   _fwd_scroll, add="+")
             _w.bind("<MouseWheel>", _fwd_scroll, add="+")
         self.bind("<Destroy>", self._on_destroy)
 
@@ -423,8 +425,9 @@ class GamePickerPanel(tk.Frame):
         def _bind_card_widget(w):
             w.bind("<Enter>", _enter, add="+")
             w.bind("<Leave>", _leave, add="+")
-            w.bind("<Button-4>",   self._fwd_scroll, add="+")
-            w.bind("<Button-5>",   self._fwd_scroll, add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                w.bind("<Button-4>",   self._fwd_scroll, add="+")
+                w.bind("<Button-5>",   self._fwd_scroll, add="+")
             w.bind("<MouseWheel>", self._fwd_scroll, add="+")
             for child in w.winfo_children():
                 _bind_card_widget(child)
@@ -441,8 +444,9 @@ class GamePickerPanel(tk.Frame):
         if event.widget is self:
             try:
                 for _w in (self._canvas, self._inner):
-                    _w.unbind("<Button-4>")
-                    _w.unbind("<Button-5>")
+                    if not LEGACY_WHEEL_REDUNDANT:
+                        _w.unbind("<Button-4>")
+                        _w.unbind("<Button-5>")
                     _w.unbind("<MouseWheel>")
             except Exception:
                 pass
@@ -854,8 +858,9 @@ class GamePickerPanel(tk.Frame):
         def _bind_card_widget(w):
             w.bind("<Enter>", _enter, add="+")
             w.bind("<Leave>", _leave, add="+")
-            w.bind("<Button-4>",   self._fwd_scroll, add="+")
-            w.bind("<Button-5>",   self._fwd_scroll, add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                w.bind("<Button-4>",   self._fwd_scroll, add="+")
+                w.bind("<Button-5>",   self._fwd_scroll, add="+")
             w.bind("<MouseWheel>", self._fwd_scroll, add="+")
             for child in w.winfo_children():
                 _bind_card_widget(child)

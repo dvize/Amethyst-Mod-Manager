@@ -30,6 +30,7 @@ from Utils.ui_config import (
     THEME_DEFAULTS, get_theme_color, save_theme_color,
 )
 from gui.ctk_components import CTkProgressPopup, CTkAlert, CTkNotification
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
     ACCENT_HOV,
@@ -583,8 +584,9 @@ class SettingsPanel(ctk.CTkFrame):
         if cls_name in _SKIP:
             return
         try:
-            widget.bind("<Button-4>",   lambda e: self._body._parent_canvas.yview_scroll(-3, "units"), add="+")
-            widget.bind("<Button-5>",   lambda e: self._body._parent_canvas.yview_scroll( 3, "units"), add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                widget.bind("<Button-4>",   lambda e: self._body._parent_canvas.yview_scroll(-3, "units"), add="+")
+                widget.bind("<Button-5>",   lambda e: self._body._parent_canvas.yview_scroll( 3, "units"), add="+")
             widget.bind("<MouseWheel>", lambda e: self._body._parent_canvas.yview_scroll(
                 -3 if (getattr(e, "delta", 0) or 0) > 0 else 3, "units"), add="+")
         except Exception:

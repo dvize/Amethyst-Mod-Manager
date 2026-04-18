@@ -38,6 +38,7 @@ from gui.theme import (
     load_icon as _load_icon,
 )
 import gui.theme as _theme
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.game_helpers import _GAMES, _vanilla_plugins_for_game
 from gui.dialogs import _PriorityDialog, _ExeConfigDialog, _ExeFilterDialog, confirm_deploy_appdata
 from gui.install_mod import install_mod_from_archive
@@ -1937,8 +1938,9 @@ class PluginPanel(ctk.CTkFrame):
         self._mf_tree.grid(row=1, column=0, sticky="nsew")
         vsb.grid(row=1, column=1, sticky="ns")
 
-        self._mf_tree.bind("<Button-4>", lambda e: self._mf_tree.yview_scroll(-3, "units"))
-        self._mf_tree.bind("<Button-5>", lambda e: self._mf_tree.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._mf_tree.bind("<Button-4>", lambda e: self._mf_tree.yview_scroll(-3, "units"))
+            self._mf_tree.bind("<Button-5>", lambda e: self._mf_tree.yview_scroll(3, "units"))
         self._mf_tree.bind("<Button-1>", self._on_mf_click)
         self._mf_tree.bind("<space>", self._on_mf_space)
         self._mf_tree.bind("<Button-3>", self._on_mf_right_click)
@@ -2077,8 +2079,9 @@ class PluginPanel(ctk.CTkFrame):
         self._ini_search_entry.bind("<Control-a>", _ini_select_all)
 
         self._ini_files_tree.bind("<<TreeviewSelect>>", self._on_ini_file_select)
-        self._ini_files_tree.bind("<Button-4>", lambda e: self._ini_files_tree.yview_scroll(-3, "units"))
-        self._ini_files_tree.bind("<Button-5>", lambda e: self._ini_files_tree.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._ini_files_tree.bind("<Button-4>", lambda e: self._ini_files_tree.yview_scroll(-3, "units"))
+            self._ini_files_tree.bind("<Button-5>", lambda e: self._ini_files_tree.yview_scroll(3, "units"))
 
         self._ini_files_entries: list[tuple[str, str, Path]] = []  # full list
         self._ini_files_displayed: list[tuple[str, str, Path]] = []  # filtered for display
@@ -2662,8 +2665,9 @@ class PluginPanel(ctk.CTkFrame):
         self._arc_tree.grid(row=1, column=0, sticky="nsew")
         vsb.grid(row=1, column=1, sticky="ns")
 
-        self._arc_tree.bind("<Button-4>", lambda e: self._arc_tree.yview_scroll(-3, "units"))
-        self._arc_tree.bind("<Button-5>", lambda e: self._arc_tree.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._arc_tree.bind("<Button-4>", lambda e: self._arc_tree.yview_scroll(-3, "units"))
+            self._arc_tree.bind("<Button-5>", lambda e: self._arc_tree.yview_scroll(3, "units"))
 
         # Search bar (bottom) — filter by archive, folder or file name
         arc_search_bar = tk.Frame(tab, bg=BG_HEADER, highlightthickness=0)
@@ -3115,10 +3119,11 @@ class PluginPanel(ctk.CTkFrame):
             return "break"
         _data_search_entry.bind("<Control-a>", _data_select_all)
 
-        self._data_tree.treeview.bind("<Button-4>",
-            lambda e: self._data_tree.treeview.yview_scroll(-3, "units"))
-        self._data_tree.treeview.bind("<Button-5>",
-            lambda e: self._data_tree.treeview.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._data_tree.treeview.bind("<Button-4>",
+                lambda e: self._data_tree.treeview.yview_scroll(-3, "units"))
+            self._data_tree.treeview.bind("<Button-5>",
+                lambda e: self._data_tree.treeview.yview_scroll(3, "units"))
         self._data_tree.treeview.bind("<<TreeviewSelect>>", self._on_data_file_selected)
         self._data_tree.treeview.bind("<Button-3>", self._on_data_right_click)
 
@@ -4110,8 +4115,9 @@ class PluginPanel(ctk.CTkFrame):
                 scroll_frame._parent_canvas.yview_scroll(3, "units")
         def _bind_recursive(w):
             w.bind("<MouseWheel>", _on_wheel)
-            w.bind("<Button-4>", _on_wheel)
-            w.bind("<Button-5>", _on_wheel)
+            if not LEGACY_WHEEL_REDUNDANT:
+                w.bind("<Button-4>", _on_wheel)
+                w.bind("<Button-5>", _on_wheel)
             for child in w.winfo_children():
                 _bind_recursive(child)
         _bind_recursive(scroll_frame)
@@ -6059,10 +6065,14 @@ class PluginPanel(ctk.CTkFrame):
         self._schedule_predraw()
 
     def _on_pscroll_up(self, _event):
+        if LEGACY_WHEEL_REDUNDANT:
+            return
         self._pcanvas.yview("scroll", -50, "units")
         self._schedule_predraw()
 
     def _on_pscroll_down(self, _event):
+        if LEGACY_WHEEL_REDUNDANT:
+            return
         self._pcanvas.yview("scroll", 50, "units")
         self._schedule_predraw()
 

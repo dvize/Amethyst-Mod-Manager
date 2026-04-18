@@ -38,6 +38,7 @@ from Games.Custom.custom_game import (
     save_custom_game_definition,
 )
 from Utils.config_paths import get_custom_game_images_dir
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
     ACCENT_HOV,
@@ -975,8 +976,9 @@ class CustomGamePanel(ctk.CTkFrame):
         """Recursively bind Linux scroll-wheel events to every child widget."""
         if widget is None:
             widget = self._body
-        widget.bind("<Button-4>", lambda e: self._scroll_body(-2), add="+")
-        widget.bind("<Button-5>", lambda e: self._scroll_body(2), add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            widget.bind("<Button-4>", lambda e: self._scroll_body(-2), add="+")
+            widget.bind("<Button-5>", lambda e: self._scroll_body(2), add="+")
         for child in widget.winfo_children():
             self._bind_mousewheel_recursive(child)
 

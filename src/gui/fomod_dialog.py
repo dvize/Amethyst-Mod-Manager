@@ -39,6 +39,7 @@ from gui.theme import (
     FONT_HEADER,
     FONT_SEP,
 )
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +397,10 @@ class FomodDialog(ctk.CTkFrame):
 
         # CTkBaseClass blocks bind_all on frames; bind on the toplevel window instead.
         root = self.winfo_toplevel()
-        root.bind_all("<Button-4>", _on_scroll, add="+")
-        root.bind_all("<Button-5>", _on_scroll, add="+")
         root.bind_all("<MouseWheel>", _on_scroll, add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            root.bind_all("<Button-4>", _on_scroll, add="+")
+            root.bind_all("<Button-5>", _on_scroll, add="+")
 
     def _bind_scroll_children(self):
         pass  # Handled globally by _setup_scroll_binding

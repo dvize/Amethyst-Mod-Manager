@@ -16,6 +16,7 @@ from typing import Callable, Optional, Set
 
 import customtkinter as ctk
 from gui.ctk_components import CTkPopupMenu
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.download_locations_overlay import load_extra_download_locations
 from gui.theme import (
     BG_DEEP,
@@ -170,8 +171,9 @@ class DownloadsPanel:
         self._vsb.grid(row=0, column=1, sticky="ns")
 
         self._canvas.bind("<Configure>",       self._on_resize)
-        self._canvas.bind("<Button-4>",        lambda e: self._scroll(-3))
-        self._canvas.bind("<Button-5>",        lambda e: self._scroll(3))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._canvas.bind("<Button-4>",        lambda e: self._scroll(-3))
+            self._canvas.bind("<Button-5>",        lambda e: self._scroll(3))
         self._canvas.bind("<MouseWheel>",      self._on_mousewheel)
         self._canvas.bind("<Motion>",          self._on_motion)
         self._canvas.bind("<Leave>",           self._on_leave)
@@ -200,8 +202,9 @@ class DownloadsPanel:
                 relief="flat", font=FONT_SMALL, bd=0,
                 cursor="hand2", highlightthickness=0,
             )
-            btn.bind("<Button-4>",   lambda e: self._scroll(-3))
-            btn.bind("<Button-5>",   lambda e: self._scroll(3))
+            if not LEGACY_WHEEL_REDUNDANT:
+                btn.bind("<Button-4>",   lambda e: self._scroll(-3))
+                btn.bind("<Button-5>",   lambda e: self._scroll(3))
             btn.bind("<MouseWheel>", self._on_mousewheel)
             btn_win = c.create_window(0, OFF, window=btn,
                                       width=BTN_COL_W - 10, height=ROW_H - 10,

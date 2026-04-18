@@ -40,6 +40,7 @@ from Utils.profile_state import (
 from gui.install_mod import install_mod_from_archive, FOMOD_DEFERRED, ExtractionMemoryBudget, get_uncompressed_size
 from gui.mod_card import CARD_PAD, make_placeholder_image
 from gui.tk_tooltip import TkTooltip
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from Utils.ui_config import get_ui_scale
 from gui.mod_name_utils import _suggest_mod_names
 from Utils.modlist import write_modlist, read_modlist, ModEntry
@@ -5204,8 +5205,9 @@ class CollectionsDialog(tk.Frame):
         self._canvas.bind("<Configure>", self._on_canvas_configure)
         self._canvas.bind("<Map>", self._on_canvas_map)
         for w in (self._canvas, self._inner):
-            w.bind("<Button-4>",   lambda e: self._scroll(-80))
-            w.bind("<Button-5>",   lambda e: self._scroll(80))
+            if not LEGACY_WHEEL_REDUNDANT:
+                w.bind("<Button-4>",   lambda e: self._scroll(-80))
+                w.bind("<Button-5>",   lambda e: self._scroll(80))
             w.bind("<MouseWheel>", self._on_mousewheel)
 
         # Search bar
@@ -5361,8 +5363,9 @@ class CollectionsDialog(tk.Frame):
         self._scroll(direction * 10)
 
     def _bind_scroll(self, widget: tk.Widget, _depth=0):
-        widget.bind("<Button-4>",   lambda e: self._scroll(-80), add="+")
-        widget.bind("<Button-5>",   lambda e: self._scroll(80),  add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            widget.bind("<Button-4>",   lambda e: self._scroll(-80), add="+")
+            widget.bind("<Button-5>",   lambda e: self._scroll(80),  add="+")
         widget.bind("<MouseWheel>", self._on_mousewheel,          add="+")
         if _depth < 3:
             for child in widget.winfo_children():

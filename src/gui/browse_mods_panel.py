@@ -20,6 +20,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from gui.nexus_mod_list_panel_base import _NexusModListPanel
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from Utils.ui_config import load_nexus_show_adult, save_nexus_show_adult
 from gui.theme import (
     BG_HEADER,
@@ -183,11 +184,13 @@ class BrowseModsPanel(_NexusModListPanel):
         self._inner.bind("<Configure>", self._on_inner_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
         self._canvas.bind("<Map>", self._on_canvas_map)
-        self._canvas.bind("<Button-4>",   lambda e: self._scroll(-100))
-        self._canvas.bind("<Button-5>",   lambda e: self._scroll(100))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._canvas.bind("<Button-4>",   lambda e: self._scroll(-100))
+            self._canvas.bind("<Button-5>",   lambda e: self._scroll(100))
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self._inner.bind("<Button-4>",    lambda e: self._scroll(-100))
-        self._inner.bind("<Button-5>",    lambda e: self._scroll(100))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._inner.bind("<Button-4>",    lambda e: self._scroll(-100))
+            self._inner.bind("<Button-5>",    lambda e: self._scroll(100))
         self._inner.bind("<MouseWheel>",  self._on_mousewheel)
 
         # Search bar (row 2)

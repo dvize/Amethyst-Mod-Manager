@@ -25,6 +25,7 @@ from Nexus.nexus_oauth import NexusOAuthClient, OAuthTokens, clear_oauth_tokens,
 from Utils.app_log import app_log
 from Nexus.nxm_handler import NxmHandler
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     BG_DEEP,
     BG_PANEL,
@@ -276,13 +277,17 @@ class NexusSettingsPanel(ctk.CTkFrame):
                 scroll._parent_canvas.yview_scroll(-50, "units")
             elif num == 5 or delta < 0:
                 scroll._parent_canvas.yview_scroll(50, "units")
-        dlg.bind_all("<Button-4>", _fwd_scroll)
-        dlg.bind_all("<Button-5>", _fwd_scroll)
         dlg.bind_all("<MouseWheel>", _fwd_scroll)
-        dlg.bind("<Destroy>", lambda e: (
-            dlg.unbind_all("<Button-4>"), dlg.unbind_all("<Button-5>"),
-            dlg.unbind_all("<MouseWheel>"),
-        ) if e.widget is dlg else None)
+        if not LEGACY_WHEEL_REDUNDANT:
+            dlg.bind_all("<Button-4>", _fwd_scroll)
+            dlg.bind_all("<Button-5>", _fwd_scroll)
+        def _cleanup(e):
+            if e.widget is dlg:
+                dlg.unbind_all("<MouseWheel>")
+                if not LEGACY_WHEEL_REDUNDANT:
+                    dlg.unbind_all("<Button-4>")
+                    dlg.unbind_all("<Button-5>")
+        dlg.bind("<Destroy>", _cleanup)
 
         hdr = ctk.CTkFrame(scroll, fg_color="transparent")
         hdr.pack(fill="x", padx=20, pady=(16, 6))
@@ -316,8 +321,9 @@ class NexusSettingsPanel(ctk.CTkFrame):
             entry.insert(0, cmd_text)
             entry.configure(state="readonly")
             entry.grid(row=0, column=0, sticky="ew", ipady=5, padx=(2, 4))
-            entry.bind("<Button-4>", lambda e: scroll._parent_canvas.yview_scroll(-1, "units"))
-            entry.bind("<Button-5>", lambda e: scroll._parent_canvas.yview_scroll( 1, "units"))
+            if not LEGACY_WHEEL_REDUNDANT:
+                entry.bind("<Button-4>", lambda e: scroll._parent_canvas.yview_scroll(-1, "units"))
+                entry.bind("<Button-5>", lambda e: scroll._parent_canvas.yview_scroll( 1, "units"))
             copy_btn = ctk.CTkButton(row, text="Copy", width=58, height=28, font=FONT_SMALL,
                                      fg_color=BG_HEADER, hover_color=BG_HOVER, text_color=TEXT_MAIN,
                                      corner_radius=4)

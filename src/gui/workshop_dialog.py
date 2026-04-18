@@ -27,6 +27,7 @@ from Utils.plugins import read_plugins
 from Utils.portal_filechooser import pick_save_file
 from gui.ctk_components import CTkAlert
 import gui.theme as _theme
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     BG_DEEP,
     BG_HEADER,
@@ -176,8 +177,9 @@ class VersionPickerOverlay(tk.Frame):
 
         self._canvas.bind("<Configure>",     self._on_canvas_configure)
         self._canvas.bind("<MouseWheel>",    lambda e: self._scroll(-(e.delta // 120)))
-        self._canvas.bind("<Button-4>",      lambda e: self._scroll(-1))
-        self._canvas.bind("<Button-5>",      lambda e: self._scroll(1))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._canvas.bind("<Button-4>",      lambda e: self._scroll(-1))
+            self._canvas.bind("<Button-5>",      lambda e: self._scroll(1))
         self._canvas.bind("<ButtonPress-1>", self._on_click)
         self._canvas.bind("<Motion>",        self._on_motion)
         self._canvas.bind("<Leave>",         self._on_leave)
@@ -628,8 +630,9 @@ class WorkshopDialog(tk.Frame):
 
         self._canvas.bind("<Configure>",     self._on_canvas_configure)
         self._canvas.bind("<MouseWheel>",    lambda e: self._scroll(-(e.delta // 120)))
-        self._canvas.bind("<Button-4>",      lambda e: self._scroll(-1))
-        self._canvas.bind("<Button-5>",      lambda e: self._scroll(1))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._canvas.bind("<Button-4>",      lambda e: self._scroll(-1))
+            self._canvas.bind("<Button-5>",      lambda e: self._scroll(1))
         self._canvas.bind("<ButtonPress-1>", self._on_canvas_click)
 
     def _do_close(self):

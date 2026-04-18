@@ -17,6 +17,7 @@ import customtkinter as ctk
 from Utils.config_paths import get_download_locations_path
 from Utils.portal_filechooser import pick_folder
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     BG_DEEP,
     BG_HEADER,
@@ -117,8 +118,9 @@ class DownloadLocationsOverlay(tk.Frame):
             highlightthickness=0, yscrollincrement=1,
         )
         self._list_canvas.bind("<MouseWheel>", self._on_list_scroll)
-        self._list_canvas.bind("<Button-4>", lambda e: self._list_canvas.yview_scroll(-3, "units"))
-        self._list_canvas.bind("<Button-5>", lambda e: self._list_canvas.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._list_canvas.bind("<Button-4>", lambda e: self._list_canvas.yview_scroll(-3, "units"))
+            self._list_canvas.bind("<Button-5>", lambda e: self._list_canvas.yview_scroll(3, "units"))
         self._list_vsb = tk.Scrollbar(
             list_frame, orient="vertical", command=self._list_canvas.yview,
             bg="#383838", troughcolor=BG_DEEP, activebackground=ACCENT,

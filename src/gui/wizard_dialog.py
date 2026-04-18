@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from Utils.plugin_loader import get_all_wizard_tools
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     BG_DEEP,
     BG_PANEL,
@@ -157,8 +158,9 @@ class WizardDialog(ctk.CTkToplevel):
         """Bind mousewheel to the dialog so scrolling works anywhere in the window."""
         canvas = scrollable._parent_canvas
 
-        self.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"), add="+")
-        self.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"), add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            self.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"), add="+")
+            self.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"), add="+")
         self.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"), add="+")
 
     # ------------------------------------------------------------------
@@ -254,8 +256,9 @@ class WizardPanel(ctk.CTkFrame):
         def _scroll_down(e): canvas.yview_scroll(3, "units")
 
         def _bind_tree(widget):
-            widget.bind("<Button-4>", _scroll_up, add="+")
-            widget.bind("<Button-5>", _scroll_down, add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                widget.bind("<Button-4>", _scroll_up, add="+")
+                widget.bind("<Button-5>", _scroll_down, add="+")
             for child in widget.winfo_children():
                 _bind_tree(child)
 

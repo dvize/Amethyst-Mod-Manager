@@ -13,6 +13,7 @@ import tkinter as tk
 import customtkinter as ctk
 
 from Utils.xdg import open_url
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
     ACCENT_HOV,
@@ -135,8 +136,12 @@ class ModFilesOverlay(tk.Frame):
 
         # Bind scroll on the root window so it fires regardless of which child has focus
         _root = self.winfo_toplevel()
-        self._scroll_bid4 = _root.bind("<Button-4>", self._on_scroll_up, add="+")
-        self._scroll_bid5 = _root.bind("<Button-5>", self._on_scroll_down, add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._scroll_bid4 = _root.bind("<Button-4>", self._on_scroll_up, add="+")
+            self._scroll_bid5 = _root.bind("<Button-5>", self._on_scroll_down, add="+")
+        else:
+            self._scroll_bid4 = None
+            self._scroll_bid5 = None
 
         # Shared grid columns on _inner (used by header row + all data rows)
         self._inner.grid_columnconfigure(0, weight=1)                         # file name
@@ -193,8 +198,9 @@ class ModFilesOverlay(tk.Frame):
             self._resize_after_id = None
         try:
             _root = self.winfo_toplevel()
-            _root.unbind("<Button-4>", self._scroll_bid4)
-            _root.unbind("<Button-5>", self._scroll_bid5)
+            if not LEGACY_WHEEL_REDUNDANT:
+                _root.unbind("<Button-4>", self._scroll_bid4)
+                _root.unbind("<Button-5>", self._scroll_bid5)
         except Exception:
             pass
 

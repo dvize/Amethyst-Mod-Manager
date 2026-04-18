@@ -16,6 +16,7 @@ import customtkinter as ctk
 from Utils.xdg import open_url
 
 from gui.ctk_components import CTkLoader, CTkPopupMenu
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.mod_card import ModCard, CARD_W, CARD_PAD, CARD_COLS
 from gui.theme import (
     BG_DEEP,
@@ -163,12 +164,13 @@ class _NexusModListPanel:
         self._inner.bind("<Configure>", self._on_inner_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
         self._canvas.bind("<Map>", self._on_canvas_map)
-        self._canvas.bind("<Button-4>",   lambda e: self._scroll(-100))
-        self._canvas.bind("<Button-5>",   lambda e: self._scroll(100))
         self._canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self._inner.bind("<Button-4>",    lambda e: self._scroll(-100))
-        self._inner.bind("<Button-5>",    lambda e: self._scroll(100))
         self._inner.bind("<MouseWheel>",  self._on_mousewheel)
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._canvas.bind("<Button-4>", lambda e: self._scroll(-100))
+            self._canvas.bind("<Button-5>", lambda e: self._scroll(100))
+            self._inner.bind("<Button-4>",  lambda e: self._scroll(-100))
+            self._inner.bind("<Button-5>",  lambda e: self._scroll(100))
 
     def _initial_status_text(self) -> str:
         """Override to set the initial status bar text."""
@@ -223,9 +225,10 @@ class _NexusModListPanel:
 
     def _bind_scroll(self, widget, _depth=0):
         """Bind scroll events on a widget and descendants (max 3 levels deep)."""
-        widget.bind("<Button-4>",   lambda e: self._scroll(-50), add="+")
-        widget.bind("<Button-5>",   lambda e: self._scroll(50),  add="+")
         widget.bind("<MouseWheel>", self._on_mousewheel,          add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            widget.bind("<Button-4>", lambda e: self._scroll(-50), add="+")
+            widget.bind("<Button-5>", lambda e: self._scroll(50),  add="+")
         if _depth < 3:
             for child in widget.winfo_children():
                 self._bind_scroll(child, _depth + 1)
@@ -542,12 +545,14 @@ class _NexusModListPanel:
                 pass
             return "break"
         widget.bind("<MouseWheel>", _scroll, add="+")
-        widget.bind("<Button-4>", _scroll, add="+")
-        widget.bind("<Button-5>", _scroll, add="+")
+        if not LEGACY_WHEEL_REDUNDANT:
+            widget.bind("<Button-4>", _scroll, add="+")
+            widget.bind("<Button-5>", _scroll, add="+")
         for child in widget.winfo_children():
             child.bind("<MouseWheel>", _scroll, add="+")
-            child.bind("<Button-4>", _scroll, add="+")
-            child.bind("<Button-5>", _scroll, add="+")
+            if not LEGACY_WHEEL_REDUNDANT:
+                child.bind("<Button-4>", _scroll, add="+")
+                child.bind("<Button-5>", _scroll, add="+")
 
     def _update_cat_panel_status(self):
         n = len([v for v in self._cat_check_vars.values() if v.get()])

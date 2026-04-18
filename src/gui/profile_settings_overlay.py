@@ -17,6 +17,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
     ACCENT_HOV,
@@ -139,10 +140,11 @@ class ProfileSettingsOverlay(tk.Frame):
 
         self._list_frame.bind("<Configure>", self._on_frame_configure)
         canvas.bind("<Configure>", self._on_canvas_configure)
-        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
-        self._list_frame.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-        self._list_frame.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+            canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+            self._list_frame.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+            self._list_frame.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
 
         self._populate_list()
 

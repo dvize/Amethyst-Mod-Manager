@@ -51,6 +51,7 @@ from Utils.config_paths import get_exe_args_path, get_profile_exe_args_path, get
 from Utils.exe_args_builder import EXE_PROFILES
 from gui.ctk_components import CTkAlert, CTkLoader, ICON_PATH
 from gui.tk_tooltip import TkTooltip
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from Utils.xdg import xdg_open, open_url
 
 
@@ -1787,8 +1788,9 @@ class OverwritesPanel(ctk.CTkFrame):
         tv.configure(yscrollcommand=vsb.set)
         tv.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        tv.bind("<Button-4>", lambda e: tv.yview_scroll(-3, "units"))
-        tv.bind("<Button-5>", lambda e: tv.yview_scroll( 3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            tv.bind("<Button-4>", lambda e: tv.yview_scroll(-3, "units"))
+            tv.bind("<Button-5>", lambda e: tv.yview_scroll( 3, "units"))
 
         for path, mod_str in rows:
             tags = ("bsa",) if _BSA_ROW_RE.match(path) else ()
@@ -1844,8 +1846,9 @@ class OverwritesPanel(ctk.CTkFrame):
         tv.configure(yscrollcommand=vsb.set)
         tv.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        tv.bind("<Button-4>", lambda e: tv.yview_scroll(-3, "units"))
-        tv.bind("<Button-5>", lambda e: tv.yview_scroll( 3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            tv.bind("<Button-4>", lambda e: tv.yview_scroll(-3, "units"))
+            tv.bind("<Button-5>", lambda e: tv.yview_scroll( 3, "units"))
 
         for path in rows:
             tags = ("bsa",) if _BSA_ROW_RE.match(path) else ()
@@ -2436,8 +2439,9 @@ class ExeConfigPanel(ctk.CTkFrame):
         def _walk(w):
             try:
                 w.bind("<MouseWheel>", _on_wheel, add="+")
-                w.bind("<Button-4>", _on_wheel, add="+")
-                w.bind("<Button-5>", _on_wheel, add="+")
+                if not LEGACY_WHEEL_REDUNDANT:
+                    w.bind("<Button-4>", _on_wheel, add="+")
+                    w.bind("<Button-5>", _on_wheel, add="+")
             except Exception:
                 pass
             for child in w.winfo_children():
@@ -2718,8 +2722,9 @@ class ExeConfigPanel(ctk.CTkFrame):
             else:
                 canvas.yview_scroll(1, "units")
         popup.bind("<MouseWheel>", _forward_scroll)
-        popup.bind("<Button-4>", _forward_scroll)
-        popup.bind("<Button-5>", _forward_scroll)
+        if not LEGACY_WHEEL_REDUNDANT:
+            popup.bind("<Button-4>", _forward_scroll)
+            popup.bind("<Button-5>", _forward_scroll)
 
         def _bind_click_dismiss():
             if self._mod_popup and self._mod_popup.winfo_exists():
@@ -4469,8 +4474,9 @@ class DeploymentPathsPanel(ctk.CTkFrame):
         vsb.pack(side="right", fill="y")
 
         for widget in (self._tree, list_frame, self):
-            widget.bind("<Button-4>", lambda e: self._tree.yview_scroll(-3, "units"))
-            widget.bind("<Button-5>", lambda e: self._tree.yview_scroll( 3, "units"))
+            if not LEGACY_WHEEL_REDUNDANT:
+                widget.bind("<Button-4>", lambda e: self._tree.yview_scroll(-3, "units"))
+                widget.bind("<Button-5>", lambda e: self._tree.yview_scroll( 3, "units"))
 
         def _iid(rel_path: str) -> str:
             return rel_path.replace("/", "\u241f")

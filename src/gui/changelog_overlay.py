@@ -12,6 +12,7 @@ import sys
 
 import customtkinter as ctk
 
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     BG_DEEP,
     BG_HEADER,
@@ -112,8 +113,9 @@ class ChangelogOverlay(tk.Frame):
         vsb.grid(row=0, column=1, sticky="ns")
 
         # Bind scroll
-        text.bind("<Button-4>", lambda e: text.yview_scroll(-3, "units"))
-        text.bind("<Button-5>", lambda e: text.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            text.bind("<Button-4>", lambda e: text.yview_scroll(-3, "units"))
+            text.bind("<Button-5>", lambda e: text.yview_scroll(3, "units"))
 
         # Load and display changelog
         try:

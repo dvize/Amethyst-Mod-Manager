@@ -41,6 +41,7 @@ from gui.theme import (
 )
 import gui.theme as _theme
 from gui.theme import scaled
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.ctk_components import CTkAlert, CTkNotification, CTkPopupMenu, CTkProgressPopup
 from gui.game_helpers import (
     _GAMES,
@@ -969,10 +970,13 @@ class ModListPanel(ctk.CTkFrame):
             elif num == 5 or delta < 0:
                 scroll_frame._parent_canvas.yview_scroll(3, "units")
 
+        _legacy = None if LEGACY_WHEEL_REDUNDANT else _on_wheel
+
         def _bind_recursive(w):
             w.bind("<MouseWheel>", _on_wheel)
-            w.bind("<Button-4>", _on_wheel)
-            w.bind("<Button-5>", _on_wheel)
+            if _legacy is not None:
+                w.bind("<Button-4>", _legacy)
+                w.bind("<Button-5>", _legacy)
             for child in w.winfo_children():
                 _bind_recursive(child)
 
@@ -3644,10 +3648,14 @@ class ModListPanel(ctk.CTkFrame):
         self._redraw_after_id = self.after_idle(self._redraw)
 
     def _on_scroll_up(self, _event):
+        if LEGACY_WHEEL_REDUNDANT:
+            return
         self._canvas.yview("scroll", -50, "units")
         self._schedule_redraw()
 
     def _on_scroll_down(self, _event):
+        if LEGACY_WHEEL_REDUNDANT:
+            return
         self._canvas.yview("scroll", 50, "units")
         self._schedule_redraw()
 
@@ -5709,8 +5717,9 @@ class ModListPanel(ctk.CTkFrame):
                     canvas.yview_scroll(3, "units")
 
             def _bind_scroll(widget):
-                widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-                widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+                if not LEGACY_WHEEL_REDUNDANT:
+                    widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+                    widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
                 widget.bind("<MouseWheel>", _on_wheel)
 
             for w in (canvas, vsb, inner, outer, popup):
@@ -6153,18 +6162,19 @@ class ModListPanel(ctk.CTkFrame):
                 tree.yview_scroll(-3, "units")
             else:
                 tree.yview_scroll(3, "units")
-        tree.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-        tree.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
         tree.bind("<MouseWheel>", _scroll_canvas)
-        list_frame.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-        list_frame.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
         list_frame.bind("<MouseWheel>", _scroll_canvas)
         content.bind("<MouseWheel>", _scroll_canvas)
-        content.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-        content.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
         win.bind("<MouseWheel>", _scroll_canvas)
-        win.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-        win.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            tree.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
+            tree.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
+            list_frame.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
+            list_frame.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
+            content.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
+            content.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
+            win.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
+            win.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
 
         def _scan(parent_path: str, parent_iid: str, depth: int) -> None:
             if depth > 3:

@@ -16,6 +16,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 import gui.theme as _theme
+from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
     ACCENT_HOV,
@@ -144,10 +145,11 @@ class LootPluginRulesOverlay(tk.Frame):
         self._plugins_listbox.configure(yscrollcommand=vsb.set)
         self._plugins_listbox.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        self._plugins_listbox.bind("<Button-4>",
-                                   lambda e: self._plugins_listbox.yview_scroll(-3, "units"))
-        self._plugins_listbox.bind("<Button-5>",
-                                   lambda e: self._plugins_listbox.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._plugins_listbox.bind("<Button-4>",
+                                       lambda e: self._plugins_listbox.yview_scroll(-3, "units"))
+            self._plugins_listbox.bind("<Button-5>",
+                                       lambda e: self._plugins_listbox.yview_scroll(3, "units"))
 
         # Drag bindings
         self._plugins_listbox.bind("<ButtonPress-1>", self._on_drag_start)
@@ -199,10 +201,11 @@ class LootPluginRulesOverlay(tk.Frame):
         self._rules_canvas.configure(yscrollcommand=rules_vsb.set)
         self._rules_canvas.grid(row=0, column=0, sticky="nsew")
         rules_vsb.grid(row=0, column=1, sticky="ns")
-        self._rules_canvas.bind("<Button-4>",
-                                lambda e: self._rules_canvas.yview_scroll(-3, "units"))
-        self._rules_canvas.bind("<Button-5>",
-                                lambda e: self._rules_canvas.yview_scroll(3, "units"))
+        if not LEGACY_WHEEL_REDUNDANT:
+            self._rules_canvas.bind("<Button-4>",
+                                    lambda e: self._rules_canvas.yview_scroll(-3, "units"))
+            self._rules_canvas.bind("<Button-5>",
+                                    lambda e: self._rules_canvas.yview_scroll(3, "units"))
 
         self._rules_inner = tk.Frame(self._rules_canvas, bg=BG_PANEL)
         self._rules_inner_id = self._rules_canvas.create_window((0, 0), window=self._rules_inner, anchor="nw")

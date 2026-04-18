@@ -392,10 +392,18 @@ def register_shortcuts(app) -> None:
     # Generate 3 extra scroll events so total = 4x normal speed.
     def _fast_scroll(event):
         w = event.widget
-        # Determine the base event type (Button-4 = up, Button-5 = down)
-        btn = 4 if event.num == 4 else 5
-        for _ in range(3):
-            w.event_generate(f"<Button-{btn}>")
+        num = getattr(event, "num", None)
+        delta = getattr(event, "delta", 0) or 0
+        up = num == 4 or delta > 0
+        if float(tk.TkVersion) >= 8.7:
+            d = 120 if up else -120
+            for _ in range(3):
+                w.event_generate("<MouseWheel>", delta=d)
+        else:
+            btn = 4 if up else 5
+            for _ in range(3):
+                w.event_generate(f"<Button-{btn}>")
 
+    app.bind_all("<Shift-MouseWheel>", _fast_scroll, add="+")
     app.bind_all("<Shift-Button-4>", _fast_scroll, add="+")
     app.bind_all("<Shift-Button-5>", _fast_scroll, add="+")
