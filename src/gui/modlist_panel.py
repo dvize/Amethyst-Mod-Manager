@@ -5783,16 +5783,24 @@ class ModListPanel(ctk.CTkFrame):
         dest_folder = target_staging / mod_name
 
         if dest_folder.exists():
-            dlg = _ReplaceModDialog(self.winfo_toplevel(), mod_name)
-            self.wait_window(dlg)
-            if dlg.result == "cancel":
-                return
-            if dlg.result == "rename":
+            rename_conflict: str | None = None
+            while True:
+                dlg = _ReplaceModDialog(self.winfo_toplevel(), mod_name,
+                                        rename_conflict=rename_conflict)
+                self.wait_window(dlg)
+                if dlg.result == "cancel":
+                    return
+                if dlg.result != "rename":
+                    break
                 new_name = dlg.new_name
                 if not new_name:
                     return
-                dest_folder = target_staging / new_name
-            elif dlg.result == "all":
+                candidate = target_staging / new_name
+                if not candidate.exists():
+                    dest_folder = candidate
+                    break
+                rename_conflict = new_name
+            if dlg.result == "all":
                 def _force_remove(func, path, _exc):
                     os.chmod(path, 0o700)
                     func(path)

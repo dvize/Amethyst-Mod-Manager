@@ -174,7 +174,7 @@ from gui.dialogs import (
 from gui.fomod_dialog import FomodDialog
 from gui.mod_name_utils import _strip_title_metadata, _suggest_mod_names
 from Utils.fomod_parser import detect_fomod, parse_module_config, parse_mod_info
-from Utils.fomod_installer import resolve_files
+from Utils.fomod_installer import resolve_files, check_module_dependencies
 from Utils.ui_config import load_dev_mode, load_rename_mod_after_install
 from Utils.config_paths import get_fomod_selections_path
 from Utils.plugins import read_plugins, append_plugin, read_loadorder, write_loadorder, PluginEntry
@@ -204,10 +204,44 @@ def _run_dialog_on_main(parent_window, factory, result_holder: list,
 
 
 def _show_replace_dialog_on_main(parent_window, mod_name: str,
-                                 result_holder: list, done_event: threading.Event) -> None:
-    _run_dialog_on_main(parent_window,
-                        lambda p: _ReplaceModDialog(p, mod_name),
-                        result_holder, done_event)
+                                 result_holder: list, done_event: threading.Event,
+                                 suggestions: list[str] | None = None,
+                                 rename_conflict: str | None = None) -> None:
+    _run_dialog_on_main(
+        parent_window,
+        lambda p: _ReplaceModDialog(p, mod_name, suggestions=suggestions,
+                                    rename_conflict=rename_conflict),
+        result_holder, done_event)
+
+
+def _prompt_replace_dialog(parent_window, mod_name: str, staging_root: Path,
+                           suggestions: list[str] | None):
+    """Show the replace-mod dialog, re-prompting if the user picks a rename
+    target that also already exists. Returns the final dialog (with .result
+    and .new_name populated) or None on cancel/timeout."""
+    rename_conflict: str | None = None
+    while True:
+        if threading.current_thread() is threading.main_thread():
+            dlg = _ReplaceModDialog(parent_window, mod_name,
+                                    suggestions=suggestions,
+                                    rename_conflict=rename_conflict)
+            parent_window.wait_window(dlg)
+        else:
+            with _interactive_dialog_lock:
+                _rh: list = [None]
+                _ev = threading.Event()
+                _conflict = rename_conflict
+                parent_window.after(0, lambda: _show_replace_dialog_on_main(
+                    parent_window, mod_name, _rh, _ev,
+                    suggestions=suggestions, rename_conflict=_conflict))
+                _ev.wait()
+                dlg = _rh[0]
+        if dlg is None or dlg.result != "rename":
+            return dlg
+        candidate = staging_root / dlg.new_name
+        if not candidate.exists():
+            return dlg
+        rename_conflict = dlg.new_name
 
 
 def _show_select_files_dialog_on_main(parent_window, file_list: list,
@@ -835,16 +869,9 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
             dest_root = game.get_effective_mod_staging_path() / mod_name
             was_existing_mod = dest_root.exists()
             if dest_root.exists():
-                if threading.current_thread() is threading.main_thread():
-                    replace_dialog = _ReplaceModDialog(parent_window, mod_name)
-                    parent_window.wait_window(replace_dialog)
-                else:
-                    with _interactive_dialog_lock:
-                        _rh: list = [None]
-                        _ev = threading.Event()
-                        parent_window.after(0, lambda: _show_replace_dialog_on_main(parent_window, mod_name, _rh, _ev))
-                        _ev.wait()
-                        replace_dialog = _rh[0]
+                replace_dialog = _prompt_replace_dialog(
+                    parent_window, mod_name,
+                    game.get_effective_mod_staging_path(), suggestions)
                 if replace_dialog is None or replace_dialog.result == "cancel":
                     log_fn(f"Install cancelled — '{mod_name}' already exists.")
                     return
@@ -1340,24 +1367,31 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 # Also add anything in loadorder.txt not already captured
                 for name in read_loadorder(loadorder_path):
                     installed_files.add(name.lower())
-            # Add vanilla/DLC plugins from the game's Data directory. These are
-            # loaded implicitly by the engine and never appear in plugins.txt
-            _vanilla_path = None
+            # Add vanilla/DLC plugins. Engine loads these implicitly so they
+            # never appear in plugins.txt. Use _vanilla_plugins_for_game which
+            # prefers Data_Core/ (pristine backup) over Data/ (may contain
+            # deployed mod plugins from a previous profile).
             if game is not None:
                 try:
-                    _vanilla_path = game.get_vanilla_plugins_path()
+                    from gui.game_helpers import _vanilla_plugins_for_game
+                    for _vname_lower in _vanilla_plugins_for_game(game).keys():
+                        installed_files.add(_vname_lower)
+                        active_files.add(_vname_lower)
                 except Exception:
                     pass
-            if _vanilla_path is not None:
-                try:
-                    _plugin_exts = {".esm", ".esl", ".esp"}
-                    for _vf in _vanilla_path.iterdir():
-                        if _vf.suffix.lower() in _plugin_exts:
-                            _vname = _vf.name.lower()
-                            installed_files.add(_vname)
-                            active_files.add(_vname)
-                except Exception:
-                    pass
+
+            # <moduleDependencies> — pre-install gate. MO2 would block here;
+            # we log prominently so the user knows the mod may not work, but
+            # let the install proceed (the user may be installing prerequisites
+            # out of order and will resolve it by enabling/installing other mods).
+            _modgate_ok, _modgate_msg = check_module_dependencies(
+                config, installed_files, active_files
+            )
+            if not _modgate_ok:
+                log_fn("WARNING: this mod's <moduleDependencies> gate is not "
+                       "satisfied — the mod may not work until these are met:")
+                for _line in _modgate_msg.splitlines():
+                    log_fn(f"  {_line}")
 
             if fomod_auto_selections is None and defer_interactive_fomod:
                 # Collection install: no auto-selections available — defer this
@@ -1381,17 +1415,12 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
 
             if fomod_auto_selections is not None:
                 # Collection install: use the author's pre-chosen options,
-                # skip the interactive wizard entirely.
+                # skip the interactive wizard entirely. Write selections only
+                # to the profile — never to the global config — so collection
+                # choices don't clobber the user's manual FOMOD selections.
                 log_fn("FOMOD installer detected — applying collection author's choices automatically.")
                 final_selections = fomod_auto_selections
                 game_name = getattr(game, "name", "")
-                if game_name:
-                    sel_path = get_fomod_selections_path(game_name, mod_name)
-                    try:
-                        with open(sel_path, "w", encoding="utf-8") as f:
-                            json.dump(final_selections, f, indent=2)
-                    except OSError:
-                        pass
                 _write_profile_fomod(final_selections)
             else:
                 log_fn("FOMOD installer detected — opening wizard...")
@@ -1720,16 +1749,9 @@ def install_mod_from_archive(archive_path: str, parent_window, log_fn,
                 log_fn(f"Collection install: '{mod_name}' folder already exists — skipping re-install.")
                 return mod_name
             else:
-                if threading.current_thread() is threading.main_thread():
-                    replace_dialog = _ReplaceModDialog(parent_window, mod_name)
-                    parent_window.wait_window(replace_dialog)
-                else:
-                    with _interactive_dialog_lock:
-                        _rh: list = [None]
-                        _ev = threading.Event()
-                        parent_window.after(0, lambda: _show_replace_dialog_on_main(parent_window, mod_name, _rh, _ev))
-                        _ev.wait()
-                        replace_dialog = _rh[0]
+                replace_dialog = _prompt_replace_dialog(
+                    parent_window, mod_name,
+                    game.get_effective_mod_staging_path(), suggestions)
                 if replace_dialog is None or replace_dialog.result == "cancel":
                     log_fn(f"Install cancelled — '{mod_name}' already exists.")
                     return

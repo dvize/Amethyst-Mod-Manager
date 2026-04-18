@@ -4396,6 +4396,20 @@ class PluginPanel(ctk.CTkFrame):
         _game_data_dir = (game.get_vanilla_plugins_path()
                           if hasattr(game, "get_vanilla_plugins_path") else None)
 
+        from gui.ctk_components import CTkNotification
+        _notif = CTkNotification(
+            self.winfo_toplevel(),
+            state="info",
+            message=f"Running Loot on {len(plugin_names)} plugins",
+        )
+
+        def _close_notif():
+            try:
+                if _notif.winfo_exists():
+                    _notif.destroy()
+            except Exception:
+                pass
+
         def _worker():
             try:
                 result = loot_sort(
@@ -4412,11 +4426,14 @@ class PluginPanel(ctk.CTkFrame):
                     userlist_path=userlist_path,
                 )
             except RuntimeError as e:
+                self._safe_after(0, _close_notif)
                 self._safe_after(0, lambda err=e: self._log(f"LOOT sort failed: {err}"))
                 return
             except Exception as e:
+                self._safe_after(0, _close_notif)
                 self._safe_after(0, lambda err=e: self._log(f"LOOT sort crashed: {err}"))
                 return
+            self._safe_after(0, _close_notif)
             self._safe_after(0, lambda r=result: _apply_result(r))
 
         def _apply_result(result):
@@ -4441,6 +4458,12 @@ class PluginPanel(ctk.CTkFrame):
             if result.moved_count == 0 and not locked_indices:
                 self._log("Load order is already sorted.")
                 self._refresh_plugins_tab()
+                _done_notif = CTkNotification(
+                    self.winfo_toplevel(),
+                    state="info",
+                    message="Load order is already sorted",
+                )
+                self.after(4000, lambda n=_done_notif: n.winfo_exists() and n.destroy())
                 return
 
             # Re-interleave: place locked plugins back at their original indices,
@@ -4469,6 +4492,13 @@ class PluginPanel(ctk.CTkFrame):
             )
             self._refresh_plugins_tab()
             self._log(f"Sorted — {result.moved_count} plugin(s) changed position.")
+            _moved = result.moved_count
+            _done_notif = CTkNotification(
+                self.winfo_toplevel(),
+                state="success",
+                message=f"Sorted — {_moved} plugin{'s' if _moved != 1 else ''} moved",
+            )
+            self.after(4000, lambda n=_done_notif: n.winfo_exists() and n.destroy())
 
         self._log("Sorting plugins with LOOT (running in background)...")
         threading.Thread(target=_worker, daemon=True).start()
