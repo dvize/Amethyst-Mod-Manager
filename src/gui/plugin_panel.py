@@ -3712,7 +3712,7 @@ class PluginPanel(ctk.CTkFrame):
         for key, var in self._pfsp_vars.items():
             var.set(self._plugin_filter_state.get(key, False))
         self._bind_plugin_filter_panel_scroll()
-        self._plugin_filter_btn.configure(fg_color=ACCENT)
+        self._update_plugin_filter_btn_color()
 
     def _close_plugin_filter_panel(self):
         mod_panel = getattr(self.winfo_toplevel(), "_mod_panel", None)
@@ -3720,8 +3720,14 @@ class PluginPanel(ctk.CTkFrame):
         if mod_panel is not None:
             mod_panel.grid_columnconfigure(0, minsize=0)
         self._plugin_filter_side_panel.grid_remove()
+        self._update_plugin_filter_btn_color()
+
+    def _update_plugin_filter_btn_color(self) -> None:
+        btn = getattr(self, "_plugin_filter_btn", None)
+        if btn is None:
+            return
         any_active = any(self._plugin_filter_state.values()) if self._plugin_filter_state else False
-        self._plugin_filter_btn.configure(fg_color=ACCENT if any_active else "#1e4d7a")
+        btn.configure(fg_color=ACCENT if any_active else "#1e4d7a")
 
     def _close_download_locations_overlay(self):
         """Destroy the download locations overlay."""
@@ -3793,24 +3799,30 @@ class PluginPanel(ctk.CTkFrame):
 
         self._pcanvas = tk.Canvas(canvas_frame, bg=BG_DEEP, bd=0,
                                   highlightthickness=0, yscrollincrement=1, takefocus=0)
+        # Custom combined scrollbar + marker strip — see modlist_panel._build_canvas
+        # for the rationale.
+        self._PSCROLL_W = 16
         self._pmarker_strip = tk.Canvas(canvas_frame, bg=BG_DEEP, bd=0, highlightthickness=0,
-                                        width=4, takefocus=0)
-        self._pvsb = tk.Scrollbar(canvas_frame, orient="vertical",
-                                  command=self._pcanvas.yview,
-                                  bg=BG_SEP, troughcolor=BG_DEEP,
-                                  activebackground=ACCENT,
-                                  highlightthickness=0, bd=0)
-        self._pcanvas.configure(yscrollcommand=self._pvsb.set)
+                                        width=self._PSCROLL_W, takefocus=0)
+        self._pvsb = self._pmarker_strip  # alias for any external refs
+        self._pcanvas.configure(yscrollcommand=self._pscroll_set)
         self._pcanvas.grid(row=0, column=0, sticky="nsew")
         self._pmarker_strip.grid(row=0, column=1, sticky="ns")
-        self._pvsb.grid(row=0, column=2, sticky="ns")
-        self._pmarker_strip.bind("<Configure>", self._on_pmarker_strip_resize)
+        self._pscroll_first = 0.0
+        self._pscroll_last = 1.0
+        self._pthumb_drag_offset: float | None = None
+        self._pmarker_strip.bind("<Configure>",      self._on_pmarker_strip_resize)
+        self._pmarker_strip.bind("<ButtonPress-1>",  self._on_pscrollbar_press)
+        self._pmarker_strip.bind("<B1-Motion>",      self._on_pscrollbar_drag)
+        self._pmarker_strip.bind("<ButtonRelease-1>",self._on_pscrollbar_release)
+        self._pmarker_strip.bind("<Button-4>",       self._on_pscroll_up)
+        self._pmarker_strip.bind("<Button-5>",       self._on_pscroll_down)
+        self._pmarker_strip.bind("<MouseWheel>",     self._on_pmousewheel)
 
         self._pcanvas.bind("<Configure>",       self._on_pcanvas_resize)
         self._pcanvas.bind("<Button-4>",        self._on_pscroll_up)
         self._pcanvas.bind("<Button-5>",        self._on_pscroll_down)
         self._pcanvas.bind("<MouseWheel>",      self._on_pmousewheel)
-        self._pvsb.bind("<B1-Motion>",          lambda e: self._schedule_predraw())
         self._pcanvas.bind("<ButtonPress-1>",   self._on_pmouse_press)
         self._pcanvas.bind("<B1-Motion>",       self._on_pmouse_drag)
         self._pcanvas.bind("<ButtonRelease-1>", self._on_pmouse_release)
@@ -4111,10 +4123,7 @@ class PluginPanel(ctk.CTkFrame):
     def _on_plugin_filter_panel_change(self) -> None:
         state = {k: v.get() for k, v in self._pfsp_vars.items()}
         self._plugin_filter_state = state
-        any_active = any(state.values())
-        btn = getattr(self, "_plugin_filter_btn", None)
-        if btn is not None:
-            btn.configure(fg_color=ACCENT if any_active else "#1e4d7a")
+        self._update_plugin_filter_btn_color()
         self._apply_plugin_search_filter()
         self._pcanvas.yview_moveto(0)
         self._predraw()
@@ -5550,9 +5559,13 @@ class PluginPanel(ctk.CTkFrame):
         self._marker_strip_after_id = self.after(250, self._draw_marker_strip)
 
     def _draw_marker_strip(self):
-        """Draw tick marks on the strip beside the plugins scrollbar.
-        Orange ticks for plugins belonging to the selected mod (_highlighted_plugins).
-        Green ticks for master dependencies of the selected plugin (_master_highlights)."""
+        """Paint the combined scrollbar + marker strip.
+
+        Layers (bottom → top):
+          1. Trough background
+          2. Tick marks (priority-merged by y-coord)
+          3. Stippled thumb (ticks bleed through)
+        """
         self._marker_strip_after_id = None
         c = self._pmarker_strip
         entries = self._plugin_entries
@@ -5562,10 +5575,12 @@ class PluginPanel(ctk.CTkFrame):
                    or self._bsa_conflict_higher_plugins
                    or self._bsa_conflict_lower_plugins)
         strip_h = c.winfo_height()
+        strip_w = c.winfo_width()
 
         cache_key = (
             n,
             strip_h,
+            strip_w,
             frozenset(self._missing_masters),
             frozenset(self._highlighted_plugins),
             frozenset(self._master_highlights),
@@ -5573,70 +5588,136 @@ class PluginPanel(ctk.CTkFrame):
             frozenset(self._bsa_conflict_lower_plugins),
         )
         if getattr(self, "_marker_strip_cache_key", None) == cache_key:
+            # Trough + ticks unchanged; just re-paint thumb in case scroll moved.
+            self._redraw_pthumb()
             return
         self._marker_strip_cache_key = cache_key
 
-        # Creating fresh rectangles is dramatically faster than updating existing
-        # ones via coords/itemconfigure on Tk canvases with tag indexes — 1ms vs
-        # 200ms+ for ~120 ticks. So we delete-and-recreate on each cache miss.
+        # Fresh-create is faster than coords/itemconfigure for many items.
         c.delete("all")
 
-        if not n or not has_any or strip_h <= 1:
-            if strip_h <= 1:
-                self._marker_strip_cache_key = None
+        if strip_h <= 1 or strip_w <= 1:
+            self._marker_strip_cache_key = None
             return
 
-        master_names_lower = {m.lower() for m in self._master_highlights}
-        plugin_mod_color = _theme.plugin_mod
-        conflict_higher_color = _theme.conflict_higher
-        conflict_lower_color = _theme.conflict_lower
-        highlighted = self._highlighted_plugins
-        missing = self._missing_masters
-        higher = self._bsa_conflict_higher_plugins
-        lower = self._bsa_conflict_lower_plugins
-        strip_max = strip_h - 4
+        # Trough
+        c.create_rectangle(0, 0, strip_w, strip_h, fill=BG_DEEP, outline="", tags="trough")
 
-        # Priority map: once a (y, color) pair is taken at a y-coord, higher-priority
-        # colors can overwrite but same-color duplicates at the same y are skipped.
-        # Missing (red) > highlighted (mod) > master (green) > conflict_higher > conflict_lower.
-        priority = {
-            "#c0392b": 5,
-            plugin_mod_color: 4,
-            "#2a8c2a": 3,
-            conflict_higher_color: 2,
-            conflict_lower_color: 1,
-        }
-        y_to_color: dict[int, str] = {}
-        inv_n = 1.0 / n
-        for i, e in enumerate(entries):
-            name = e.name
-            if name in missing:
-                color = "#c0392b"
-            else:
-                name_lower = name.lower()
-                if name_lower in highlighted:
-                    color = plugin_mod_color
-                elif name_lower in master_names_lower:
-                    color = "#2a8c2a"
-                elif name_lower in higher:
-                    color = conflict_higher_color
-                elif name_lower in lower:
-                    color = conflict_lower_color
+        if n and has_any:
+            master_names_lower = {m.lower() for m in self._master_highlights}
+            plugin_mod_color = _theme.plugin_mod
+            conflict_higher_color = _theme.conflict_higher
+            conflict_lower_color = _theme.conflict_lower
+            highlighted = self._highlighted_plugins
+            missing = self._missing_masters
+            higher = self._bsa_conflict_higher_plugins
+            lower = self._bsa_conflict_lower_plugins
+            strip_max = strip_h - 4
+
+            # Priority: missing (red) > highlighted (mod) > master (green) > conflict_higher > conflict_lower.
+            priority = {
+                "#c0392b": 5,
+                plugin_mod_color: 4,
+                "#2a8c2a": 3,
+                conflict_higher_color: 2,
+                conflict_lower_color: 1,
+            }
+            y_to_color: dict[int, str] = {}
+            inv_n = 1.0 / n
+            for i, e in enumerate(entries):
+                name = e.name
+                if name in missing:
+                    color = "#c0392b"
                 else:
-                    continue
-            y = int(i * inv_n * strip_h)
-            if y < 2:
-                y = 2
-            elif y > strip_max:
-                y = strip_max
-            existing = y_to_color.get(y)
-            if existing is None or priority.get(color, 0) > priority.get(existing, 0):
-                y_to_color[y] = color
-        ticks: list[tuple[int, str]] = sorted(y_to_color.items())
+                    name_lower = name.lower()
+                    if name_lower in highlighted:
+                        color = plugin_mod_color
+                    elif name_lower in master_names_lower:
+                        color = "#2a8c2a"
+                    elif name_lower in higher:
+                        color = conflict_higher_color
+                    elif name_lower in lower:
+                        color = conflict_lower_color
+                    else:
+                        continue
+                y = int(i * inv_n * strip_h)
+                if y < 2:
+                    y = 2
+                elif y > strip_max:
+                    y = strip_max
+                existing = y_to_color.get(y)
+                if existing is None or priority.get(color, 0) > priority.get(existing, 0):
+                    y_to_color[y] = color
+            ticks: list[tuple[int, str]] = sorted(y_to_color.items())
 
-        create_rect = c.create_rectangle
-        for y, color in ticks:
-            create_rect(0, y, 4, y + 3, fill=color, outline="", tags="marker")
+            create_rect = c.create_rectangle
+            for y, color in ticks:
+                create_rect(0, y, strip_w, y + 3, fill=color, outline="", tags="marker")
+
+        self._redraw_pthumb()
+
+    def _redraw_pthumb(self) -> None:
+        c = self._pmarker_strip
+        c.delete("thumb")
+        strip_h = c.winfo_height()
+        strip_w = c.winfo_width()
+        if strip_h <= 1 or strip_w <= 1:
+            return
+        first = max(0.0, min(1.0, self._pscroll_first))
+        last = max(first, min(1.0, self._pscroll_last))
+        if last - first >= 0.999:
+            return
+        y1 = int(first * strip_h)
+        y2 = max(y1 + 8, int(last * strip_h))
+        if y2 > strip_h:
+            y2 = strip_h
+            y1 = max(0, y2 - 8)
+        c.create_rectangle(
+            0, y1, strip_w, y2,
+            fill=BG_SEP, outline="", stipple="gray50", tags="thumb",
+        )
+
+    def _pscroll_set(self, first: str, last: str) -> None:
+        try:
+            f = float(first); l = float(last)
+        except (TypeError, ValueError):
+            return
+        if f == self._pscroll_first and l == self._pscroll_last:
+            return
+        self._pscroll_first = f
+        self._pscroll_last = l
+        self._redraw_pthumb()
+
+    def _on_pscrollbar_press(self, event):
+        strip_h = self._pmarker_strip.winfo_height()
+        if strip_h <= 1:
+            return
+        first = self._pscroll_first
+        last = self._pscroll_last
+        thumb_top = first * strip_h
+        thumb_bot = last * strip_h
+        if thumb_top <= event.y <= thumb_bot:
+            self._pthumb_drag_offset = (event.y - thumb_top) / strip_h
+        else:
+            self._pthumb_drag_offset = (last - first) / 2.0
+            self._pscroll_to_pointer(event.y)
+
+    def _on_pscrollbar_drag(self, event):
+        if self._pthumb_drag_offset is None:
+            return
+        self._pscroll_to_pointer(event.y)
+
+    def _on_pscrollbar_release(self, _event):
+        self._pthumb_drag_offset = None
+
+    def _pscroll_to_pointer(self, py: int) -> None:
+        strip_h = self._pmarker_strip.winfo_height()
+        if strip_h <= 1 or self._pthumb_drag_offset is None:
+            return
+        frac = (py / strip_h) - self._pthumb_drag_offset
+        frac = max(0.0, min(1.0, frac))
+        self._pcanvas.yview_moveto(frac)
+        self._schedule_predraw()
 
     def _schedule_predraw(self) -> None:
         """Debounced _predraw — coalesces rapid scroll/resize events."""

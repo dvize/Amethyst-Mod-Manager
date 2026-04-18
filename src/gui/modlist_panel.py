@@ -42,7 +42,7 @@ from gui.theme import (
 )
 import gui.theme as _theme
 from gui.theme import scaled
-from gui.ctk_components import CTkAlert, CTkPopupMenu, CTkProgressPopup
+from gui.ctk_components import CTkAlert, CTkNotification, CTkPopupMenu, CTkProgressPopup
 from gui.game_helpers import (
     _GAMES,
     _load_games,
@@ -691,25 +691,34 @@ class ModListPanel(ctk.CTkFrame):
 
         self._canvas = tk.Canvas(frame, bg=BG_DEEP, bd=0, highlightthickness=0,
                                  yscrollincrement=1, takefocus=0)
+        # Custom combined scrollbar + marker strip: single canvas that paints
+        # the trough, tick markers, and a stippled thumb (so ticks bleed
+        # through). Replaces native tk.Scrollbar + separate marker canvas.
+        self._SCROLL_W = 16
         self._marker_strip = tk.Canvas(frame, bg=BG_DEEP, bd=0, highlightthickness=0,
-                                       width=4, takefocus=0)
-        self._vsb = tk.Scrollbar(frame, orient="vertical",
-                                 command=self._canvas.yview,
-                                 bg=BG_SEP, troughcolor=BG_DEEP,
-                                 activebackground=ACCENT,
-                                 highlightthickness=0, bd=0)
-        self._canvas.configure(yscrollcommand=self._vsb.set)
+                                       width=self._SCROLL_W, takefocus=0)
+        # Alias kept for any external references; _vsb is no longer a tk.Scrollbar.
+        self._vsb = self._marker_strip
+        self._canvas.configure(yscrollcommand=self._scroll_set)
         self._canvas.grid(row=0, column=0, sticky="nsew")
         self._marker_strip.grid(row=0, column=1, sticky="ns")
-        self._vsb.grid(row=0, column=2, sticky="ns")
-        self._marker_strip.bind("<Configure>", self._on_marker_strip_resize)
+        # Scroll state
+        self._scroll_first = 0.0
+        self._scroll_last = 1.0
+        self._thumb_drag_offset: float | None = None  # fractional offset within thumb when drag starts
+        self._marker_strip.bind("<Configure>",   self._on_marker_strip_resize)
+        self._marker_strip.bind("<ButtonPress-1>",   self._on_scrollbar_press)
+        self._marker_strip.bind("<B1-Motion>",       self._on_scrollbar_drag)
+        self._marker_strip.bind("<ButtonRelease-1>", self._on_scrollbar_release)
+        self._marker_strip.bind("<Button-4>",        self._on_scroll_up)
+        self._marker_strip.bind("<Button-5>",        self._on_scroll_down)
+        self._marker_strip.bind("<MouseWheel>",      self._on_mousewheel)
 
         self._canvas_w = 600   # updated on first <Configure>
         self._layout_columns(600)  # init before first _redraw (avoids IndexError on _COL_X[6])
         self._canvas.bind("<Configure>",      self._on_canvas_resize)
         self._canvas.bind("<Button-4>",       self._on_scroll_up)
         self._canvas.bind("<Button-5>",       self._on_scroll_down)
-        self._vsb.bind("<B1-Motion>",         lambda e: self._schedule_redraw())
         self._canvas.bind("<MouseWheel>",     self._on_mousewheel)
         self._canvas.bind("<ButtonPress-1>",         self._on_mouse_press)
         self._canvas.bind("<Control-ButtonPress-1>", self._on_mouse_press)
@@ -2315,23 +2324,21 @@ class ModListPanel(ctk.CTkFrame):
                         base_bg = custom_color if custom_color else BG_SEP
                         txt_col = _theme.contrasting_text_color(base_bg) if custom_color else "#ffffff"
 
+                    _is_hover_sep = (i == self._hover_idx and self._drag_idx < 0)
                     if is_sel_row:
                         row_bg = BG_SELECT
                     elif (not is_synthetic or is_overwrite) and i in conflict_sep_higher:
-                        row_bg = _theme.conflict_higher
-                        txt_col = _theme.contrasting_text_color(row_bg)
+                        txt_col = _theme.contrasting_text_color(_theme.conflict_higher)
+                        row_bg = _theme.hover_tint(_theme.conflict_higher) if _is_hover_sep else _theme.conflict_higher
                     elif (not is_synthetic or is_overwrite) and i in conflict_sep_lower:
-                        row_bg = _theme.conflict_lower
-                        txt_col = _theme.contrasting_text_color(row_bg)
+                        txt_col = _theme.contrasting_text_color(_theme.conflict_lower)
+                        row_bg = _theme.hover_tint(_theme.conflict_lower) if _is_hover_sep else _theme.conflict_lower
                     elif not is_synthetic and i == highlighted_sep_idx:
-                        row_bg = _theme.plugin_separator
-                        txt_col = _theme.contrasting_text_color(row_bg)
-                    elif i == self._hover_idx and self._drag_idx < 0:
+                        txt_col = _theme.contrasting_text_color(_theme.plugin_separator)
+                        row_bg = _theme.hover_tint(_theme.plugin_separator) if _is_hover_sep else _theme.plugin_separator
+                    elif _is_hover_sep:
                         if custom_color:
-                            # Lighten the custom colour slightly on hover
-                            r, g, b = int(base_bg[1:3], 16), int(base_bg[3:5], 16), int(base_bg[5:7], 16)
-                            r, g, b = min(255, r + 20), min(255, g + 20), min(255, b + 20)
-                            row_bg = f"#{r:02x}{g:02x}{b:02x}"
+                            row_bg = _theme.hover_tint(base_bg)
                         else:
                             row_bg = BG_HOVER_ROW
                     else:
@@ -2723,26 +2730,36 @@ class ModListPanel(ctk.CTkFrame):
                 else:
                     # --- Regular mod row ---
                     is_sel = (i in self._sel_set and i not in _dragging) or (i == self._drag_idx)
+                    _is_hover = (i == self._hover_idx and self._drag_idx < 0)
+                    # base_row_bg = the colour the row would have without hover
+                    # (used for text-contrast so hover tinting doesn't flip text colour)
                     if is_sel:
-                        bg = BG_SELECT
+                        base_row_bg = BG_SELECT
                     elif entry.name == self._highlighted_mod:
-                        bg = _theme.plugin_mod
-                    elif i == self._hover_idx and self._drag_idx < 0:
-                        bg = BG_HOVER_ROW
+                        base_row_bg = _theme.plugin_mod
                     elif sel_entry and (not sel_entry.is_separator
                                         or sel_entry.name == OVERWRITE_NAME):
                         if entry.name in conflict_sel_higher:
-                            bg = _theme.conflict_higher
+                            base_row_bg = _theme.conflict_higher
                         elif entry.name in conflict_sel_lower:
-                            bg = _theme.conflict_lower
+                            base_row_bg = _theme.conflict_lower
                         else:
-                            bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
+                            base_row_bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
                     elif entry.name in conflict_mod_higher:
-                        bg = _theme.conflict_higher
+                        base_row_bg = _theme.conflict_higher
                     elif entry.name in conflict_mod_lower:
-                        bg = _theme.conflict_lower
+                        base_row_bg = _theme.conflict_lower
                     else:
-                        bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
+                        base_row_bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
+
+                    if _is_hover and not is_sel:
+                        # Coloured rows: tint base. Plain rows: use the flat hover colour.
+                        if base_row_bg in (BG_ROW, BG_ROW_ALT):
+                            bg = BG_HOVER_ROW
+                        else:
+                            bg = _theme.hover_tint(base_row_bg)
+                    else:
+                        bg = base_row_bg
 
                     # Background
                     c.coords(self._pool_bg[s], 0, y_top, cw, y_bot)
@@ -2751,8 +2768,8 @@ class ModListPanel(ctk.CTkFrame):
                     # Name text (truncate if it would overlap the category column)
                     _theme_bgs = (_theme.conflict_higher, _theme.conflict_lower,
                                   _theme.plugin_mod, _theme.plugin_separator)
-                    if bg in _theme_bgs:
-                        name_color = _theme.contrasting_text_color(bg)
+                    if base_row_bg in _theme_bgs:
+                        name_color = _theme.contrasting_text_color(base_row_bg)
                     elif not entry.enabled:
                         name_color = TEXT_DIM
                     else:
@@ -7445,6 +7462,16 @@ class ModListPanel(ctk.CTkFrame):
         self._update_btn.configure(text="Checking...", state="disabled")
         log_fn = self._log
 
+        _notif = CTkNotification(app, state="info",
+                                 message=f"Checking {len(enabled_names)} mod(s) for updates...")
+
+        def _close_notif():
+            try:
+                if _notif.winfo_exists():
+                    _notif.destroy()
+            except Exception:
+                pass
+
         def _worker():
             try:
                 results, missing = check_for_updates(
@@ -7455,6 +7482,7 @@ class ModListPanel(ctk.CTkFrame):
                 )
 
                 def _done():
+                    _close_notif()
                     self._update_btn.configure(text="Check Updates", state="normal")
                     if results:
                         log_fn(f"Nexus: {len(results)} update(s) available!")
@@ -7474,6 +7502,7 @@ class ModListPanel(ctk.CTkFrame):
                 app.after(0, _done)
             except Exception as exc:
                 app.after(0, lambda e=exc: (
+                    _close_notif(),
                     self._update_btn.configure(text="Check Updates", state="normal"),
                     log_fn(f"Nexus: Check failed — {e}"),
                 ))
@@ -7498,6 +7527,16 @@ class ModListPanel(ctk.CTkFrame):
         self._update_btn.configure(text="Checking...", state="disabled")
         log_fn = self._log
 
+        _notif = CTkNotification(app, state="info",
+                                 message=f"Checking {len(target_names)} mod(s) for updates...")
+
+        def _close_notif():
+            try:
+                if _notif.winfo_exists():
+                    _notif.destroy()
+            except Exception:
+                pass
+
         def _worker():
             try:
                 results, missing = check_for_updates(
@@ -7508,6 +7547,7 @@ class ModListPanel(ctk.CTkFrame):
                 )
 
                 def _done():
+                    _close_notif()
                     self._update_btn.configure(text="Check Updates", state="normal")
                     if results:
                         log_fn(f"Nexus: {len(results)} update(s) available!")
@@ -7525,6 +7565,7 @@ class ModListPanel(ctk.CTkFrame):
                 app.after(0, _done)
             except Exception as exc:
                 app.after(0, lambda e=exc: (
+                    _close_notif(),
                     self._update_btn.configure(text="Check Updates", state="normal"),
                     log_fn(f"Nexus: Check failed — {e}"),
                 ))
@@ -7564,14 +7605,14 @@ class ModListPanel(ctk.CTkFrame):
         self._fsp_vars["filter_fomod_only"].set(self._filter_fomod_only)
         self._fsp_vars["filter_has_bsa"].set(self._filter_has_bsa)
         self._refresh_filter_category_list()
-        self._filter_btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOV)
+        self._update_filter_btn_color()
 
     def _close_filter_side_panel(self):
         """Hide the filter side panel."""
         self._filter_panel_open = False
         self._filter_side_panel.grid_remove()
         self.grid_columnconfigure(0, minsize=0)
-        self._filter_btn.configure(fg_color=BG_HEADER, hover_color=BG_HOVER)
+        self._update_filter_btn_color()
 
     def _on_restore_backup(self):
         """Open the backup restore panel/dialog for the current profile."""
@@ -7618,8 +7659,37 @@ class ModListPanel(ctk.CTkFrame):
         self._filter_fomod_only = state.get("filter_fomod_only", False)
         self._filter_has_bsa = state.get("filter_has_bsa", False)
         self._filter_categories = state.get("filter_categories") or frozenset()
+        self._update_filter_btn_color()
         self._invalidate_derived_caches()
         self._redraw()
+
+    def _any_modlist_filters_active(self) -> bool:
+        return (
+            self._filter_show_disabled
+            or self._filter_show_enabled
+            or self._filter_hide_separators
+            or self._filter_conflict_winning
+            or self._filter_conflict_losing
+            or self._filter_conflict_partial
+            or self._filter_conflict_full
+            or self._filter_missing_reqs
+            or self._filter_has_disabled_plugins
+            or self._filter_has_plugins
+            or self._filter_has_disabled_files
+            or self._filter_has_updates
+            or self._filter_fomod_only
+            or self._filter_has_bsa
+            or bool(self._filter_categories)
+        )
+
+    def _update_filter_btn_color(self) -> None:
+        btn = getattr(self, "_filter_btn", None)
+        if btn is None:
+            return
+        if self._any_modlist_filters_active():
+            btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOV)
+        else:
+            btn.configure(fg_color=BG_HEADER, hover_color=BG_HOVER)
 
     def _move_up(self):
         indices = sorted(self._sel_set) if self._sel_set else (
@@ -8087,80 +8157,165 @@ class ModListPanel(ctk.CTkFrame):
         self._marker_strip_after_id = self.after(250, self._draw_marker_strip)
 
     def _draw_marker_strip(self):
-        """Draw colour-coded tick marks on the narrow strip beside the scrollbar.
+        """Paint the combined scrollbar + marker strip.
 
-        - Orange : the mod whose plugin is selected (_highlighted_mod)
-        - Green  : mods that win over the selected mod (conflict_higher)
-        - Red    : mods that lose to the selected mod (conflict_lower)
+        Layer order (bottom → top):
+          1. Trough background (BG_DEEP)
+          2. Tick marks spanning full strip width
+             - Orange : the mod whose plugin is selected (_highlighted_mod)
+             - Green  : mods that win over the selected mod (conflict_higher)
+             - Red    : mods that lose to the selected mod (conflict_lower)
+          3. Thumb rectangle with gray50 stipple so underlying ticks bleed through.
         """
         c = self._marker_strip
-        c.delete("marker")
-        vis = self._visible_indices
-        if not vis:
-            return
+        c.delete("all")
         strip_h = c.winfo_height()
+        strip_w = c.winfo_width()
+        if strip_h <= 1 or strip_w <= 1:
+            return
+
+        # Trough background
+        c.create_rectangle(0, 0, strip_w, strip_h, fill=BG_DEEP, outline="", tags="trough")
+
+        vis = self._visible_indices
+        n = len(vis) if vis else 0
+
+        if n:
+            # Build a name→entry-index lookup for the visible list.
+            ei_to_row: dict[int, int] = {ei: r for r, ei in enumerate(vis)}
+            name_to_row: dict[str, int] = {self._entries[ei].name: r for r, ei in enumerate(vis)}
+
+            def _row_for_mod(mod_name: str) -> int | None:
+                row = name_to_row.get(mod_name)
+                if row is not None:
+                    return row
+                sep_ei = self._sep_idx_for_mod(mod_name)
+                if sep_ei >= 0:
+                    return ei_to_row.get(sep_ei)
+                return None
+
+            def _tick(row_idx: int, colour: str):
+                frac = row_idx / n
+                y = max(2, min(int(frac * strip_h), strip_h - 4))
+                c.create_rectangle(0, y, strip_w, y + 3, fill=colour, outline="", tags="marker")
+
+            if self._highlighted_mod:
+                row = _row_for_mod(self._highlighted_mod)
+                if row is not None:
+                    _tick(row, _theme.plugin_mod)
+
+            sel_indices = sorted(self._sel_set) if self._sel_set else (
+                [self._sel_idx] if 0 <= self._sel_idx < len(self._entries) else []
+            )
+            all_higher: set[str] = set()
+            all_lower: set[str] = set()
+            for si in sel_indices:
+                if si < 0 or si >= len(self._entries):
+                    continue
+                e = self._entries[si]
+                if e.is_separator and e.name != OVERWRITE_NAME:
+                    for ci in self._sep_block_range(si):
+                        child = self._entries[ci]
+                        if not child.is_separator:
+                            all_higher.update(self._overrides.get(child.name, set()))
+                            all_lower.update(self._overridden_by.get(child.name, set()))
+                            all_higher.update(self._bsa_overrides.get(child.name, set()))
+                            all_lower.update(self._bsa_overridden_by.get(child.name, set()))
+                    continue
+                all_higher.update(self._overrides.get(e.name, set()))
+                all_lower.update(self._overridden_by.get(e.name, set()))
+                all_higher.update(self._bsa_overrides.get(e.name, set()))
+                all_lower.update(self._bsa_overridden_by.get(e.name, set()))
+            for mod_name in all_higher:
+                row = _row_for_mod(mod_name)
+                if row is not None:
+                    _tick(row, _theme.conflict_higher)
+            for mod_name in all_lower:
+                row = _row_for_mod(mod_name)
+                if row is not None:
+                    _tick(row, _theme.conflict_lower)
+
+        # Thumb (stippled so ticks show through). Hide if content fits fully.
+        first = max(0.0, min(1.0, self._scroll_first))
+        last = max(first, min(1.0, self._scroll_last))
+        if last - first < 0.999:
+            y1 = int(first * strip_h)
+            y2 = max(y1 + 8, int(last * strip_h))  # min thumb size
+            if y2 > strip_h:
+                y2 = strip_h
+                y1 = max(0, y2 - 8)
+            c.create_rectangle(
+                0, y1, strip_w, y2,
+                fill=BG_SEP, outline="", stipple="gray50", tags="thumb",
+            )
+
+    def _scroll_set(self, first: str, last: str) -> None:
+        """yscrollcommand callback: store thumb range and repaint thumb only."""
+        try:
+            f = float(first); l = float(last)
+        except (TypeError, ValueError):
+            return
+        if f == self._scroll_first and l == self._scroll_last:
+            return
+        self._scroll_first = f
+        self._scroll_last = l
+        # Repaint only the thumb — ticks + trough stay valid until content
+        # changes (which triggers _draw_marker_strip via _redraw).
+        self._redraw_thumb()
+
+    def _redraw_thumb(self) -> None:
+        c = self._marker_strip
+        c.delete("thumb")
+        strip_h = c.winfo_height()
+        strip_w = c.winfo_width()
+        if strip_h <= 1 or strip_w <= 1:
+            return
+        first = max(0.0, min(1.0, self._scroll_first))
+        last = max(first, min(1.0, self._scroll_last))
+        if last - first >= 0.999:
+            return
+        y1 = int(first * strip_h)
+        y2 = max(y1 + 8, int(last * strip_h))
+        if y2 > strip_h:
+            y2 = strip_h
+            y1 = max(0, y2 - 8)
+        c.create_rectangle(
+            0, y1, strip_w, y2,
+            fill=BG_SEP, outline="", stipple="gray50", tags="thumb",
+        )
+
+    def _on_scrollbar_press(self, event):
+        strip_h = self._marker_strip.winfo_height()
         if strip_h <= 1:
             return
-        n = len(vis)
+        first = self._scroll_first
+        last = self._scroll_last
+        thumb_top = first * strip_h
+        thumb_bot = last * strip_h
+        if thumb_top <= event.y <= thumb_bot:
+            # Start drag: remember offset within thumb
+            self._thumb_drag_offset = (event.y - thumb_top) / strip_h
+        else:
+            # Page: jump so thumb is centred on click
+            self._thumb_drag_offset = (last - first) / 2.0
+            self._scroll_to_pointer(event.y)
 
-        # Build a name→entry-index lookup for the visible list (and a fast path to
-        # the entry-index→row mapping used for collapsed-separator fallback).
-        ei_to_row: dict[int, int] = {ei: r for r, ei in enumerate(vis)}
-        name_to_row: dict[str, int] = {self._entries[ei].name: r for r, ei in enumerate(vis)}
+    def _on_scrollbar_drag(self, event):
+        if self._thumb_drag_offset is None:
+            return
+        self._scroll_to_pointer(event.y)
 
-        def _row_for_mod(mod_name: str) -> int | None:
-            """Return the visible row index for mod_name, falling back to its separator."""
-            row = name_to_row.get(mod_name)
-            if row is not None:
-                return row
-            sep_ei = self._sep_idx_for_mod(mod_name)
-            if sep_ei >= 0:
-                return ei_to_row.get(sep_ei)
-            return None
+    def _on_scrollbar_release(self, _event):
+        self._thumb_drag_offset = None
 
-        def _tick(row_idx: int, colour: str):
-            frac = row_idx / n
-            y = max(2, min(int(frac * strip_h), strip_h - 4))
-            c.create_rectangle(0, y, 4, y + 3, fill=colour, outline="", tags="marker")
-
-        # Orange tick for the plugin-highlighted mod.
-        if self._highlighted_mod:
-            row = _row_for_mod(self._highlighted_mod)
-            if row is not None:
-                _tick(row, _theme.plugin_mod)
-
-        # Green/red ticks for conflict highlights when mod(s) are selected.
-        sel_indices = sorted(self._sel_set) if self._sel_set else (
-            [self._sel_idx] if 0 <= self._sel_idx < len(self._entries) else []
-        )
-        all_higher: set[str] = set()
-        all_lower: set[str] = set()
-        for si in sel_indices:
-            if si < 0 or si >= len(self._entries):
-                continue
-            e = self._entries[si]
-            if e.is_separator and e.name != OVERWRITE_NAME:
-                # Collect conflicts from all mods under this separator
-                for ci in self._sep_block_range(si):
-                    child = self._entries[ci]
-                    if not child.is_separator:
-                        all_higher.update(self._overrides.get(child.name, set()))
-                        all_lower.update(self._overridden_by.get(child.name, set()))
-                        all_higher.update(self._bsa_overrides.get(child.name, set()))
-                        all_lower.update(self._bsa_overridden_by.get(child.name, set()))
-                continue
-            all_higher.update(self._overrides.get(e.name, set()))
-            all_lower.update(self._overridden_by.get(e.name, set()))
-            all_higher.update(self._bsa_overrides.get(e.name, set()))
-            all_lower.update(self._bsa_overridden_by.get(e.name, set()))
-        for mod_name in all_higher:
-            row = _row_for_mod(mod_name)
-            if row is not None:
-                _tick(row, _theme.conflict_higher)
-        for mod_name in all_lower:
-            row = _row_for_mod(mod_name)
-            if row is not None:
-                _tick(row, _theme.conflict_lower)
+    def _scroll_to_pointer(self, py: int) -> None:
+        strip_h = self._marker_strip.winfo_height()
+        if strip_h <= 1 or self._thumb_drag_offset is None:
+            return
+        frac = (py / strip_h) - self._thumb_drag_offset
+        frac = max(0.0, min(1.0, frac))
+        self._canvas.yview_moveto(frac)
+        self._schedule_redraw()
 
     def clear_selection(self):
         """Clear the mod list selection, e.g. when a plugin is selected."""
