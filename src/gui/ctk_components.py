@@ -1065,9 +1065,71 @@ class CTkPopupMenu(ctk.CTkToplevel):
             _tb.print_stack(limit=6)
         self._alive[0] = False
         self._close_active_sub()
+        if getattr(self, "_watchdog_id", None):
+            try:
+                self.after_cancel(self._watchdog_id)
+            except Exception:
+                pass
+            self._watchdog_id = None
         if self.winfo_exists():
             self.withdraw()
         self.hidden = True
+
+    def _pointer_in_menu(self, px: int, py: int) -> bool:
+        """True if (px, py) is inside this popup or its active submenu."""
+        try:
+            if self.winfo_exists():
+                wx, wy = self.winfo_rootx(), self.winfo_rooty()
+                ww, wh = self.winfo_width(), self.winfo_height()
+                if wx <= px <= wx + ww and wy <= py <= wy + wh:
+                    return True
+        except Exception:
+            pass
+        sub = self._active_sub[0]
+        if sub is not None:
+            try:
+                if sub.winfo_exists():
+                    sx, sy = sub.winfo_rootx(), sub.winfo_rooty()
+                    sw, sh = sub.winfo_width(), sub.winfo_height()
+                    if sx <= px <= sx + sw and sy <= py <= sy + sh:
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _watchdog(self):
+        """Poll-based dismissal for compositors where <FocusOut> and bind_all
+        click events are unreliable (Wayland, certain tiling WMs, Flatpak).
+        Dismisses when the pointer is outside the menu and the entire Tk app
+        has lost focus (i.e. the user clicked into another application)."""
+        self._watchdog_id = None
+        if not self._alive[0] or self.hidden:
+            return
+        if not self.winfo_exists():
+            return
+        import time as _time
+        in_grace = (_time.monotonic() - getattr(self, '_popup_time', 0)) < 0.15
+        try:
+            if not in_grace:
+                try:
+                    px, py = self.winfo_pointerxy()
+                except Exception:
+                    px = py = None
+                # If pointer is outside the menu AND our Tk app has lost focus,
+                # the user clicked/tabbed to another app — dismiss.
+                if px is None or not self._pointer_in_menu(px, py):
+                    try:
+                        if self.focus_displayof() is None:
+                            self._withdraw()
+                            return
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._watchdog_id = self.after(120, self._watchdog)
+        except Exception:
+            self._watchdog_id = None
 
     def popup(self, x=None, y=None):
         """Show the menu at screen coordinates (x, y). Uses cursor position if not provided."""
@@ -1117,6 +1179,26 @@ class CTkPopupMenu(ctk.CTkToplevel):
             self.bind_all("<ButtonPress-1>", self._on_global_click, add="+")
             self.bind_all("<ButtonPress-3>", self._on_global_click, add="+")
             self._global_bound = True
+        # Extra, per-toplevel click bindings as a fallback path. On some
+        # Wayland compositors and Flatpak setups, `bind_all` events from an
+        # override-redirect popup don't always reach widgets in another
+        # toplevel; binding directly on the app toplevel is more reliable.
+        if self.master_window is not None and not getattr(self, "_tl_click_bound", False):
+            try:
+                app_tl = self.master_window.winfo_toplevel()
+                app_tl.bind("<ButtonPress-1>", self._on_global_click, add="+")
+                app_tl.bind("<ButtonPress-3>", self._on_global_click, add="+")
+                self._tl_click_bound = True
+            except Exception:
+                pass
+        # Start the pointer/focus watchdog for compositors where event-based
+        # dismissal is unreliable.
+        if getattr(self, "_watchdog_id", None):
+            try:
+                self.after_cancel(self._watchdog_id)
+            except Exception:
+                pass
+        self._watchdog_id = self.after(120, self._watchdog)
 
 
 def do_popup(event, frame):
