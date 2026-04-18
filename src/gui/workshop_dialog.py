@@ -160,7 +160,8 @@ class VersionPickerOverlay(tk.Frame):
         body = tk.Frame(self, bg=BG_DEEP)
         body.pack(side="top", fill="both", expand=True)
 
-        self._canvas = tk.Canvas(body, bg=BG_DEEP, highlightthickness=0, bd=0)
+        self._canvas = tk.Canvas(body, bg=BG_DEEP, highlightthickness=0, bd=0,
+                                 yscrollincrement=1, takefocus=0)
         self._canvas.pack(side="left", fill="both", expand=True)
 
         sb = tk.Scrollbar(
@@ -306,7 +307,7 @@ class VersionPickerOverlay(tk.Frame):
                 self._apply_row_bg(s, old)
 
     def _scroll(self, units: int):
-        self._canvas.yview_scroll(units * self._ROW_H, "units")
+        self._canvas.yview_scroll(units * 50, "units")
         self.after_idle(self._redraw)
 
     def _on_yscroll(self, *args):
@@ -616,7 +617,8 @@ class WorkshopDialog(tk.Frame):
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, weight=1)
 
-        self._canvas = tk.Canvas(body, bg=BG_DEEP, highlightthickness=0, bd=0)
+        self._canvas = tk.Canvas(body, bg=BG_DEEP, highlightthickness=0, bd=0,
+                                 yscrollincrement=1, takefocus=0)
         self._canvas.grid(row=0, column=0, sticky="nsew")
 
         sb = tk.Scrollbar(
@@ -1350,7 +1352,7 @@ class WorkshopDialog(tk.Frame):
     # ------------------------------------------------------------------
 
     def _scroll(self, units: int):
-        self._canvas.yview_scroll(units * _ROW_H, "units")
+        self._canvas.yview_scroll(units * 50, "units")
         self.after_idle(self._redraw)
 
     def _on_yscroll(self, *args):
