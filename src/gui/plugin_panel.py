@@ -318,6 +318,8 @@ class PluginPanel(ctk.CTkFrame):
 
         # Virtual-list pool (fixed-size widget + canvas item pool for visible rows)
         self._pool_size: int = 60
+        # Per-slot rendered-state cache — tuple of inputs; if unchanged we skip Tk calls.
+        self._pool_last_state: list[tuple | None] = []
         self._pool_data_idx: list[int] = []
         self._pool_bg: list[int] = []
         self._pool_name: list[int] = []
@@ -343,6 +345,10 @@ class PluginPanel(ctk.CTkFrame):
         # check_esl_eligible() does a full record scan of the plugin file —
         # expensive enough that we must not re-run it on every toggle/reorder.
         self._esl_eligible_cache: dict[tuple[str, int, int], bool] = {}
+        # Cache for _check_all_masters() — the filemap+staging scan and master/
+        # version-mismatch checks are expensive (~450 ms for 1300 plugins).
+        # Keyed by (filemap_mtime, plugins_tuple, data_dir_str).
+        self._masters_cache_key: tuple | None = None
         self._userlist_plugins: set[str] = set()
         # Plugin filter panel state
         self._plugin_filter_state: dict = {}
@@ -4122,6 +4128,7 @@ class PluginPanel(ctk.CTkFrame):
         c = self._pcanvas
         for s in range(self._pool_size):
             self._pool_data_idx.append(-1)
+            self._pool_last_state.append(None)
 
             bg_id = c.create_rectangle(0, -200, 0, -200, fill="", outline="", state="hidden")
             missing_strip_id = c.create_rectangle(0, -200, 3, -200,
@@ -4759,6 +4766,10 @@ class PluginPanel(ctk.CTkFrame):
           - a requirement counts only if not satisfied by an enabled plugin,
             staged file, or enabled Nexus mod
           - an incompatibility counts only if the conflicting plugin is enabled
+
+        enabled_lower is built once per plugin_entries identity and cached on
+        self so that calling this method 60+ times per _predraw doesn't
+        recompute the 1300-plugin lowercase set over and over.
         """
         info = self._loot_info.get(plugin_name.lower())
         if not info:
@@ -4766,7 +4777,13 @@ class PluginPanel(ctk.CTkFrame):
         if info.get("messages"):
             return True
 
-        enabled_lower: set[str] | None = None
+        cached_id = getattr(self, "_enabled_lower_cache_id", None)
+        if cached_id is not id(self._plugin_entries):
+            self._enabled_lower_cache = {
+                e.name.lower() for e in self._plugin_entries if e.enabled
+            }
+            self._enabled_lower_cache_id = id(self._plugin_entries)
+        enabled_lower = self._enabled_lower_cache
         enabled_mod_ids: set[int] | None = None
         staged_paths: set[str] | None = None
 
@@ -4774,8 +4791,6 @@ class PluginPanel(ctk.CTkFrame):
         for r in reqs:
             raw = r.get("name", "")
             display = r.get("display_name") or raw
-            if enabled_lower is None:
-                enabled_lower = {e.name.lower() for e in self._plugin_entries if e.enabled}
             if enabled_mod_ids is None:
                 enabled_mod_ids = self._get_enabled_nexus_mod_ids()
             if staged_paths is None:
@@ -4787,8 +4802,6 @@ class PluginPanel(ctk.CTkFrame):
 
         incs = info.get("incompatibilities") or []
         if incs:
-            if enabled_lower is None:
-                enabled_lower = {e.name.lower() for e in self._plugin_entries if e.enabled}
             for i in incs:
                 raw = i.get("name", "")
                 m = re.match(r'^Filename\(["\'](.+?)["\']\)$', raw)
@@ -5292,6 +5305,8 @@ class PluginPanel(ctk.CTkFrame):
         vis_count = last_row - first_row
         master_names_lower = {m.lower() for m in self._master_highlights}
 
+        _pool_last_state = self._pool_last_state
+
         for s in range(self._pool_size):
             row = first_row + s
             if s < vis_count and row < n:
@@ -5318,6 +5333,27 @@ class PluginPanel(ctk.CTkFrame):
                     bg = BG_HOVER_ROW
                 else:
                     bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
+
+                state_key = (
+                    "v",
+                    actual_idx,
+                    row,
+                    bg,
+                    cw,
+                    dragging,
+                    entry.name,
+                    entry.enabled,
+                    entry.name in self._missing_masters,
+                    entry.name in self._late_masters,
+                    entry.name in self._version_mismatch_masters,
+                    name_lower in self._userlist_plugins,
+                    name_lower in self._esl_flagged_plugins,
+                    name_lower in self._vanilla_plugins,
+                    bool(self._plugin_locks.get(entry.name, False)),
+                    self._has_loot_tooltip_content(entry.name),
+                )
+                if _pool_last_state[s] == state_key and self._pool_data_idx[s] == actual_idx:
+                    continue
 
                 c.coords(self._pool_bg[s], 0, y_top, cw, y_bot)
                 c.itemconfigure(self._pool_bg[s], fill=bg, state="normal")
@@ -5447,7 +5483,11 @@ class PluginPanel(ctk.CTkFrame):
                     c.itemconfigure(self._pool_check_marks[s], state="hidden")
                     c.itemconfigure(self._pool_lock_rects[s], state="hidden")
                     c.itemconfigure(self._pool_lock_marks[s], state="hidden")
+                _pool_last_state[s] = state_key
             else:
+                # Hidden branch: only issue hide calls if the slot wasn't already hidden.
+                if _pool_last_state[s] == ("h",):
+                    continue
                 c.itemconfigure(self._pool_bg[s], state="hidden")
                 c.itemconfigure(self._pool_missing_strip[s], state="hidden")
                 c.itemconfigure(self._pool_name[s], state="hidden")
@@ -5469,6 +5509,7 @@ class PluginPanel(ctk.CTkFrame):
                 c.itemconfigure(self._pool_lock_rects[s], state="hidden")
                 c.itemconfigure(self._pool_lock_marks[s], state="hidden")
                 self._pool_data_idx[s] = -1
+                _pool_last_state[s] = ("h",)
 
         c.configure(scrollregion=(0, 0, cw, max(total_h, canvas_h)))
         self._draw_marker_strip()
@@ -5484,38 +5525,88 @@ class PluginPanel(ctk.CTkFrame):
         Green ticks for master dependencies of the selected plugin (_master_highlights)."""
         self._marker_strip_after_id = None
         c = self._pmarker_strip
-        c.delete("marker")
         entries = self._plugin_entries
         n = len(entries)
         has_any = (self._highlighted_plugins or self._master_highlights
                    or self._missing_masters
                    or self._bsa_conflict_higher_plugins
                    or self._bsa_conflict_lower_plugins)
-        if not n or not has_any:
-            return
         strip_h = c.winfo_height()
-        if strip_h <= 1:
+
+        cache_key = (
+            n,
+            strip_h,
+            frozenset(self._missing_masters),
+            frozenset(self._highlighted_plugins),
+            frozenset(self._master_highlights),
+            frozenset(self._bsa_conflict_higher_plugins),
+            frozenset(self._bsa_conflict_lower_plugins),
+        )
+        if getattr(self, "_marker_strip_cache_key", None) == cache_key:
+            return
+        self._marker_strip_cache_key = cache_key
+
+        # Creating fresh rectangles is dramatically faster than updating existing
+        # ones via coords/itemconfigure on Tk canvases with tag indexes — 1ms vs
+        # 200ms+ for ~120 ticks. So we delete-and-recreate on each cache miss.
+        c.delete("all")
+
+        if not n or not has_any or strip_h <= 1:
+            if strip_h <= 1:
+                self._marker_strip_cache_key = None
             return
 
         master_names_lower = {m.lower() for m in self._master_highlights}
+        plugin_mod_color = _theme.plugin_mod
+        conflict_higher_color = _theme.conflict_higher
+        conflict_lower_color = _theme.conflict_lower
+        highlighted = self._highlighted_plugins
+        missing = self._missing_masters
+        higher = self._bsa_conflict_higher_plugins
+        lower = self._bsa_conflict_lower_plugins
+        strip_max = strip_h - 4
 
-        def _tick(row_idx: int, color: str):
-            frac = row_idx / n
-            y = max(2, min(int(frac * strip_h), strip_h - 4))
-            c.create_rectangle(0, y, 4, y + 3, fill=color, outline="", tags="marker")
-
+        # Priority map: once a (y, color) pair is taken at a y-coord, higher-priority
+        # colors can overwrite but same-color duplicates at the same y are skipped.
+        # Missing (red) > highlighted (mod) > master (green) > conflict_higher > conflict_lower.
+        priority = {
+            "#c0392b": 5,
+            plugin_mod_color: 4,
+            "#2a8c2a": 3,
+            conflict_higher_color: 2,
+            conflict_lower_color: 1,
+        }
+        y_to_color: dict[int, str] = {}
+        inv_n = 1.0 / n
         for i, e in enumerate(entries):
-            name_lower = e.name.lower()
-            if e.name in self._missing_masters:
-                _tick(i, "#c0392b")
-            elif name_lower in self._highlighted_plugins:
-                _tick(i, _theme.plugin_mod)
-            elif name_lower in master_names_lower:
-                _tick(i, "#2a8c2a")
-            elif name_lower in self._bsa_conflict_higher_plugins:
-                _tick(i, _theme.conflict_higher)
-            elif name_lower in self._bsa_conflict_lower_plugins:
-                _tick(i, _theme.conflict_lower)
+            name = e.name
+            if name in missing:
+                color = "#c0392b"
+            else:
+                name_lower = name.lower()
+                if name_lower in highlighted:
+                    color = plugin_mod_color
+                elif name_lower in master_names_lower:
+                    color = "#2a8c2a"
+                elif name_lower in higher:
+                    color = conflict_higher_color
+                elif name_lower in lower:
+                    color = conflict_lower_color
+                else:
+                    continue
+            y = int(i * inv_n * strip_h)
+            if y < 2:
+                y = 2
+            elif y > strip_max:
+                y = strip_max
+            existing = y_to_color.get(y)
+            if existing is None or priority.get(color, 0) > priority.get(existing, 0):
+                y_to_color[y] = color
+        ticks: list[tuple[int, str]] = sorted(y_to_color.items())
+
+        create_rect = c.create_rectangle
+        for y, color in ticks:
+            create_rect(0, y, 4, y + 3, fill=color, outline="", tags="marker")
 
     def _schedule_predraw(self) -> None:
         """Debounced _predraw — coalesces rapid scroll/resize events."""
@@ -5549,20 +5640,40 @@ class PluginPanel(ctk.CTkFrame):
         return None
 
     def _check_all_masters(self) -> None:
-        """Build plugin_paths dict and check all plugins for missing/late masters."""
-        self._missing_masters = {}
-        self._late_masters = {}
-        self._version_mismatch_masters = {}
-        self._plugin_mod_map = {}
+        """Build plugin_paths dict and check all plugins for missing/late masters.
+
+        Cached by (filemap_mtime, plugin_entries_tuple, data_dir). When nothing
+        material has changed between calls (e.g. toggling a mod with no plugins)
+        the cache hit short-circuits the ~450 ms filemap scan + header parses.
+        """
         if not self._plugin_entries or not self._plugin_extensions:
+            self._missing_masters = {}
+            self._late_masters = {}
+            self._version_mismatch_masters = {}
+            self._plugin_mod_map = {}
+            self._masters_cache_key = None
             return
+
+        filemap_path_str = self._get_filemap_path()
+        filemap_mtime = 0.0
+        if filemap_path_str:
+            try:
+                filemap_mtime = Path(filemap_path_str).stat().st_mtime
+            except OSError:
+                filemap_mtime = 0.0
+        plugins_tuple = tuple((e.name, e.enabled) for e in self._plugin_entries)
+        data_dir_str = str(self._data_dir) if self._data_dir else ""
+        staging_str = str(self._staging_root) if self._staging_root else ""
+        cache_key = (filemap_mtime, plugins_tuple, data_dir_str, staging_str)
+        if cache_key == self._masters_cache_key:
+            return  # Nothing relevant changed — skip the expensive work.
 
         exts_lower = {ext.lower() for ext in self._plugin_extensions}
         plugin_paths: dict[str, Path] = {}
+        plugin_mod_map: dict[str, str] = {}
 
         # 1. Map plugins from filemap.txt → staging mods (and overwrite)
         overwrite_dir = self._staging_root.parent / "overwrite" if self._staging_root else None
-        filemap_path_str = self._get_filemap_path()
         if filemap_path_str and self._staging_root:
             filemap_path = Path(filemap_path_str)
             if filemap_path.is_file():
@@ -5591,7 +5702,7 @@ class PluginPanel(ctk.CTkFrame):
                                     )
                                     plugin_paths[rel_path.lower()] = found or direct
                             # Map plugin filename → mod folder name
-                            self._plugin_mod_map[rel_path.lower()] = mod_name
+                            plugin_mod_map[rel_path.lower()] = mod_name
 
         # 2. Plugins in overwrite that may not be in filemap yet (added by sync, index stale)
         if overwrite_dir and overwrite_dir.is_dir():
@@ -5600,7 +5711,7 @@ class PluginPanel(ctk.CTkFrame):
                     low = entry.name.lower()
                     if low not in plugin_paths:
                         plugin_paths[low] = entry
-                        self._plugin_mod_map[entry.name.lower()] = _OVERWRITE_NAME
+                        plugin_mod_map[entry.name.lower()] = _OVERWRITE_NAME
             data_sub = overwrite_dir / "Data"
             if data_sub.is_dir():
                 for entry in data_sub.iterdir():
@@ -5608,7 +5719,7 @@ class PluginPanel(ctk.CTkFrame):
                         low = entry.name.lower()
                         if low not in plugin_paths:
                             plugin_paths[low] = entry
-                            self._plugin_mod_map[entry.name.lower()] = _OVERWRITE_NAME
+                            plugin_mod_map[entry.name.lower()] = _OVERWRITE_NAME
 
         # 3. Also map vanilla plugins from the game Data dir
         if self._data_dir and self._data_dir.is_dir():
@@ -5618,6 +5729,7 @@ class PluginPanel(ctk.CTkFrame):
                 if entry.is_file() and entry.suffix.lower() in exts_lower:
                     plugin_paths.setdefault(entry.name.lower(), entry)
 
+        self._plugin_mod_map = plugin_mod_map
         self._plugin_paths = plugin_paths
         plugin_names = [e.name for e in self._plugin_entries if e.enabled]
         self._missing_masters = check_missing_masters(plugin_names, plugin_paths)
@@ -5626,7 +5738,10 @@ class PluginPanel(ctk.CTkFrame):
             self._version_mismatch_masters = check_version_mismatched_masters(
                 plugin_names, plugin_paths, self._data_dir
             )
+        else:
+            self._version_mismatch_masters = {}
         self._load_esl_flags(plugin_paths)
+        self._masters_cache_key = cache_key
 
 
     # ------------------------------------------------------------------
@@ -5662,6 +5777,8 @@ class PluginPanel(ctk.CTkFrame):
         safe: set[str] = set()
         unsafe: set[str] = set()
         cache = self._esl_eligible_cache
+        flag_cache: dict = getattr(self, "_esl_flag_cache", {})
+        self._esl_flag_cache = flag_cache
         for entry in self._plugin_entries:
             name_lower = entry.name.lower()
             # .esl files are always treated as light by the game engine
@@ -5669,30 +5786,34 @@ class PluginPanel(ctk.CTkFrame):
                 flagged.add(name_lower)
                 continue
             path = plugin_paths.get(name_lower)
-            if not (path and path.is_file()):
+            if path is None:
                 continue
             try:
-                if is_esl_flagged(path):
-                    flagged.add(name_lower)
-            except Exception:
-                pass
+                st = os.stat(str(path))
+            except OSError:
+                continue
+            stat_key = (str(path), st.st_mtime_ns, st.st_size)
+            flag_val = flag_cache.get(stat_key)
+            if flag_val is None:
+                try:
+                    flag_val = bool(is_esl_flagged(path))
+                except Exception:
+                    flag_val = False
+                flag_cache[stat_key] = flag_val
+            if flag_val:
+                flagged.add(name_lower)
             # Only check ESL eligibility for ESP/ESM files (not already ESL).
             # Cache by (path, mtime, size) so the record scan only runs once
             # per plugin until the file is modified.
             if not name_lower.endswith((".esp", ".esm")):
                 continue
-            try:
-                st = path.stat()
-                cache_key = (str(path), st.st_mtime_ns, st.st_size)
-            except OSError:
-                continue
-            cached = cache.get(cache_key)
+            cached = cache.get(stat_key)
             if cached is None:
                 try:
                     cached, _ = check_esl_eligible(path)
                 except Exception:
                     cached = False
-                cache[cache_key] = cached
+                cache[stat_key] = cached
             if cached:
                 safe.add(name_lower)
             else:
@@ -6528,6 +6649,10 @@ class PluginPanel(ctk.CTkFrame):
         if changed:
             self._log(f"ESL flag {action} for {changed} plugin(s).")
         if changed:
+            # set_esl_flag rewrote the plugin file — invalidate the _check_all_masters
+            # cache so _load_esl_flags re-runs (the cache key doesn't include plugin
+            # file mtimes, only filemap mtime + plugin list).
+            self._masters_cache_key = None
             self._check_all_masters()
             self._predraw()
 

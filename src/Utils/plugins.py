@@ -326,6 +326,98 @@ def sync_plugins_from_filemap(
     return len(new_entries)
 
 
+def sync_plugins_from_filemap_combined(
+    filemap_path: Path,
+    plugins_path: Path,
+    plugin_extensions: list[str],
+    data_dir: Path | None = None,
+    disabled_plugins: dict[str, list[str]] | None = None,
+    star_prefix: bool = True,
+) -> tuple[int, int]:
+    """Single-pass replacement for prune_plugins_from_filemap() followed by
+    sync_plugins_from_filemap() + disabled-plugin pruning.
+
+    On large profiles (1300+ plugins) the separate calls each open filemap.txt
+    and each read plugins.txt, costing ~450 ms combined. This variant reads
+    filemap.txt once, reads plugins.txt once, computes the new plugin list,
+    and writes plugins.txt at most once.
+
+    Returns (removed_count, added_count).
+    """
+    if not plugin_extensions:
+        return 0, 0
+
+    exts_lower = {ext.lower() for ext in plugin_extensions}
+
+    # --- 1. Collect root-level plugins present in the filemap, keyed by lower name.
+    filemap_names: dict[str, str] = {}   # lower -> original-case filename
+    filemap_mod_for: dict[str, str] = {} # lower -> owning mod name
+    if filemap_path.is_file():
+        with filemap_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if "\t" not in line:
+                    continue
+                rel_path, mod_name = line.split("\t", 1)
+                rel_path = rel_path.replace("\\", "/")
+                if "/" in rel_path:
+                    continue
+                # Cheap suffix test — avoid Path() allocation per line.
+                dot = rel_path.rfind(".")
+                if dot < 0:
+                    continue
+                if rel_path[dot:].lower() not in exts_lower:
+                    continue
+                low = rel_path.lower()
+                if low not in filemap_names:
+                    filemap_names[low] = rel_path
+                    filemap_mod_for[low] = mod_name
+
+    # --- 2. Vanilla plugins in the game's Data dir are always kept.
+    in_data_dir: set[str] = set()
+    if data_dir and data_dir.is_dir():
+        vanilla_dir = data_dir.parent / (data_dir.name + "_Core")
+        scan_dir = vanilla_dir if vanilla_dir.is_dir() else data_dir
+        for entry in scan_dir.iterdir():
+            if entry.is_file() and entry.suffix.lower() in exts_lower:
+                in_data_dir.add(entry.name.lower())
+
+    # --- 3. Per-mod disabled-plugin set (lowercased).
+    disabled_lower: set[str] = set()
+    if disabled_plugins:
+        for mod_name, names in disabled_plugins.items():
+            for n in names:
+                disabled_lower.add(n.lower())
+
+    # --- 4. Read plugins.txt once.
+    existing = read_plugins(plugins_path, star_prefix=star_prefix)
+    existing_lower = {e.name.lower() for e in existing}
+
+    # --- 5. Prune: keep entries present in filemap or vanilla data_dir.
+    keep = set(filemap_names.keys()) | in_data_dir
+    kept = [e for e in existing if e.name.lower() in keep]
+    removed = len(existing) - len(kept)
+
+    # --- 6. Add: filemap plugins not already in plugins.txt (and not disabled).
+    kept_lower = {e.name.lower() for e in kept}
+    new_entries: list[PluginEntry] = []
+    for low, original in filemap_names.items():
+        if low in kept_lower:
+            continue
+        if low in disabled_lower:
+            continue
+        # Normalise extension to lowercase for case-sensitive filesystems.
+        dot = original.rfind(".")
+        normalised = original[:dot] + original[dot:].lower() if dot >= 0 else original
+        new_entries.append(PluginEntry(name=normalised, enabled=True))
+        kept_lower.add(low)
+
+    if removed or new_entries:
+        write_plugins(plugins_path, kept + new_entries, star_prefix=star_prefix)
+
+    return removed, len(new_entries)
+
+
 def read_disabled_plugins(path: Path) -> dict[str, list[str]]:
     """Read disabled_plugins.json. Returns {} if absent or corrupt."""
     if not path.is_file():

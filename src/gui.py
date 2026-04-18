@@ -82,6 +82,7 @@ from Utils.app_log import app_log, set_app_log
 from Utils.plugins import (
     prune_plugins_from_filemap,
     sync_plugins_from_filemap,
+    sync_plugins_from_filemap_combined,
     sync_plugins_from_overwrite_dir,
     read_plugins,
     write_plugins,
@@ -1223,40 +1224,21 @@ class App(ctk.CTk):
                     None if game and getattr(game, "plugins_include_vanilla", False)
                     else data_dir
                 )
-                removed = prune_plugins_from_filemap(
-                    Path(filemap_path_str),
-                    self._plugin_panel._plugins_path,
-                    self._plugin_panel._plugin_extensions,
-                    data_dir=prune_data_dir,
-                    star_prefix=self._plugin_panel._plugins_star_prefix,
-                )
-                if removed:
-                    self._status.log(f"plugins.txt: removed {removed} plugin(s).")
-                # Read per-mod disabled plugin list and prune any already-synced disabled plugins
                 profile_dir = (
                     self._mod_panel._modlist_path.parent
                     if self._mod_panel._modlist_path else None
                 )
                 disabled_map = read_disabled_plugins(profile_dir, None) if profile_dir else {}
-                if disabled_map and self._plugin_panel._plugins_path is not None:
-                    _sp = self._plugin_panel._plugins_star_prefix
-                    existing = read_plugins(self._plugin_panel._plugins_path, star_prefix=_sp)
-                    all_disabled_lower = {
-                        n.lower() for names in disabled_map.values() for n in names
-                    }
-                    kept = [e for e in existing if e.name.lower() not in all_disabled_lower]
-                    if len(kept) < len(existing):
-                        write_plugins(self._plugin_panel._plugins_path, kept, star_prefix=_sp)
-                        self._status.log(
-                            f"plugins.txt: removed {len(existing) - len(kept)} disabled plugin(s)."
-                        )
-                added = sync_plugins_from_filemap(
+                removed, added = sync_plugins_from_filemap_combined(
                     Path(filemap_path_str),
                     self._plugin_panel._plugins_path,
                     self._plugin_panel._plugin_extensions,
+                    data_dir=prune_data_dir,
                     disabled_plugins=disabled_map,
                     star_prefix=self._plugin_panel._plugins_star_prefix,
                 )
+                if removed:
+                    self._status.log(f"plugins.txt: removed {removed} plugin(s).")
                 # Also sync from overwrite folder directly — filemap uses modindex.bin
                 # which only updates overwrite on Refresh; tools (xEdit, Bodyslide, etc.)
                 # may write plugins to overwrite without triggering a refresh.

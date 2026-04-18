@@ -2295,6 +2295,15 @@ class CollectionDetailDialog(tk.Frame):
             except Exception:
                 pass
 
+            # Mark as queued for extraction (shows in orange until a worker picks it up).
+            if result and result.success and result.file_path:
+                _q_name = mod.mod_name or mod.file_name or ""
+                try:
+                    self.after(0, lambda f=mod.file_id, n=_q_name:
+                               self._overlay_extracting_queue(f, n))
+                except Exception:
+                    pass
+
             # Push onto the bounded install queue (blocks if queue is full,
             # providing back-pressure so archives don't pile up on disk).
             _install_queue.put((mod, result, effective_domain))
@@ -2308,6 +2317,11 @@ class CollectionDetailDialog(tk.Frame):
                 with _install_lock:
                     _install_counters["skipped"] += 1
                     _install_counters["done"] += 1
+                try:
+                    self.after(0, lambda f=mod.file_id:
+                               self._overlay_extracting_remove(f))
+                except Exception:
+                    pass
                 return
 
             if result is None or not result.success or not result.file_path:
@@ -2327,6 +2341,11 @@ class CollectionDetailDialog(tk.Frame):
                 with _install_lock:
                     _install_counters["skipped"] += 1
                     _install_counters["done"] += 1
+                try:
+                    self.after(0, lambda f=mod.file_id:
+                               self._overlay_extracting_remove(f))
+                except Exception:
+                    pass
                 return
 
             archive_path = str(result.file_path)
@@ -3177,6 +3196,8 @@ class CollectionDetailDialog(tk.Frame):
         self._install_overlay_extracting_slots = extracting_slot_labels
         # Ordered list of (file_id, name) currently extracting
         self._install_overlay_extracting_active: list = []
+        # Ordered list of (file_id, name) waiting for an extraction worker
+        self._install_overlay_extracting_queued: list = []
 
     def _show_overlay_download(self, label: str):
         """Show the download progress section inside the install overlay."""
@@ -3300,21 +3321,34 @@ class CollectionDetailDialog(tk.Frame):
             pass
 
     def _overlay_refresh_extracting(self):
-        """Repaint all extraction slot labels from the active list."""
+        """Repaint all extraction slot labels from the active list.
+
+        Active extractions are shown first in normal (white) text; any
+        remaining slots are filled with queued mods in orange, suffixed
+        with ' - Queued'.
+        """
         slots = getattr(self, "_install_overlay_extracting_slots", None)
         active = getattr(self, "_install_overlay_extracting_active", None)
+        queued = getattr(self, "_install_overlay_extracting_queued", None) or []
         if slots is None or active is None:
             return
+        n_active = len(active)
         for i, lbl in enumerate(slots):
-            if i < len(active):
+            if i < n_active:
                 name = active[i][1] or "(unnamed)"
                 try:
-                    lbl.configure(text=f"  • {name}")
+                    lbl.configure(text=f"  • {name}", fg="#cccccc")
+                except Exception:
+                    pass
+            elif i - n_active < len(queued):
+                name = queued[i - n_active][1] or "(unnamed)"
+                try:
+                    lbl.configure(text=f"  • {name}  - Queued", fg="#ff9a3c")
                 except Exception:
                     pass
             else:
                 try:
-                    lbl.configure(text=" ")
+                    lbl.configure(text=" ", fg="#cccccc")
                 except Exception:
                     pass
 
@@ -3322,20 +3356,53 @@ class CollectionDetailDialog(tk.Frame):
         active = getattr(self, "_install_overlay_extracting_active", None)
         if active is None:
             return
+        # Promote from queued → active if present.
+        queued = getattr(self, "_install_overlay_extracting_queued", None)
+        if queued is not None:
+            for i in range(len(queued) - 1, -1, -1):
+                if queued[i][0] == file_id:
+                    queued.pop(i)
+                    break
         for fid, _ in active:
             if fid == file_id:
+                self._overlay_refresh_extracting()
                 return
         active.append((file_id, mod_name))
         self._overlay_refresh_extracting()
 
     def _overlay_extracting_remove(self, file_id: int):
         active = getattr(self, "_install_overlay_extracting_active", None)
-        if not active:
+        queued = getattr(self, "_install_overlay_extracting_queued", None)
+        changed = False
+        if active:
+            for i in range(len(active) - 1, -1, -1):
+                if active[i][0] == file_id:
+                    active.pop(i)
+                    changed = True
+                    break
+        if queued:
+            for i in range(len(queued) - 1, -1, -1):
+                if queued[i][0] == file_id:
+                    queued.pop(i)
+                    changed = True
+                    break
+        if changed:
+            self._overlay_refresh_extracting()
+
+    def _overlay_extracting_queue(self, file_id: int, mod_name: str):
+        """Mark a mod as queued for extraction (waiting for a worker)."""
+        queued = getattr(self, "_install_overlay_extracting_queued", None)
+        active = getattr(self, "_install_overlay_extracting_active", None)
+        if queued is None:
             return
-        for i in range(len(active) - 1, -1, -1):
-            if active[i][0] == file_id:
-                active.pop(i)
-                break
+        if active is not None:
+            for fid, _ in active:
+                if fid == file_id:
+                    return
+        for fid, _ in queued:
+            if fid == file_id:
+                return
+        queued.append((file_id, mod_name))
         self._overlay_refresh_extracting()
 
     def _dismiss_install_overlay(self):
@@ -3359,6 +3426,7 @@ class CollectionDetailDialog(tk.Frame):
         self._install_overlay_extracting_frame = None
         self._install_overlay_extracting_slots = []
         self._install_overlay_extracting_active = []
+        self._install_overlay_extracting_queued = []
 
     # ------------------------------------------------------------------
     # Manual (non-premium) install overlay + flow

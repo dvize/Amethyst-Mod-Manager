@@ -33,8 +33,31 @@ TES3 subrecord layout:
 
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
+
+
+_MASTERS_CACHE: dict[str, tuple[int, int, list[str]]] = {}
+_MASTERS_CACHE_MAX = 8192
+
+
+def _cache_get(path_str: str, mtime_ns: int, size: int) -> list[str] | None:
+    entry = _MASTERS_CACHE.get(path_str)
+    if entry is None:
+        return None
+    c_mtime, c_size, c_masters = entry
+    if c_mtime == mtime_ns and c_size == size:
+        return c_masters
+    return None
+
+
+def _cache_put(path_str: str, mtime_ns: int, size: int, masters: list[str]) -> None:
+    if len(_MASTERS_CACHE) >= _MASTERS_CACHE_MAX:
+        # Simple eviction: drop ~1/4 of entries
+        for k in list(_MASTERS_CACHE.keys())[: _MASTERS_CACHE_MAX // 4]:
+            _MASTERS_CACHE.pop(k, None)
+    _MASTERS_CACHE[path_str] = (mtime_ns, size, masters)
 
 
 def read_masters(plugin_path: Path) -> list[str]:
@@ -43,8 +66,20 @@ def read_masters(plugin_path: Path) -> list[str]:
 
     Returns an empty list on any error (missing file, corrupt header, etc.).
     """
+    path_str = str(plugin_path)
     try:
-        with plugin_path.open("rb") as f:
+        st = os.stat(path_str)
+        mtime_ns = st.st_mtime_ns
+        size = st.st_size
+    except OSError:
+        return []
+
+    cached = _cache_get(path_str, mtime_ns, size)
+    if cached is not None:
+        return cached
+
+    try:
+        with open(path_str, "rb") as f:
             # --- Record header ---
             # Read the first 8 bytes to determine type and subrecord block size,
             # then skip the rest of the record header before reading the block.
@@ -99,6 +134,7 @@ def read_masters(plugin_path: Path) -> list[str]:
 
                 offset += sub_size
 
+            _cache_put(path_str, mtime_ns, size, masters)
             return masters
     except (OSError, struct.error):
         return []
