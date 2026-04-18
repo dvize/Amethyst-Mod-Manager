@@ -472,6 +472,13 @@ class StatusBar(ctk.CTkFrame):
 
     @staticmethod
     def _classify(msg: str) -> str:
+        stripped = msg.lstrip()
+        # Raw API response bodies (from _log_response) often contain user-
+        # facing strings like "error" inside mod descriptions or notes,
+        # which would otherwise trip the error/warning filters. They're
+        # diagnostic dumps, not app-generated log entries.
+        if stripped.startswith("Response:"):
+            return ""
         low = msg.lower()
         for w in StatusBar._ERR_WORDS:
             if w in low:
