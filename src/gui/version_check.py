@@ -8,6 +8,7 @@ import re
 import urllib.request
 
 _APP_UPDATE_RELEASES_API_URL = "https://api.github.com/repos/ChrisDKN/Amethyst-Mod-Manager/releases/latest"
+_APP_UPDATE_RELEASES_LIST_API_URL = "https://api.github.com/repos/ChrisDKN/Amethyst-Mod-Manager/releases?per_page=20"
 _APP_UPDATE_RELEASES_URL = "https://github.com/ChrisDKN/Amethyst-Mod-Manager/releases"
 _APP_UPDATE_INSTALLER_URL = "https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/src/appimage/Amethyst-MM-installer.sh"
 _AUR_API_URL = "https://aur.archlinux.org/rpc/v5/info/amethyst-mod-manager"
@@ -24,27 +25,63 @@ def is_flatpak() -> bool:
     return os.path.exists("/.flatpak-info")
 
 
-def _parse_version(s: str) -> tuple[int, ...]:
-    """Convert a version string like '0.3.0' to a tuple of ints for comparison."""
-    out = []
-    for part in s.strip().split("."):
+def _parse_version(s: str) -> tuple:
+    """Parse a version string into a sortable tuple following SemVer pre-release rules.
+
+    '1.3.1'         -> ((1, 3, 1), (1,))                # stable sorts last
+    '1.3.1-beta.1'  -> ((1, 3, 1), (0, 'beta', 1))      # pre-release sorts before stable
+    """
+    s = s.strip().lstrip("v")
+    if "-" in s:
+        core, pre = s.split("-", 1)
+    else:
+        core, pre = s, ""
+    nums = []
+    for part in core.split("."):
         part = re.sub(r"[^0-9].*$", "", part)
-        out.append(int(part) if part.isdigit() else 0)
-    return tuple(out) if out else (0,)
+        nums.append(int(part) if part.isdigit() else 0)
+    if not pre:
+        return (tuple(nums), (1,))
+    pre_key: list = []
+    for part in pre.split("."):
+        pre_key.append(int(part) if part.isdigit() else part)
+    return (tuple(nums), (0, *pre_key))
 
 
-def _fetch_latest_version() -> str | None:
-    """Fetch the latest version from the GitHub Releases API tag; return None on error."""
+def _fetch_latest_version(allow_prerelease: bool = False) -> tuple[str, bool] | None:
+    """Return (tag, is_prerelease) of the highest applicable release, or None on error.
+
+    With allow_prerelease=False, queries /releases/latest (stable-only).
+    With allow_prerelease=True, lists recent releases and picks the highest non-draft
+    by SemVer comparison — which may be either a stable or a pre-release.
+    """
     import json
     try:
+        if not allow_prerelease:
+            req = urllib.request.Request(
+                _APP_UPDATE_RELEASES_API_URL,
+                headers={"User-Agent": "Amethyst-Mod-Manager"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            tag = data.get("tag_name", "").lstrip("v")
+            return (tag, False) if tag else None
+
         req = urllib.request.Request(
-            _APP_UPDATE_RELEASES_API_URL,
+            _APP_UPDATE_RELEASES_LIST_API_URL,
             headers={"User-Agent": "Amethyst-Mod-Manager"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-        tag = data.get("tag_name", "").lstrip("v")
-        return tag if tag else None
+            releases = json.loads(resp.read().decode("utf-8", errors="replace"))
+        candidates = [
+            (r.get("tag_name", "").lstrip("v"), bool(r.get("prerelease", False)))
+            for r in releases
+            if not r.get("draft", False) and r.get("tag_name")
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda tp: _parse_version(tp[0]), reverse=True)
+        return candidates[0]
     except Exception:
         return None
 

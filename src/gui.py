@@ -30,7 +30,7 @@ if not os.environ.get("MOD_MANAGER_GAMES"):
 
 # Load UI scale before the Xft.dpi override so scale detection reads the real
 # system DPI.  The override only affects font rasterisation in the main window.
-from Utils.ui_config import load_ui_scale, get_ui_scale, load_window_geometry, save_window_geometry
+from Utils.ui_config import load_ui_scale, get_ui_scale, load_window_geometry, save_window_geometry, load_allow_prerelease
 _UI_SCALE = load_ui_scale()
 
 # Override Xft.dpi to 96 before the main Tk window is created so font
@@ -98,7 +98,7 @@ from Utils.config_paths import get_download_cache_dir
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-def _run_installer():
+def _run_installer(allow_prerelease: bool = False):
     """Run the AppImage installer in a detached subprocess.
 
     The AppImage runtime sets SSL_CERT_FILE / CURL_CA_BUNDLE to a path inside
@@ -116,12 +116,13 @@ def _run_installer():
     )
     os.makedirs(config_dir, exist_ok=True)
     log_path = os.path.join(config_dir, "amethyst-update.log")
+    installer_args = " --prerelease" if allow_prerelease else ""
     cmd = (
         f"sleep 2 && "
         f"SCRIPT=$(mktemp /tmp/amethyst-installer-XXXXXX.sh) && "
         f"curl -sSL {_APP_UPDATE_INSTALLER_URL} -o \"$SCRIPT\" && "
         f"chmod +x \"$SCRIPT\" && "
-        f"bash \"$SCRIPT\" && "
+        f"bash \"$SCRIPT\"{installer_args} && "
         f"rm -f \"$SCRIPT\" && "
         f"nohup \"$HOME/Applications/AmethystModManager-x86_64.AppImage\" &>/dev/null &"
     )
@@ -479,19 +480,32 @@ class App(ctk.CTk):
 
     # -- App update check ---------------------------------------------------
 
-    def _show_update_overlay(self, current: str, latest: str, *, mode: str = "appimage"):
+    def _show_update_overlay(self, current: str, latest: str, *, mode: str = "appimage", is_prerelease: bool = False):
         """Show an update-available banner overlaid on the mod list panel.
 
         *mode* is one of ``"appimage"``, ``"flatpak"``, or ``"aur"``.
         """
         container = self._mod_panel_container
 
+        # Dismiss any prior overlay so re-checking (e.g. after toggling the
+        # pre-release setting) doesn't stack multiple banners.
+        prior = getattr(self, "_update_overlay", None)
+        if prior is not None:
+            try:
+                prior.place_forget()
+                prior.destroy()
+            except Exception:
+                pass
+
         overlay = ctk.CTkFrame(container, fg_color=BG_DEEP, corner_radius=8)
         overlay.place(relx=0.5, rely=0.5, anchor="center")
+        self._update_overlay = overlay
 
         def _close():
             overlay.place_forget()
             overlay.destroy()
+            if getattr(self, "_update_overlay", None) is overlay:
+                self._update_overlay = None
 
         inner = ctk.CTkFrame(overlay, fg_color="transparent")
         inner.pack(padx=24, pady=20)
@@ -521,7 +535,7 @@ class App(ctk.CTk):
 
         if mode == "appimage":
             def _on_update():
-                _run_installer()
+                _run_installer(allow_prerelease=is_prerelease)
                 _close()
                 try:
                     from Nexus.nxm_handler import NxmIPC
@@ -570,21 +584,24 @@ class App(ctk.CTk):
         """
 
         def _do_check():
+            allow_pre = load_allow_prerelease()
             if is_appimage():
-                latest = _fetch_latest_version()
-                if latest is None:
+                result = _fetch_latest_version(allow_prerelease=allow_pre)
+                if result is None:
                     return
+                latest, is_pre = result
                 if _is_newer_version(__version__, latest):
                     self.call_threadsafe(
-                        lambda: self._show_update_overlay(__version__, latest, mode="appimage")
+                        lambda: self._show_update_overlay(__version__, latest, mode="appimage", is_prerelease=is_pre)
                     )
             elif is_flatpak():
-                latest = _fetch_latest_version()
-                if latest is None:
+                result = _fetch_latest_version(allow_prerelease=allow_pre)
+                if result is None:
                     return
+                latest, is_pre = result
                 if _is_newer_version(__version__, latest):
                     self.call_threadsafe(
-                        lambda: self._show_update_overlay(__version__, latest, mode="flatpak")
+                        lambda: self._show_update_overlay(__version__, latest, mode="flatpak", is_prerelease=is_pre)
                     )
             else:
                 aur_ver = _fetch_aur_version()

@@ -23,6 +23,8 @@ from Utils.ui_config import (
     load_keep_fomod_archives, save_keep_fomod_archives,
     load_rename_mod_after_install, save_rename_mod_after_install,
     load_restore_on_close, save_restore_on_close,
+    load_allow_prerelease, save_allow_prerelease,
+    load_dev_mode,
     load_heroic_config_path, save_heroic_config_path,
     load_steam_libraries_vdf_path, save_steam_libraries_vdf_path,
     load_default_staging_path, save_default_staging_path,
@@ -30,6 +32,7 @@ from Utils.ui_config import (
     THEME_DEFAULTS, get_theme_color, save_theme_color,
 )
 from gui.ctk_components import CTkProgressPopup, CTkAlert, CTkNotification
+from gui.version_check import is_appimage, is_flatpak
 from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 from gui.theme import (
     ACCENT,
@@ -566,6 +569,14 @@ class SettingsPanel(ctk.CTkFrame):
         self._build()
         self.after(50, self._bind_scroll_recursive)
 
+    def _on_prerelease_toggle(self):
+        """Persist the pre-release setting and re-run the update check immediately."""
+        save_allow_prerelease(self._allow_prerelease_var.get())
+        app = self.winfo_toplevel()
+        check = getattr(app, "_check_for_app_update", None)
+        if callable(check):
+            check()
+
     def _bind_scroll_recursive(self, widget=None):
         """Bind Linux scroll-wheel events to every child so they propagate to the scrollable body.
 
@@ -875,6 +886,25 @@ class SettingsPanel(ctk.CTkFrame):
             text="Restore all deployed games to vanilla when the app is closed.",
             font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
         ).pack(anchor="w", pady=(2, 0))
+
+        # Pre-release channel toggle is only meaningful for AppImage installs
+        # (Flatpak and AUR are managed externally and we can't auto-switch them).
+        # Dev mode forces it visible so source-checkout users can exercise it.
+        if (is_appimage() and not is_flatpak()) or load_dev_mode():
+            self._allow_prerelease_var = tk.BooleanVar(value=load_allow_prerelease())
+            ctk.CTkCheckBox(
+                gen_sec, text="Use pre-release versions",
+                variable=self._allow_prerelease_var,
+                command=self._on_prerelease_toggle,
+                font=FONT_NORMAL, text_color=TEXT_MAIN,
+            ).pack(anchor="w", pady=(10, 0))
+
+            ctk.CTkLabel(
+                gen_sec,
+                text="Also offer beta and release-candidate builds when checking for updates.\n"
+                     "When disabled, only stable releases are offered.",
+                font=FONT_SMALL, text_color=TEXT_DIM, anchor="w", justify="left",
+            ).pack(anchor="w", pady=(2, 0))
 
         # ==== Theme ====
         theme_sec = _begin_section("Theme")
@@ -1284,6 +1314,8 @@ class SettingsPanel(ctk.CTkFrame):
         save_keep_fomod_archives(self._keep_fomod_archives_var.get())
         save_rename_mod_after_install(self._rename_after_install_var.get())
         save_restore_on_close(self._restore_on_close_var.get())
+        if hasattr(self, "_allow_prerelease_var"):
+            save_allow_prerelease(self._allow_prerelease_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),
@@ -1310,6 +1342,8 @@ class SettingsPanel(ctk.CTkFrame):
         save_keep_fomod_archives(self._keep_fomod_archives_var.get())
         save_rename_mod_after_install(self._rename_after_install_var.get())
         save_restore_on_close(self._restore_on_close_var.get())
+        if hasattr(self, "_allow_prerelease_var"):
+            save_allow_prerelease(self._allow_prerelease_var.get())
         save_collection_settings(
             download_order=self._dl_order_from_label.get(self._dl_order_var.get(), "largest"),
             max_concurrent=int(round(self._max_concurrent_var.get())),

@@ -632,6 +632,39 @@ def save_normalize_folder_case(value: bool) -> None:
         parser.write(f)
 
 
+# ---------------------------------------------------------------------------
+# App update channel setting
+# ---------------------------------------------------------------------------
+_UPDATES_SECTION = "updates"
+
+
+def load_allow_prerelease() -> bool:
+    """Return the allow_prerelease setting (default False)."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return False
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser.getboolean(_UPDATES_SECTION, "allow_prerelease", fallback=False)
+    except Exception:
+        return False
+
+
+def save_allow_prerelease(value: bool) -> None:
+    """Persist the allow_prerelease setting to amethyst.ini under [updates]."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = configparser.ConfigParser()
+    if path.is_file():
+        parser.read(path)
+    if _UPDATES_SECTION not in parser:
+        parser[_UPDATES_SECTION] = {}
+    parser[_UPDATES_SECTION]["allow_prerelease"] = "true" if value else "false"
+    with path.open("w") as f:
+        parser.write(f)
+
+
 def load_clear_archive_after_install() -> bool:
     """Return the clear_archive_after_install setting (default True)."""
     path = get_ui_config_path()

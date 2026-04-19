@@ -1,3 +1,12 @@
+- v1.2.10
+- Added a search content option to the ini files tab, This can search and highlight specific strings within all text based files in the staging folder
+- Script extenders no longer appear in the run exe dropdown, These don't work if you run them this way
+- Custom prefixes used by applications are now always filtered out of the run exe dropdown
+- Tweaks to the right click context menu in the modlist panel to stop it staying open when clicking out of it
+- You can now set a game path when the game binary is not found, it will display a warning instead
+- Fixed scrollbar/mousewheel speeds in the flatpak to be the same as the appimage build
+
+
 - v1.2.9
 - The collection install window is now more informative, Shows currently downloading mods and mods being extracted
 - Tweaks to the fomod parser and installer

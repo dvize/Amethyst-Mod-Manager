@@ -7,10 +7,18 @@
 
 set -e
 
+ALLOW_PRERELEASE=0
+for arg in "$@"; do
+    case "$arg" in
+        --prerelease) ALLOW_PRERELEASE=1 ;;
+    esac
+done
+
 REPO="ChrisDKN/Amethyst-Mod-Manager"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/main"
 ICON_URL="${BASE_URL}/src/icons/title-bar.png"
 RELEASES_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+RELEASES_LIST_API_URL="https://api.github.com/repos/${REPO}/releases?per_page=20"
 
 # ~/Applications: not standard on all distros; we create it (common on Steam Deck)
 APPLICATIONS_DIR="${HOME}/Applications"
@@ -29,13 +37,31 @@ echo "=============================="
 
 # Discover latest AppImage from GitHub Releases
 echo "Checking for latest version..."
-if command -v curl &>/dev/null; then
-    JSON="$(curl -sL "$RELEASES_API_URL")"
+if [ "$ALLOW_PRERELEASE" = "1" ]; then
+    URL="$RELEASES_LIST_API_URL"
 else
-    JSON="$(wget -qO- "$RELEASES_API_URL")"
+    URL="$RELEASES_API_URL"
 fi
-LATEST_VERSION="$(echo "$JSON" | grep -o '"tag_name" *: *"[^"]*"' | sed 's/.*: *"v\{0,1\}\([^"]*\)"/\1/' | head -1)"
-APPIMAGE_URL="$(echo "$JSON" | grep -o '"browser_download_url" *: *"[^"]*\.AppImage"' | sed 's/.*: *"\([^"]*\)"/\1/' | head -1)"
+if command -v curl &>/dev/null; then
+    JSON="$(curl -sL "$URL")"
+else
+    JSON="$(wget -qO- "$URL")"
+fi
+
+if [ "$ALLOW_PRERELEASE" = "1" ]; then
+    # Pre-release path: /releases returns an array, newest-first by created_at.
+    # Pick the first non-draft release. Requires python3 (present on Steam Deck
+    # and virtually all desktop Linux installs).
+    if ! command -v python3 &>/dev/null; then
+        echo "Error: --prerelease requires python3 to parse the releases list." >&2
+        exit 1
+    fi
+    LATEST_VERSION="$(echo "$JSON" | python3 -c "import sys,json; rs=[r for r in json.load(sys.stdin) if not r.get('draft')]; print(rs[0]['tag_name'].lstrip('v') if rs else '')")"
+    APPIMAGE_URL="$(echo "$JSON" | python3 -c "import sys,json; rs=[r for r in json.load(sys.stdin) if not r.get('draft')]; assets=rs[0].get('assets',[]) if rs else []; print(next((a['browser_download_url'] for a in assets if a['name'].endswith('.AppImage')), ''))")"
+else
+    LATEST_VERSION="$(echo "$JSON" | grep -o '"tag_name" *: *"[^"]*"' | sed 's/.*: *"v\{0,1\}\([^"]*\)"/\1/' | head -1)"
+    APPIMAGE_URL="$(echo "$JSON" | grep -o '"browser_download_url" *: *"[^"]*\.AppImage"' | sed 's/.*: *"\([^"]*\)"/\1/' | head -1)"
+fi
 if [ -z "$APPIMAGE_URL" ]; then
     echo "Error: Could not find an AppImage asset in the latest release." >&2
     exit 1
