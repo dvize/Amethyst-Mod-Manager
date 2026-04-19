@@ -480,10 +480,13 @@ class App(ctk.CTk):
 
     # -- App update check ---------------------------------------------------
 
-    def _show_update_overlay(self, current: str, latest: str, *, mode: str = "appimage", is_prerelease: bool = False):
+    def _show_update_overlay(self, current: str, latest: str, *, mode: str = "appimage", is_prerelease: bool = False, is_downgrade: bool = False):
         """Show an update-available banner overlaid on the mod list panel.
 
         *mode* is one of ``"appimage"``, ``"flatpak"``, or ``"aur"``.
+        *is_downgrade* swaps the copy when the offered version is older than
+        the running one (e.g. user opted out of the pre-release channel while
+        running a beta).
         """
         container = self._mod_panel_container
 
@@ -518,6 +521,14 @@ class App(ctk.CTk):
                 f"Update via your AUR helper, e.g.\n"
                 f"  yay -Syu amethyst-mod-manager"
             )
+        elif is_downgrade:
+            offered_label = "Pre-release" if is_prerelease else "Stable"
+            msg = (
+                f"You're running a pre-release. Switch to the latest {offered_label.lower()} build?\n\n"
+                f"Current:     {current}\n"
+                f"{offered_label}: {latest}\n\n"
+                f"This will downgrade your installation."
+            )
         else:
             msg = (
                 f"A new version of Amethyst Mod Manager is available.\n\n"
@@ -545,7 +556,7 @@ class App(ctk.CTk):
                 self.destroy()
 
             ctk.CTkButton(
-                btn_frame, text="Update via installer",
+                btn_frame, text="Switch to stable" if is_downgrade else "Update via installer",
                 width=160, height=32, font=FONT_BOLD,
                 fg_color=ACCENT, hover_color=ACCENT_HOV, text_color="white",
                 command=_on_update,
@@ -575,12 +586,17 @@ class App(ctk.CTk):
             command=_close,
         ).pack(side="left")
 
-    def _check_for_app_update(self):
+    def _check_for_app_update(self, force_downgrade_prompt: bool = False):
         """Run in background: fetch latest version and prompt if newer.
 
         AppImage installs compare against GitHub releases and offer the
         auto-installer.  System installs (e.g. AUR) compare against the AUR
         package version and show instructions to update via the AUR helper.
+
+        When *force_downgrade_prompt* is True (e.g. the user just toggled the
+        pre-release channel off while running a beta), the AppImage/Flatpak
+        branches will surface the latest stable even if it's older than the
+        currently-running version, with downgrade-aware copy.
         """
 
         def _do_check():
@@ -590,18 +606,28 @@ class App(ctk.CTk):
                 if result is None:
                     return
                 latest, is_pre = result
-                if _is_newer_version(__version__, latest):
+                newer = _is_newer_version(__version__, latest)
+                if newer or (force_downgrade_prompt and latest != __version__):
+                    is_downgrade = not newer
                     self.call_threadsafe(
-                        lambda: self._show_update_overlay(__version__, latest, mode="appimage", is_prerelease=is_pre)
+                        lambda: self._show_update_overlay(
+                            __version__, latest, mode="appimage",
+                            is_prerelease=is_pre, is_downgrade=is_downgrade,
+                        )
                     )
             elif is_flatpak():
                 result = _fetch_latest_version(allow_prerelease=allow_pre)
                 if result is None:
                     return
                 latest, is_pre = result
-                if _is_newer_version(__version__, latest):
+                newer = _is_newer_version(__version__, latest)
+                if newer or (force_downgrade_prompt and latest != __version__):
+                    is_downgrade = not newer
                     self.call_threadsafe(
-                        lambda: self._show_update_overlay(__version__, latest, mode="flatpak", is_prerelease=is_pre)
+                        lambda: self._show_update_overlay(
+                            __version__, latest, mode="flatpak",
+                            is_prerelease=is_pre, is_downgrade=is_downgrade,
+                        )
                     )
             else:
                 aur_ver = _fetch_aur_version()

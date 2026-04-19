@@ -570,12 +570,19 @@ class SettingsPanel(ctk.CTkFrame):
         self.after(50, self._bind_scroll_recursive)
 
     def _on_prerelease_toggle(self):
-        """Persist the pre-release setting and re-run the update check immediately."""
-        save_allow_prerelease(self._allow_prerelease_var.get())
+        """Persist the pre-release setting and re-run the update check immediately.
+
+        When *unticking* (opting out), pass force_downgrade_prompt=True so the
+        user is offered a switch to the latest stable even if it's older than
+        the pre-release they're currently running. When *ticking*, no force —
+        the normal upgrade check already handles "is there a newer build?".
+        """
+        new_val = self._allow_prerelease_var.get()
+        save_allow_prerelease(new_val)
         app = self.winfo_toplevel()
         check = getattr(app, "_check_for_app_update", None)
         if callable(check):
-            check()
+            check(force_downgrade_prompt=not new_val)
 
     def _bind_scroll_recursive(self, widget=None):
         """Bind Linux scroll-wheel events to every child so they propagate to the scrollable body.
