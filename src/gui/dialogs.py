@@ -3793,14 +3793,16 @@ class DownloadCustomHandlerPanel(ctk.CTkFrame):
     def _fetch_handlers(self):
         """Fetch the list of JSON files from GitHub API and extract game names."""
         import json as _json
-        import urllib.request as _urllib
+        from Utils.gh_cache import fetch_text as _gh_fetch_text
         try:
-            req = _urllib.Request(
+            listing = _gh_fetch_text(
                 _CUSTOM_HANDLERS_API_URL,
-                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=15,
             )
-            with _urllib.urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+            if listing is None:
+                self.after(0, lambda: self._on_fetch_error("Unable to reach GitHub"))
+                return
+            data = _json.loads(listing)
             handlers = [e for e in data if isinstance(e, dict) and e.get("name", "").endswith(".json")]
             # Fetch each file to get the "name" field from inside the JSON
             for h in handlers:
@@ -3808,11 +3810,16 @@ class DownloadCustomHandlerPanel(ctk.CTkFrame):
                 download_url = h.get("download_url")
                 if download_url:
                     try:
-                        r = _urllib.Request(download_url, headers={"User-Agent": "Amethyst-Mod-Manager"})
-                        with _urllib.urlopen(r, timeout=10) as resp:
-                            parsed = _json.loads(resp.read().decode("utf-8", errors="replace"))
-                        if isinstance(parsed, dict) and parsed.get("name"):
-                            display_name = parsed["name"]
+                        raw = _gh_fetch_text(
+                            download_url,
+                            accept="*/*",
+                            timeout=10,
+                            min_interval=1800,
+                        )
+                        if raw is not None:
+                            parsed = _json.loads(raw)
+                            if isinstance(parsed, dict) and parsed.get("name"):
+                                display_name = parsed["name"]
                     except Exception:
                         pass
                 h["_display_name"] = display_name

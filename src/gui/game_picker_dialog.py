@@ -709,14 +709,15 @@ class GamePickerPanel(tk.Frame):
     def _fetch_remote_handlers(self):
         """Background thread: fetch handler list from GitHub and build cards for any not yet downloaded."""
         import json as _json
-        import urllib.request as _urllib
+        from Utils.gh_cache import fetch_text as _gh_fetch_text
         try:
-            req = _urllib.Request(
+            listing = _gh_fetch_text(
                 _CUSTOM_HANDLERS_API_URL,
-                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=15,
             )
-            with _urllib.urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+            if listing is None:
+                return
+            data = _json.loads(listing)
             handlers = [e for e in data if isinstance(e, dict) and e.get("name", "").endswith(".json")]
             # Fetch display name from inside each JSON
             result = []
@@ -731,9 +732,15 @@ class GamePickerPanel(tk.Frame):
                     continue
                 display_name = filename.removesuffix(".json").replace("_", " ")
                 try:
-                    r = _urllib.Request(download_url, headers={"User-Agent": "Amethyst-Mod-Manager"})
-                    with _urllib.urlopen(r, timeout=10) as resp:
-                        parsed = _json.loads(resp.read().decode("utf-8", errors="replace"))
+                    raw = _gh_fetch_text(
+                        download_url,
+                        accept="*/*",
+                        timeout=10,
+                        min_interval=1800,
+                    )
+                    if raw is None:
+                        continue
+                    parsed = _json.loads(raw)
                     if isinstance(parsed, dict) and parsed.get("name"):
                         display_name = parsed["name"]
                     h["_parsed"] = parsed

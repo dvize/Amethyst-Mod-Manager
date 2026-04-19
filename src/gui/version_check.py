@@ -7,6 +7,8 @@ import os
 import re
 import urllib.request
 
+from Utils.gh_cache import fetch_text as _gh_fetch_text
+
 _APP_UPDATE_RELEASES_API_URL = "https://api.github.com/repos/ChrisDKN/Amethyst-Mod-Manager/releases/latest"
 _APP_UPDATE_RELEASES_LIST_API_URL = "https://api.github.com/repos/ChrisDKN/Amethyst-Mod-Manager/releases?per_page=20"
 _APP_UPDATE_RELEASES_URL = "https://github.com/ChrisDKN/Amethyst-Mod-Manager/releases"
@@ -48,31 +50,44 @@ def _parse_version(s: str) -> tuple:
     return (tuple(nums), (0, *pre_key))
 
 
-def _fetch_latest_version(allow_prerelease: bool = False) -> tuple[str, bool] | None:
+def _fetch_latest_version(
+    allow_prerelease: bool = False,
+    *,
+    force: bool = False,
+) -> tuple[str, bool] | None:
     """Return (tag, is_prerelease) of the highest applicable release, or None on error.
 
     With allow_prerelease=False, queries /releases/latest (stable-only).
     With allow_prerelease=True, lists recent releases and picks the highest non-draft
     by SemVer comparison — which may be either a stable or a pre-release.
+
+    Uses ETag caching + a 1-hour throttle. Pass force=True to bypass the
+    throttle (e.g. when the user manually toggles the pre-release channel).
     """
     import json
     try:
         if not allow_prerelease:
-            req = urllib.request.Request(
+            raw = _gh_fetch_text(
                 _APP_UPDATE_RELEASES_API_URL,
-                headers={"User-Agent": "Amethyst-Mod-Manager"},
+                timeout=10,
+                min_interval=3600,
+                force=force,
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if raw is None:
+                return None
+            data = json.loads(raw)
             tag = data.get("tag_name", "").lstrip("v")
             return (tag, False) if tag else None
 
-        req = urllib.request.Request(
+        raw = _gh_fetch_text(
             _APP_UPDATE_RELEASES_LIST_API_URL,
-            headers={"User-Agent": "Amethyst-Mod-Manager"},
+            timeout=10,
+            min_interval=3600,
+            force=force,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            releases = json.loads(resp.read().decode("utf-8", errors="replace"))
+        if raw is None:
+            return None
+        releases = json.loads(raw)
         candidates = [
             (r.get("tag_name", "").lstrip("v"), bool(r.get("prerelease", False)))
             for r in releases
@@ -86,21 +101,27 @@ def _fetch_latest_version(allow_prerelease: bool = False) -> tuple[str, bool] | 
         return None
 
 
-def _fetch_aur_version() -> str | None:
+def _fetch_aur_version(*, force: bool = False) -> str | None:
     """Fetch the current AUR package version; return None on error.
 
     The AUR version string includes a pkgrel suffix (e.g. '0.7.9-1').
     We strip everything from the first '-' onwards so callers get a plain
     version number comparable with __version__.
+
+    Uses ETag caching + a 1-hour throttle (AUR supports conditional GETs too).
     """
     import json
     try:
-        req = urllib.request.Request(
+        raw = _gh_fetch_text(
             _AUR_API_URL,
-            headers={"User-Agent": "Amethyst-Mod-Manager"},
+            accept="application/json",
+            timeout=10,
+            min_interval=3600,
+            force=force,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        if raw is None:
+            return None
+        data = json.loads(raw)
         results = data.get("results", [])
         if not results:
             return None

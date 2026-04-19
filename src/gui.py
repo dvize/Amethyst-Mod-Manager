@@ -599,10 +599,14 @@ class App(ctk.CTk):
         currently-running version, with downgrade-aware copy.
         """
 
+        # When the user explicitly toggles the pre-release channel we bypass
+        # the ETag-cache throttle so they see an immediate re-check.
+        force_fresh = bool(force_downgrade_prompt)
+
         def _do_check():
             allow_pre = load_allow_prerelease()
             if is_appimage():
-                result = _fetch_latest_version(allow_prerelease=allow_pre)
+                result = _fetch_latest_version(allow_prerelease=allow_pre, force=force_fresh)
                 if result is None:
                     return
                 latest, is_pre = result
@@ -616,7 +620,7 @@ class App(ctk.CTk):
                         )
                     )
             elif is_flatpak():
-                result = _fetch_latest_version(allow_prerelease=allow_pre)
+                result = _fetch_latest_version(allow_prerelease=allow_pre, force=force_fresh)
                 if result is None:
                     return
                 latest, is_pre = result
@@ -630,7 +634,7 @@ class App(ctk.CTk):
                         )
                     )
             else:
-                aur_ver = _fetch_aur_version()
+                aur_ver = _fetch_aur_version(force=force_fresh)
                 if aur_ver is None:
                     return
                 if _is_newer_version(__version__, aur_ver):
@@ -2049,18 +2053,19 @@ class App(ctk.CTk):
     def _sync_custom_handlers(self):
         """Background-download every custom handler from GitHub, overwriting stale copies."""
         import json as _json
-        import urllib.request as _urllib
         from gui.dialogs import _CUSTOM_HANDLERS_API_URL
         from Utils.config_paths import get_custom_games_dir as _gcgd
+        from Utils.gh_cache import fetch_text as _gh_fetch_text
 
         def _do():
             try:
-                req = _urllib.Request(
+                listing = _gh_fetch_text(
                     _CUSTOM_HANDLERS_API_URL,
-                    headers={"Accept": "application/vnd.github.v3+json"},
+                    timeout=15,
                 )
-                with _urllib.urlopen(req, timeout=15) as resp:
-                    data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+                if listing is None:
+                    return
+                data = _json.loads(listing)
                 handlers = [
                     e for e in data
                     if isinstance(e, dict) and e.get("name", "").endswith(".json")
@@ -2072,12 +2077,14 @@ class App(ctk.CTk):
                     if not download_url:
                         continue
                     try:
-                        r = _urllib.Request(
+                        raw = _gh_fetch_text(
                             download_url,
-                            headers={"User-Agent": "Amethyst-Mod-Manager"},
+                            accept="*/*",
+                            timeout=10,
+                            min_interval=6 * 3600,
                         )
-                        with _urllib.urlopen(r, timeout=10) as resp:
-                            raw = resp.read().decode("utf-8", errors="replace")
+                        if raw is None:
+                            continue
                         _json.loads(raw)  # validate
                         dest = _gcgd() / filename
                         # Only write if content changed (avoids unnecessary disk I/O)
@@ -2107,8 +2114,8 @@ class App(ctk.CTk):
     def _sync_plugins(self):
         """Background-download every wizard plugin from GitHub, overwriting stale copies."""
         import json as _json
-        import urllib.request as _urllib
         from Utils.config_paths import get_plugins_dir as _gpd
+        from Utils.gh_cache import fetch_text as _gh_fetch_text
 
         _PLUGINS_API_URL = (
             "https://api.github.com/repos/ChrisDKN/Amethyst-Mod-Manager/contents/"
@@ -2117,12 +2124,13 @@ class App(ctk.CTk):
 
         def _do():
             try:
-                req = _urllib.Request(
+                listing = _gh_fetch_text(
                     _PLUGINS_API_URL,
-                    headers={"Accept": "application/vnd.github.v3+json"},
+                    timeout=15,
                 )
-                with _urllib.urlopen(req, timeout=15) as resp:
-                    data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+                if listing is None:
+                    return
+                data = _json.loads(listing)
                 plugins = [
                     e for e in data
                     if isinstance(e, dict) and e.get("name", "").endswith(".py")
@@ -2134,12 +2142,14 @@ class App(ctk.CTk):
                     if not download_url:
                         continue
                     try:
-                        r = _urllib.Request(
+                        raw = _gh_fetch_text(
                             download_url,
-                            headers={"User-Agent": "Amethyst-Mod-Manager"},
+                            accept="*/*",
+                            timeout=10,
+                            min_interval=6 * 3600,
                         )
-                        with _urllib.urlopen(r, timeout=10) as resp:
-                            raw = resp.read().decode("utf-8", errors="replace")
+                        if raw is None:
+                            continue
                         dest = _gpd() / filename
                         if not dest.is_file() or dest.read_text(encoding="utf-8") != raw:
                             dest.write_text(raw, encoding="utf-8")
