@@ -918,7 +918,7 @@ class ModListPanel(ctk.CTkFrame):
             ("filter_missing_reqs",        "Show only missing requirements"),
             ("filter_has_disabled_plugins","Show only mods with disabled plugins"),
             ("filter_has_plugins",         "Show only mods with plugins"),
-            ("filter_has_disabled_files",  "Show mods with disabled files"),
+            ("filter_has_disabled_files",  "Show mods modified in Mod Files tab"),
             ("filter_has_updates",         "Show only mods with updates"),
             ("filter_fomod_only",          "Show only FOMOD mods"),
             ("filter_has_bsa",             "Show only mods with BSA archives"),
@@ -2572,7 +2572,7 @@ class ModListPanel(ctk.CTkFrame):
                             if _be.name in self._prertx_mods and self._icon_info and "info" not in _seen_flag:
                                 _agg_flags.append(("img", self._icon_info))
                                 _seen_flag.add("info")
-                            if _be.name in self._excluded_mod_files_map and self._icon_disabled_files and "disabled" not in _seen_flag:
+                            if self._mod_is_modified_in_mf(_be.name) and self._icon_disabled_files and "disabled" not in _seen_flag:
                                 _agg_flags.append(("img", self._icon_disabled_files))
                                 _seen_flag.add("disabled")
                             if _be.name in self._root_folder_mods and self._icon_root_folder and "root" not in _seen_flag:
@@ -2826,7 +2826,7 @@ class ModListPanel(ctk.CTkFrame):
                         _flags.append(("img", self._icon_endorsed))
                     if entry.name in self._prertx_mods and self._icon_info:
                         _flags.append(("img", self._icon_info))
-                    if entry.name in self._excluded_mod_files_map and self._icon_disabled_files:
+                    if self._mod_is_modified_in_mf(entry.name) and self._icon_disabled_files:
                         _flags.append(("img", self._icon_disabled_files))
                     if entry.name in self._root_folder_mods and self._icon_root_folder:
                         _flags.append(("img", self._icon_root_folder))
@@ -3309,7 +3309,7 @@ class ModListPanel(ctk.CTkFrame):
                 if entry.is_separator:
                     if self._sep_block_has_disabled_files(i):
                         result.append(i)
-                elif entry.name in self._excluded_mod_files_map:
+                elif self._mod_is_modified_in_mf(entry.name):
                     result.append(i)
             base = result
 
@@ -3566,7 +3566,7 @@ class ModListPanel(ctk.CTkFrame):
                 is_locked    = self._entries[i].locked
                 has_update   = name in self._update_mods
                 has_root     = name in self._root_folder_mods
-                has_disabled = name in self._excluded_mod_files_map
+                has_disabled = self._mod_is_modified_in_mf(name)
                 has_info     = name in self._prertx_mods
                 has_endorsed = name in self._endorsed_mods
                 score = 0
@@ -3784,7 +3784,7 @@ class ModListPanel(ctk.CTkFrame):
                     _items.append("endorsed")
                 if entry.name in self._prertx_mods:
                     _items.append("prertx")
-                if entry.name in self._excluded_mod_files_map:
+                if self._mod_is_modified_in_mf(entry.name):
                     _items.append("disabled_files")
                 if entry.name in self._root_folder_mods:
                     _items.append("root")
@@ -4207,11 +4207,20 @@ class ModListPanel(ctk.CTkFrame):
                     return True
         return False
 
+    def _mod_is_modified_in_mf(self, mod_name: str) -> bool:
+        """True if this mod has any Mod Files tab modifications — either
+        excluded files or custom Top Level (strip prefix) entries."""
+        ex = self._excluded_mod_files_map.get(mod_name)
+        if ex:
+            return True
+        sp = self._mod_strip_prefixes.get(mod_name) if self._mod_strip_prefixes else None
+        return bool(sp)
+
     def _sep_block_has_disabled_files(self, sep_idx: int) -> bool:
-        """True if this separator's block contains at least one mod with disabled files."""
+        """True if this separator's block contains at least one mod with Mod Files tab modifications."""
         for i in self._sep_block_range(sep_idx):
             if not self._entries[i].is_separator:
-                if self._entries[i].name in self._excluded_mod_files_map:
+                if self._mod_is_modified_in_mf(self._entries[i].name):
                     return True
         return False
 
@@ -4529,7 +4538,7 @@ class ModListPanel(ctk.CTkFrame):
                     _items.append("endorsed")
                 if entry.name in self._prertx_mods:
                     _items.append("prertx")
-                if entry.name in self._excluded_mod_files_map:
+                if self._mod_is_modified_in_mf(entry.name):
                     _items.append("disabled_files")
                 if entry.name in self._root_folder_mods:
                     _items.append("root")
@@ -4550,7 +4559,7 @@ class ModListPanel(ctk.CTkFrame):
                         elif _kind == "prertx":
                             tip = "Pre-RTX mod"
                         elif _kind == "disabled_files":
-                            tip = "Has disabled files"
+                            tip = "Modified in Mod Files tab"
                         elif _kind == "root":
                             tip = "This mod is sent to the root folder"
                         else:
@@ -4981,11 +4990,6 @@ class ModListPanel(ctk.CTkFrame):
         # Separator settings…
         if is_separator and not is_synthetic and not _is_bundle_sep:
             menu.add_command("Separator settings…", lambda: self._show_sep_settings(idx))
-
-        # Set deployment paths…
-        if not is_separator and not _is_locked and mod_folder is not None and not _is_multi:
-            menu.add_command("Set deployment paths…",
-                lambda: self._show_mod_strip_dialog(_mod_name, mod_folder))
 
         # Set priority…
         if not is_separator and not _is_locked and not _is_bundle_var and not _is_multi:
@@ -6061,229 +6065,6 @@ class ModListPanel(ctk.CTkFrame):
             on_pick=lambda ini_path: self._open_ini(ini_path),
             parent_dismiss=parent_dismiss, parent_popup=parent_popup,
         )
-
-    def _show_mod_strip_dialog(self, mod_name: str, mod_folder: Path) -> None:
-        """Open a dialog to set which folders (at any depth) to ignore during deployment.
-        Checked folders are stripped so their contents deploy one level up."""
-        if not mod_folder.is_dir():
-            return
-
-        self._load_mod_strip_prefixes()
-        current = self._mod_strip_prefixes.get(mod_name, [])
-        use_path_format = any("/" in p for p in current)
-
-        app = self.winfo_toplevel()
-        show_fn = getattr(app, "show_deploy_paths_panel", None)
-        if show_fn:
-            def _on_save(chosen):
-                self._mod_strip_prefixes[mod_name] = chosen
-                self._save_mod_strip_prefixes()
-                self._reload()
-                plugin_panel = getattr(app, "_plugin_panel", None)
-                if plugin_panel is not None:
-                    plugin_panel.show_mod_files(mod_name)
-            show_fn(mod_name, mod_folder, current, use_path_format, _on_save)
-            return
-
-        # ---- fallback: original Toplevel implementation ----
-        win = tk.Toplevel(self.winfo_toplevel())
-        win.title(f"Deployment paths — {mod_name}")
-        win.configure(bg=BG_PANEL, highlightthickness=0,
-                      highlightbackground=BG_PANEL, highlightcolor=BG_PANEL)
-        win.transient(self.winfo_toplevel())
-        win.resizable(True, True)
-        # Single content frame with no border so no white edge from WM
-        content = tk.Frame(win, bg=BG_PANEL, bd=0, highlightthickness=0)
-        content.pack(fill="both", expand=True)
-
-        msg = tk.Label(
-            content, text="Select folders to ignore during deployment (at any depth).\n"
-                          "Their contents will be deployed one level up:",
-            bg=BG_PANEL, fg=TEXT_MAIN, font=_theme.FONT_SMALL,
-            justify="left",
-        )
-        msg.pack(anchor="w", padx=12, pady=(12, 8))
-
-        # current and use_path_format already loaded by the caller above
-        current_set = {p.lower() for p in current} if use_path_format else {s.lower() for s in current}
-        vars_map: dict[str, tk.BooleanVar] = {}  # rel_path -> var
-        scroll_h = 320
-        _scrollbar_bg = "#383838"
-        list_frame = tk.Frame(content, bg=_scrollbar_bg, bd=0, highlightthickness=0)
-        list_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-
-        _tree_bg = "#1a1a1a"
-        _tree_style = "ModStrip.Treeview"
-        _heading_style = "ModStrip.Treeview.Heading"
-        style = ttk.Style()
-        style.configure(_tree_style,
-                        background=_tree_bg, foreground=TEXT_MAIN,
-                        fieldbackground=_tree_bg, rowheight=22,
-                        font=("Cantarell", _theme.FS10),
-                        bordercolor=BG_ROW, borderwidth=1,
-                        focuscolor=_tree_bg)
-        style.configure(_heading_style,
-                        background=BG_HEADER, foreground=TEXT_SEP,
-                        font=("Cantarell", _theme.FS10), borderwidth=0)
-        style.map(_tree_style,
-                  background=[("selected", BG_SELECT), ("focus", _tree_bg)],
-                  foreground=[("selected", TEXT_MAIN)])
-
-        tree = ttk.Treeview(
-            list_frame,
-            columns=("check",),
-            show="tree headings",
-            style=_tree_style,
-            selectmode="browse",
-            height=scroll_h // 22,
-        )
-        tree.heading("#0", text="Folder", anchor="w")
-        tree.heading("check", text="", anchor="w")
-        tree.column("#0", minwidth=200, stretch=True)
-        tree.column("check", width=28, stretch=False)
-
-        vsb = tk.Scrollbar(
-            list_frame, orient="vertical", command=tree.yview,
-            bg=_scrollbar_bg, troughcolor=BG_DEEP, activebackground=ACCENT,
-            highlightthickness=0, bd=0,
-        )
-        tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-
-        def _iid(rel_path: str) -> str:
-            return rel_path.replace("/", "\u241f")
-
-        def _rel(iid: str) -> str:
-            return iid.replace("\u241f", "/")
-
-        def _scroll_canvas(evt):
-            if getattr(evt, "delta", 0) > 0:
-                tree.yview_scroll(-3, "units")
-            else:
-                tree.yview_scroll(3, "units")
-        tree.bind("<MouseWheel>", _scroll_canvas)
-        list_frame.bind("<MouseWheel>", _scroll_canvas)
-        content.bind("<MouseWheel>", _scroll_canvas)
-        win.bind("<MouseWheel>", _scroll_canvas)
-        if not LEGACY_WHEEL_REDUNDANT:
-            tree.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-            tree.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
-            list_frame.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-            list_frame.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
-            content.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-            content.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
-            win.bind("<Button-4>", lambda e: tree.yview_scroll(-3, "units"))
-            win.bind("<Button-5>", lambda e: tree.yview_scroll(3, "units"))
-
-        def _scan(parent_path: str, parent_iid: str, depth: int) -> None:
-            if depth > 3:
-                return
-            full = mod_folder / parent_path if parent_path else mod_folder
-            try:
-                entries = sorted(full.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-            except OSError:
-                return
-            for p in entries:
-                if not p.is_dir() or p.is_symlink():
-                    continue
-                rel = f"{parent_path}/{p.name}" if parent_path else p.name
-                name = p.name
-                if use_path_format:
-                    var = tk.BooleanVar(value=rel.lower() in current_set)
-                else:
-                    var = tk.BooleanVar(value=name.lower() in current_set)
-                vars_map[rel] = var
-                check_char = "\u2611" if var.get() else "\u2610"  # ☑ / ☐
-                iid = _iid(rel)
-                tree.insert(parent_iid, "end", iid=iid, text=name, values=(check_char,),
-                            open=False)
-                _scan(rel, iid, depth + 1)
-
-        _scan("", "", 0)
-
-        def _on_toggle(evt):
-            region = tree.identify_region(evt.x, evt.y)
-            if region == "tree":
-                return
-            item = tree.identify_row(evt.y)
-            if not item:
-                return
-            rel = _rel(item)
-            if rel not in vars_map:
-                return
-            var = vars_map[rel]
-            var.set(not var.get())
-            tree.set(item, "check", "\u2611" if var.get() else "\u2610")
-
-        tree.bind("<ButtonRelease-1>", _on_toggle)
-
-        if not vars_map:
-            tree.insert("", "end", iid="__none__", text="(No folders found in this mod.)", values=("",))
-            vars_map["__none__"] = tk.BooleanVar(value=False)
-
-        def _ok():
-            chosen = [
-                rel_path for rel_path, v in vars_map.items()
-                if rel_path != "__none__" and v.get()
-            ]
-            self._mod_strip_prefixes[mod_name] = chosen
-            self._save_mod_strip_prefixes()
-            win.destroy()
-            self._reload()
-            plugin_panel = getattr(app, "_plugin_panel", None)
-            if plugin_panel is not None:
-                plugin_panel.show_mod_files(mod_name)
-
-        def _cancel():
-            win.destroy()
-
-        def _clear_all():
-            for rel_path, v in vars_map.items():
-                if rel_path == "__none__":
-                    continue
-                v.set(False)
-                try:
-                    tree.set(_iid(rel_path), "check", "\u2610")
-                except tk.TclError:
-                    pass
-
-        def _mkbtn(parent, text, cmd, bg, **kwargs):
-            opts = dict(
-                font=_theme.FONT_SMALL, relief="flat", overrelief="flat",
-                padx=16, pady=4, cursor="hand2",
-                highlightthickness=0, highlightbackground=bg, highlightcolor=bg,
-                borderwidth=0, activebackground=bg, activeforeground=TEXT_MAIN,
-            )
-            opts.update(kwargs)
-            return tk.Button(parent, text=text, command=cmd, bg=bg, fg=TEXT_MAIN, **opts)
-
-        btn_frame = tk.Frame(content, bg=BG_ROW, bd=0, highlightthickness=0)
-        btn_frame.pack(fill="x", padx=12, pady=(0, 12))
-        _mkbtn(btn_frame, "OK", _ok, ACCENT).pack(side="right", padx=(8, 0))
-        _mkbtn(btn_frame, "Cancel", _cancel, BG_ROW).pack(side="right")
-        _mkbtn(btn_frame, "Clear all", _clear_all, BG_ROW).pack(side="right")
-
-        win.update_idletasks()
-        w, h = 430, 480
-        win.geometry(f"{w}x{h}")
-        win.minsize(360, 220)
-        win.maxsize(0, h)  # cap height so scrollbar is used; 0 = no width cap
-        # Center on the main window (or on screen if main window size not yet available)
-        app = self.winfo_toplevel()
-        ax = app.winfo_rootx()
-        ay = app.winfo_rooty()
-        aw = app.winfo_width()
-        ah = app.winfo_height()
-        if aw <= 1 or ah <= 1:
-            sw = win.winfo_screenwidth()
-            sh = win.winfo_screenheight()
-            wx = max(0, (sw - w) // 2)
-            wy = max(0, (sh - h) // 2)
-        else:
-            wx = ax + max(0, (aw - w) // 2)
-            wy = ay + max(0, (ah - h) // 2)
-        win.geometry(f"+{wx}+{wy}")
 
     def _move_to_separator(self, mod_idx: int, sep_name: str):
         """Move the mod at mod_idx to directly below the named separator."""

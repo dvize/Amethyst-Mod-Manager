@@ -55,6 +55,8 @@ from Utils.profile_state import (
     write_plugin_locks,
     read_excluded_mod_files,
     write_excluded_mod_files,
+    read_mod_strip_prefixes,
+    write_mod_strip_prefixes,
 )
 from Utils.filemap import OVERWRITE_NAME as _OVERWRITE_NAME, build_filemap
 from Utils.xdg import xdg_open, open_url
@@ -1935,14 +1937,16 @@ class PluginPanel(ctk.CTkFrame):
 
         self._mf_tree = ttk.Treeview(
             tab,
-            columns=("check",),
+            columns=("toplevel", "check"),
             style="ModFiles.Treeview",
             selectmode="browse",
             show="tree headings",
         )
         self._mf_tree.heading("#0", text="File name", anchor="w")
+        self._mf_tree.heading("toplevel", text="Top Level", anchor="center")
         self._mf_tree.heading("check", text="Disable", anchor="center")
         self._mf_tree.column("#0", stretch=True, minwidth=150)
+        self._mf_tree.column("toplevel", width=70, minwidth=70, stretch=False, anchor="center")
         self._mf_tree.column("check", width=60, minwidth=60, stretch=False, anchor="center")
 
         _sb_bg     = "#383838"
@@ -1968,6 +1972,11 @@ class PluginPanel(ctk.CTkFrame):
         self._mf_iid_to_key: dict[str, str | None] = {}  # iid → rel_key (None for folders)
         self._mf_iid_to_relstr: dict[str, str] = {}  # iid → rel_str (original-case, leaf nodes only)
         self._mf_folder_iids: set[str] = set()
+        self._mf_iid_to_path: dict[str, str] = {}   # iid → canonical rel path (folder or file)
+        self._mf_path_to_iid: dict[str, str] = {}   # canonical lowercase rel path → iid
+        self._mf_top_level_iids: set[str] = set()   # iids eligible for the Top Level checkbox
+        self._mf_stripped_paths: set[str] = set()   # lowercased strip-prefix entries for this mod (from profile_state)
+        self._mf_synthetic_iids: set[str] = set()   # iids for synthetic strip placeholders
 
     # ------------------------------------------------------------------
     # Ini Files tab
@@ -2565,6 +2574,8 @@ class PluginPanel(ctk.CTkFrame):
     _MF_CHECK   = "☑"
     _MF_UNCHECK = "☐"
     _MF_PARTIAL = "☒"   # folder with some excluded children
+    _MF_TL_SEL   = "☑"   # path marked as top-level (stripped on deploy)
+    _MF_TL_UNSEL = "☐"   # path not marked
 
     def _mf_check_symbol(self, iid: str) -> str:
         if iid in self._mf_folder_iids:
@@ -2594,23 +2605,45 @@ class PluginPanel(ctk.CTkFrame):
         while parent:
             sym = self._mf_check_symbol(parent)
             self._mf_tree.set(parent, "check", sym)
+            # Grey the folder only if ALL of its leaves are disabled.
+            leaves = self._mf_all_leaf_iids(parent)
+            all_off = bool(leaves) and not any(
+                self._mf_checked.get(l, True) for l in leaves
+            )
+            self._mf_apply_disabled_tag(parent, all_off)
             parent = self._mf_tree.parent(parent)
 
     def _on_mf_click(self, event):
         iid = self._mf_tree.identify_row(event.y)
         if not iid:
             return
-        # Only toggle when clicking the checkbox column (col #1), not the
-        # tree/name column (#0) which handles expand/collapse.
         col = self._mf_tree.identify_column(event.x)
-        if col != "#1":
+        if col == "#1":
+            self._mf_toggle_top_level(iid)
             return
-        self._mf_toggle(iid)
+        if col == "#2":
+            self._mf_toggle(iid)
+            return
 
     def _on_mf_space(self, event):
         sel = self._mf_tree.selection()
         if sel:
             self._mf_toggle(sel[0])
+
+    def _mf_apply_disabled_tag(self, iid: str, disabled: bool):
+        """Add/remove the greyed ``mf_disabled`` tag based on disable state,
+        preserving any other tags already on the row."""
+        try:
+            current = list(self._mf_tree.item(iid, "tags") or ())
+        except Exception:
+            return
+        has = "mf_disabled" in current
+        if disabled and not has:
+            current.append("mf_disabled")
+            self._mf_tree.item(iid, tags=tuple(current))
+        elif not disabled and has:
+            current.remove("mf_disabled")
+            self._mf_tree.item(iid, tags=tuple(current))
 
     def _mf_set_subtree(self, iid: str, new_state: bool):
         """Recursively set all leaves and sub-folder symbols under iid."""
@@ -2618,9 +2651,11 @@ class PluginPanel(ctk.CTkFrame):
             if child in self._mf_folder_iids:
                 self._mf_set_subtree(child, new_state)
                 self._mf_tree.set(child, "check", self._mf_check_symbol(child))
+                self._mf_apply_disabled_tag(child, not new_state)
             else:
                 self._mf_checked[child] = new_state
                 self._mf_tree.set(child, "check", self._MF_CHECK if new_state else self._MF_UNCHECK)
+                self._mf_apply_disabled_tag(child, not new_state)
 
     def _mf_toggle(self, iid: str):
         if iid in self._mf_folder_iids:
@@ -2629,11 +2664,13 @@ class PluginPanel(ctk.CTkFrame):
             new_state = not all_checked
             self._mf_set_subtree(iid, new_state)
             self._mf_tree.set(iid, "check", self._mf_check_symbol(iid))
+            self._mf_apply_disabled_tag(iid, not new_state)
             self._mf_refresh_ancestors(iid)
         else:
             current = self._mf_checked.get(iid, True)
             self._mf_checked[iid] = not current
             self._mf_tree.set(iid, "check", self._MF_CHECK if not current else self._MF_UNCHECK)
+            self._mf_apply_disabled_tag(iid, current)  # new state = not current → disabled when current was True
             self._mf_refresh_ancestors(iid)
         self._mf_save_and_rebuild()
 
@@ -2661,6 +2698,257 @@ class PluginPanel(ctk.CTkFrame):
         )
         if self._mod_files_on_change is not None:
             self._mod_files_on_change()
+
+    # ------------------------------------------------------------------
+    # Top-level selection (Mod Files tab)
+    # ------------------------------------------------------------------
+    #
+    # The Top Level checkbox appears on every row (folders and files).
+    # A row is "checked" when, under the current strip list, its entire
+    # parent path is stripped away — i.e. the row itself would deploy as
+    # top-level. Checking a nested row adds all of its ancestor path
+    # segments to the strip list, which visually unchecks + greys those
+    # ancestors. Unchecking a currently-top-level row re-introduces its
+    # parent path by removing it from the strip list. Synthetic greyed
+    # rows are added for strip entries that aren't otherwise visible so
+    # the user can re-check (un-strip) them.
+
+    def _mf_parent_path(self, path: str) -> str:
+        """Return the parent folder path of ``path`` (or '')."""
+        p = path.replace("\\", "/").rstrip("/")
+        if "/" not in p:
+            return ""
+        return p.rsplit("/", 1)[0]
+
+    def _mf_ancestor_paths(self, path: str) -> list[str]:
+        """Return ancestor folder paths of ``path`` from root to parent."""
+        p = path.replace("\\", "/").rstrip("/")
+        if "/" not in p:
+            return []
+        segs = p.split("/")[:-1]
+        out: list[str] = []
+        cur = ""
+        for s in segs:
+            cur = f"{cur}/{s}" if cur else s
+            out.append(cur)
+        return out
+
+    def _mf_is_top_level(self, path: str) -> bool:
+        """Return True if ``path`` currently deploys as top-level given the
+        strip list (i.e. its parent path is fully covered by strip entries)."""
+        parent = self._mf_parent_path(path)
+        if not parent:
+            return True
+        return parent.lower() in self._mf_stripped_paths
+
+    def _mf_insert_stripped_placeholders(self):
+        """Insert synthetic top rows for strip entries that aren't already
+        present in the tree. These appear greyed + unchecked so the user
+        can re-check to un-strip."""
+        existing_paths = {p.lower() for p in self._mf_iid_to_path.values() if p}
+        for entry_l in sorted(self._mf_stripped_paths):
+            if not entry_l or entry_l in existing_paths:
+                continue
+            # Find the original-case form from the strip map.
+            if self._mod_files_profile_dir is None:
+                display = entry_l
+            else:
+                strip_map = read_mod_strip_prefixes(self._mod_files_profile_dir, None)
+                display = entry_l
+                for e in strip_map.get(self._mod_files_mod_name or "", []):
+                    if e.lower() == entry_l:
+                        display = e
+                        break
+            iid = self._mf_tree.insert(
+                "", 0,
+                text=display,
+                values=("", self._MF_UNCHECK),
+                tags=("mf_stripped",),
+            )
+            self._mf_iid_to_key[iid] = None
+            self._mf_iid_to_path[iid] = display
+            self._mf_path_to_iid[display.lower()] = iid
+            self._mf_top_level_iids.add(iid)
+            self._mf_synthetic_iids.add(iid)
+
+    def _mf_prune_stale_placeholders(self):
+        """Remove synthetic strip-placeholder rows whose path is no longer
+        in the strip list, and add new synthetic rows for any strip entries
+        that no longer map to a real tree row."""
+        stripped = self._mf_stripped_paths
+        for iid in list(self._mf_synthetic_iids):
+            path = self._mf_iid_to_path.get(iid, "")
+            if path.lower() not in stripped:
+                try:
+                    self._mf_tree.delete(iid)
+                except Exception:
+                    pass
+                self._mf_synthetic_iids.discard(iid)
+                self._mf_top_level_iids.discard(iid)
+                self._mf_iid_to_path.pop(iid, None)
+                self._mf_iid_to_key.pop(iid, None)
+                self._mf_path_to_iid.pop(path.lower(), None)
+        self._mf_insert_stripped_placeholders()
+        self._mf_refresh_top_level_column()
+
+    def _mf_refresh_leaf_keys(self):
+        """After the strip list changes, re-derive each leaf's post-strip
+        rel_key from the raw rel_str so the Disable column writes the right
+        key to `excluded_mod_files`."""
+        for iid, rel_str in self._mf_iid_to_relstr.items():
+            if not rel_str:
+                continue
+            raw_key = rel_str.replace("\\", "/").lower()
+            post_key = raw_key
+            for s in sorted(self._mf_stripped_paths, key=len, reverse=True):
+                sl = s.lower()
+                if post_key == sl or post_key.startswith(sl + "/"):
+                    post_key = post_key[len(sl):].lstrip("/")
+                    break
+            self._mf_iid_to_key[iid] = post_key
+
+    def _mf_refresh_top_level_column(self):
+        """Update the Top Level column glyphs + greyed styling on every row.
+
+        A row's checkbox is:
+          - Checked when it currently deploys as top-level (its parent path
+            is covered by the strip list or it has no parent).
+          - Unchecked + greyed when the row's own path is in the strip list
+            (i.e. this row has been stripped to promote a descendant).
+          - Unchecked (not greyed) for deeper rows that could be promoted.
+        """
+        self._mf_refresh_leaf_keys()
+        stripped = self._mf_stripped_paths
+        for iid, path in self._mf_iid_to_path.items():
+            if not path:
+                self._mf_tree.set(iid, "toplevel", "")
+                continue
+            path_l = path.lower()
+            is_stripped = path_l in stripped
+            is_top = self._mf_is_top_level(path)
+            if is_stripped:
+                glyph = self._MF_TL_UNSEL
+            elif is_top:
+                glyph = self._MF_TL_SEL
+            else:
+                glyph = self._MF_TL_UNSEL
+            self._mf_tree.set(iid, "toplevel", glyph)
+            self._apply_stripped_tag(iid, is_stripped)
+
+    def _apply_stripped_tag(self, iid: str, stripped: bool):
+        current = list(self._mf_tree.item(iid, "tags") or ())
+        has = "mf_stripped" in current
+        if stripped and not has:
+            current.append("mf_stripped")
+            self._mf_tree.item(iid, tags=tuple(current))
+        elif not stripped and has:
+            current.remove("mf_stripped")
+            self._mf_tree.item(iid, tags=tuple(current))
+
+    def _mf_toggle_top_level(self, iid: str):
+        """Promote/demote the row's path as top-level.
+
+        - Checking a not-top-level row: add every ancestor path segment to
+          the strip list so this row becomes top-level. Previously
+          top-level ancestors become unchecked + greyed.
+        - Unchecking a currently top-level row: remove its parent path
+          from the strip list (so the parent reappears as top-level).
+          Root-level rows (no parent) have no effect.
+        - Unchecking a stripped row (greyed): remove it from the strip
+          list so it returns to being top-level.
+        """
+        if self._mod_files_mod_name is None or self._mod_files_profile_dir is None:
+            return
+        path = self._mf_iid_to_path.get(iid)
+        if not path:
+            return
+
+        path_l = path.lower()
+
+        def _unstrip_subtree(root_l: str):
+            """Remove ``root_l`` and every strip entry beneath it."""
+            prefix = root_l + "/"
+            for s in list(self._mf_stripped_paths):
+                if s == root_l or s.startswith(prefix):
+                    self._mf_stripped_paths.discard(s)
+
+        if path_l in self._mf_stripped_paths:
+            # Un-strip this path (and any stripped descendants so that no
+            # deeper row remains "promoted" past the reclaimed ancestor).
+            _unstrip_subtree(path_l)
+        elif self._mf_is_top_level(path):
+            # Currently top-level → demote by unstripping its parent and
+            # anything further down that chain.
+            parent = self._mf_parent_path(path)
+            if parent:
+                _unstrip_subtree(parent.lower())
+            else:
+                # No parent to demote — ignore.
+                return
+        else:
+            # Promote this row: strip every ancestor segment up to it.
+            for anc in self._mf_ancestor_paths(path):
+                self._mf_stripped_paths.add(anc.lower())
+
+        # Persist the full strip list (preserve original-case forms where known).
+        mod_name = self._mod_files_mod_name
+        profile_dir = self._mod_files_profile_dir
+        path_lower_to_orig: dict[str, str] = {}
+        for p in self._mf_iid_to_path.values():
+            if p:
+                path_lower_to_orig.setdefault(p.lower(), p)
+                # Record ancestor path chunks too so we can preserve case on strips.
+                for anc in self._mf_ancestor_paths(p):
+                    path_lower_to_orig.setdefault(anc.lower(), anc)
+        strip_map = read_mod_strip_prefixes(profile_dir, None)
+        existing = strip_map.get(mod_name, [])
+        for e in existing:
+            if e:
+                path_lower_to_orig.setdefault(e.lower(), e)
+        merged = sorted(
+            {path_lower_to_orig.get(s, s) for s in self._mf_stripped_paths if s}
+        )
+        if merged:
+            strip_map[mod_name] = merged
+        else:
+            strip_map.pop(mod_name, None)
+        write_mod_strip_prefixes(profile_dir, strip_map)
+
+        # Refresh modlist panel's cache so the next filemap rebuild sees the
+        # updated prefixes, and force a full re-scan of the mod index since
+        # strip prefixes are applied during the scan, not at filemap merge.
+        app = self.winfo_toplevel()
+        mod_panel = getattr(app, "_mod_panel", None)
+        if mod_panel is not None:
+            # Invalidate the cached profile_state copy so _load_mod_strip_prefixes
+            # re-reads from disk instead of returning the stale cached dict.
+            try:
+                cache = getattr(mod_panel, "_ModListPanel__profile_state", None)
+                if isinstance(cache, dict):
+                    cache.pop("mod_strip_prefixes", None)
+            except Exception:
+                pass
+            if hasattr(mod_panel, "_load_mod_strip_prefixes"):
+                try:
+                    mod_panel._load_mod_strip_prefixes()
+                except Exception:
+                    pass
+            try:
+                mod_panel._filemap_rescan_index = True
+            except Exception:
+                pass
+
+        self._mf_refresh_top_level_column()
+        self._log(
+            f"Mod Files: strip prefixes for '{mod_name}' = "
+            f"{merged if merged else '(none)'}"
+        )
+        if self._mod_files_on_change is not None:
+            self._mod_files_on_change()
+        # Also refresh any synthetic rows for strip entries that are no
+        # longer represented in the tree (e.g. when an ancestor was
+        # unstripped, remove its stale synthetic placeholder).
+        self._mf_prune_stale_placeholders()
 
     def _get_conflict_cache(self, full_index):
         """Return (contested_keys, filemap_winner), cached by index+filemap mtime.
@@ -2717,6 +3005,22 @@ class PluginPanel(ctk.CTkFrame):
 
     def show_mod_files(self, mod_name: str | None):
         """Populate the Mod Files tab for the given mod name."""
+        # Capture expand state (by path) + scroll position if we're rebuilding
+        # the same mod, so the tree doesn't collapse / jump on every edit.
+        prev_expanded: set[str] = set()
+        prev_scroll: tuple[float, float] | None = None
+        if (mod_name is not None and mod_name == self._mod_files_mod_name):
+            for iid, path in self._mf_iid_to_path.items():
+                try:
+                    if self._mf_tree.item(iid, "open") and path:
+                        prev_expanded.add(path.lower())
+                except Exception:
+                    pass
+            try:
+                prev_scroll = self._mf_tree.yview()
+            except Exception:
+                prev_scroll = None
+
         self._mod_files_mod_name = mod_name
         # Clear tree
         self._mf_tree.delete(*self._mf_tree.get_children())
@@ -2724,6 +3028,13 @@ class PluginPanel(ctk.CTkFrame):
         self._mf_iid_to_key.clear()
         self._mf_iid_to_relstr.clear()
         self._mf_folder_iids.clear()
+        self._mf_iid_to_path.clear()
+        self._mf_path_to_iid.clear()
+        self._mf_top_level_iids.clear()
+        self._mf_stripped_paths.clear()
+        self._mf_synthetic_iids.clear()
+        self._mf_prev_expanded_paths = prev_expanded
+        self._mf_prev_scroll = prev_scroll
 
         if mod_name is None:
             self._mod_files_label.configure(text="(no mod selected)")
@@ -2738,16 +3049,39 @@ class PluginPanel(ctk.CTkFrame):
         if self._mod_files_profile_dir is not None:
             excluded_keys = self._mod_files_excluded.get(mod_name, set())
 
-        # Load file list from mod index
-        files: dict[str, str] = {}   # rel_key → rel_str
+        # Load current strip-prefix selection for this mod.
+        if self._mod_files_profile_dir is not None:
+            strip_map = read_mod_strip_prefixes(self._mod_files_profile_dir, None)
+            for entry in strip_map.get(mod_name, []):
+                if entry:
+                    self._mf_stripped_paths.add(entry.lower())
+
+        # Load conflict data from the (post-strip) index — needed to tag rows.
         full_index = None
         if self._mod_files_index_path is not None:
             from Utils.filemap import read_mod_index
             full_index = read_mod_index(self._mod_files_index_path)
-            if full_index and mod_name in full_index:
-                normal, root = full_index[mod_name]
-                files.update(normal)
-                files.update(root)
+
+        # Load the raw file listing by scanning the mod folder directly so
+        # the tree shows the full on-disk structure regardless of currently-
+        # saved strip prefixes. This lets the user tick nested folders as
+        # the new top level without first needing a full rescan.
+        files: dict[str, str] = {}   # rel_key → rel_str (raw, no strip applied)
+        staging: Path | None = None
+        if self._game is not None and hasattr(self._game, "get_effective_mod_staging_path"):
+            try:
+                staging = Path(self._game.get_effective_mod_staging_path())
+            except Exception:
+                staging = None
+        if staging is not None:
+            mod_dir = staging / mod_name
+            if mod_dir.is_dir():
+                from Utils.filemap import _scan_dir
+                _name, _normal, _root, _invalid = _scan_dir(
+                    mod_name, str(mod_dir),
+                )
+                files.update(_normal)
+                files.update(_root)
 
         if not files:
             self._mf_tree.insert("", "end", text="  (no files found — try refreshing)", tags=("dim",))
@@ -2757,15 +3091,31 @@ class PluginPanel(ctk.CTkFrame):
         # Build conflict lookup sets from filemap.txt and full mod index.
         contested_keys, filemap_winner = self._get_conflict_cache(full_index)
 
+        def _rel_key_after_strip(raw_rel_key: str) -> str:
+            """Apply currently-saved strip prefixes to a raw rel_key so we
+            can look it up in the (post-strip) conflict/filemap data."""
+            k = raw_rel_key
+            # longest-match first, same as _scan_dir
+            for s in sorted(self._mf_stripped_paths, key=len, reverse=True):
+                sl = s.lower()
+                if k == sl or k.startswith(sl + "/"):
+                    k = k[len(sl):].lstrip("/")
+                    break
+            # also handle the legacy strip_prefixes (first-segment) — not used
+            # by the Top Level column, so we skip it here.
+            return k
+
         # Configure conflict highlight tags
         self._mf_tree.tag_configure("dim", foreground=TEXT_DIM)
         self._mf_tree.tag_configure("conflict_win",  foreground=_theme.conflict_higher)
         self._mf_tree.tag_configure("conflict_lose", foreground=_theme.conflict_lower)
 
         def _conflict_tag(rel_key: str) -> str | None:
-            if rel_key not in contested_keys:
+            # Conflict data is keyed by the post-strip rel_key.
+            key = _rel_key_after_strip(rel_key)
+            if key not in contested_keys:
                 return None
-            winner = filemap_winner.get(rel_key.lower())
+            winner = filemap_winner.get(key.lower())
             if winner is None:
                 return None
             return "conflict_win" if winner == mod_name else "conflict_lose"
@@ -2789,46 +3139,102 @@ class PluginPanel(ctk.CTkFrame):
             self._mf_tree.insert("", "end", text="  (no conflicts)", tags=("dim",))
             return
 
-        def insert_node(parent_id, name, subtree, depth=0):
+        # Configure the "stripped" tag used to grey out unchecked top-level rows.
+        self._mf_tree.tag_configure("mf_stripped", foreground=TEXT_DIM)
+        # Configure the "disabled" tag used to grey out rows excluded via the Disable column.
+        self._mf_tree.tag_configure("mf_disabled", foreground=TEXT_DIM)
+
+        def insert_node(parent_id, name, subtree, parent_path, depth=0):
+            folder_path = f"{parent_path}/{name}" if parent_path else name
             iid = self._mf_tree.insert(
                 parent_id, "end",
                 text=name,
-                values=(self._MF_CHECK,),
+                values=("", self._MF_CHECK),
                 open=(depth == 0),
             )
             self._mf_folder_iids.add(iid)
             self._mf_iid_to_key[iid] = None
+            self._mf_iid_to_path[iid] = folder_path
+            self._mf_path_to_iid[folder_path.lower()] = iid
+            self._mf_top_level_iids.add(iid)
             for child in sorted(k for k in subtree if k != "__files__"):
-                insert_node(iid, child, subtree[child], depth + 1)
+                insert_node(iid, child, subtree[child], folder_path, depth + 1)
             for fname, rel_key, rel_str in sorted(subtree.get("__files__", [])):
-                checked = rel_key not in excluded_keys
+                post_key = _rel_key_after_strip(rel_key)
+                checked = post_key not in excluded_keys
                 tag = _conflict_tag(rel_key)
+                tags: tuple[str, ...] = (tag,) if tag else ()
+                if not checked:
+                    tags = tags + ("mf_disabled",)
                 leaf_iid = self._mf_tree.insert(
                     iid, "end",
                     text=fname,
-                    values=(self._MF_CHECK if checked else self._MF_UNCHECK,),
-                    tags=(tag,) if tag else (),
+                    values=("", self._MF_CHECK if checked else self._MF_UNCHECK),
+                    tags=tags,
                 )
                 self._mf_checked[leaf_iid] = checked
-                self._mf_iid_to_key[leaf_iid] = rel_key
+                self._mf_iid_to_key[leaf_iid] = post_key
                 self._mf_iid_to_relstr[leaf_iid] = rel_str
+                file_path = f"{folder_path}/{fname}" if folder_path else fname
+                self._mf_iid_to_path[leaf_iid] = file_path
+                self._mf_path_to_iid[file_path.lower()] = leaf_iid
+                self._mf_top_level_iids.add(leaf_iid)
             # Set correct folder symbol now that all children exist
             self._mf_tree.set(iid, "check", self._mf_check_symbol(iid))
 
         for top in sorted(k for k in tree_dict if k != "__files__"):
-            insert_node("", top, tree_dict[top])
+            insert_node("", top, tree_dict[top], "")
         # Root-level files (unlikely but handle anyway)
         for fname, rel_key, rel_str in sorted(tree_dict.get("__files__", [])):
-            checked = rel_key not in excluded_keys
+            post_key = _rel_key_after_strip(rel_key)
+            checked = post_key not in excluded_keys
             tag = _conflict_tag(rel_key)
+            tags: tuple[str, ...] = (tag,) if tag else ()
+            if not checked:
+                tags = tags + ("mf_disabled",)
             leaf_iid = self._mf_tree.insert(
                 "", "end", text=fname,
-                values=(self._MF_CHECK if checked else self._MF_UNCHECK,),
-                tags=(tag,) if tag else (),
+                values=("", self._MF_CHECK if checked else self._MF_UNCHECK),
+                tags=tags,
             )
             self._mf_checked[leaf_iid] = checked
-            self._mf_iid_to_key[leaf_iid] = rel_key
+            self._mf_iid_to_key[leaf_iid] = post_key
             self._mf_iid_to_relstr[leaf_iid] = rel_str
+            self._mf_iid_to_path[leaf_iid] = fname
+            self._mf_path_to_iid[fname.lower()] = leaf_iid
+            self._mf_top_level_iids.add(leaf_iid)
+
+        # Render synthetic greyed rows for strip entries that don't appear as
+        # depth-0 rows in the current tree, so the user can un-strip them.
+        self._mf_insert_stripped_placeholders()
+
+        # Apply Top Level column visuals.
+        self._mf_refresh_top_level_column()
+
+        # Grey any folder whose leaves are all disabled.
+        for fid in self._mf_folder_iids:
+            leaves = self._mf_all_leaf_iids(fid)
+            all_off = bool(leaves) and not any(
+                self._mf_checked.get(l, True) for l in leaves
+            )
+            if all_off:
+                self._mf_apply_disabled_tag(fid, True)
+
+        # Restore expand state + scroll from the previous render of this mod.
+        prev = getattr(self, "_mf_prev_expanded_paths", None)
+        if prev:
+            for iid, path in self._mf_iid_to_path.items():
+                if path and path.lower() in prev:
+                    try:
+                        self._mf_tree.item(iid, open=True)
+                    except Exception:
+                        pass
+        prev_scroll = getattr(self, "_mf_prev_scroll", None)
+        if prev_scroll:
+            try:
+                self._mf_tree.yview_moveto(prev_scroll[0])
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Archive tab — BSA contents viewer (Bethesda games only)

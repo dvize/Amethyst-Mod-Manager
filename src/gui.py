@@ -1252,7 +1252,6 @@ class App(ctk.CTk):
         self._exe_config_panel     = None
         self._exe_filter_panel     = None
         self._conflicts_panel      = None
-        self._deploy_paths_panel   = None
         self._disable_plugins_panel = None
         self._optional_mods_panel = None
         self._vramr_panel = None
@@ -1827,25 +1826,6 @@ class App(ctk.CTk):
 
     def hide_conflicts_panel(self):
         self._hide_plugin_overlay("_conflicts_panel")
-
-    # -- Deploy paths panel (overlays mod list) -----------------------------
-
-    def show_deploy_paths_panel(self, mod_name, mod_folder,
-                                current_prefixes, use_path_format, on_save):
-        from gui.dialogs import DeploymentPathsPanel
-        def _factory():
-            def _done(panel):
-                self._hide_plugin_overlay("_deploy_paths_panel")
-            return DeploymentPathsPanel(
-                self._mod_panel_container,
-                mod_name=mod_name, mod_folder=mod_folder,
-                current_prefixes=current_prefixes, use_path_format=use_path_format,
-                on_save=on_save, on_done=_done,
-            )
-        self._show_plugin_overlay("_deploy_paths_panel", _factory)
-
-    def hide_deploy_paths_panel(self):
-        self._hide_plugin_overlay("_deploy_paths_panel")
 
     # -- Ini file editor panel (overlays mod list) --------------------------
 
