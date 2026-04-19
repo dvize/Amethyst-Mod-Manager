@@ -3067,21 +3067,25 @@ class PluginPanel(ctk.CTkFrame):
         # saved strip prefixes. This lets the user tick nested folders as
         # the new top level without first needing a full rescan.
         files: dict[str, str] = {}   # rel_key → rel_str (raw, no strip applied)
-        staging: Path | None = None
-        if self._game is not None and hasattr(self._game, "get_effective_mod_staging_path"):
-            try:
-                staging = Path(self._game.get_effective_mod_staging_path())
-            except Exception:
-                staging = None
-        if staging is not None:
-            mod_dir = staging / mod_name
-            if mod_dir.is_dir():
-                from Utils.filemap import _scan_dir
-                _name, _normal, _root, _invalid = _scan_dir(
-                    mod_name, str(mod_dir),
-                )
-                files.update(_normal)
-                files.update(_root)
+        mod_dir: Path | None = None
+        if self._game is not None:
+            if mod_name == _OVERWRITE_NAME and hasattr(self._game, "get_effective_overwrite_path"):
+                try:
+                    mod_dir = Path(self._game.get_effective_overwrite_path())
+                except Exception:
+                    mod_dir = None
+            elif hasattr(self._game, "get_effective_mod_staging_path"):
+                try:
+                    mod_dir = Path(self._game.get_effective_mod_staging_path()) / mod_name
+                except Exception:
+                    mod_dir = None
+        if mod_dir is not None and mod_dir.is_dir():
+            from Utils.filemap import _scan_dir
+            _name, _normal, _root, _invalid = _scan_dir(
+                mod_name, str(mod_dir),
+            )
+            files.update(_normal)
+            files.update(_root)
 
         if not files:
             self._mf_tree.insert("", "end", text="  (no files found — try refreshing)", tags=("dim",))

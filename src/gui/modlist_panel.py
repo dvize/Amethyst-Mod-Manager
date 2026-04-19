@@ -2449,6 +2449,40 @@ class ModListPanel(ctk.CTkFrame):
                         c.itemconfigure(self._pool_bsa_dot1[s], state="hidden")
                         c.itemconfigure(self._pool_bsa_dot2[s], state="hidden")
                         c.itemconfigure(self._pool_bsa_sep[s], state="hidden")
+                        # Show "Modified in Mod Files tab" flag for Overwrite if applicable
+                        if (self._mod_is_modified_in_mf(OVERWRITE_NAME)
+                                and self._icon_disabled_files):
+                            c.coords(self._pool_flag_icon[s],
+                                     _FLAG_X + _FLAG_W // 2, y_mid)
+                            c.itemconfigure(self._pool_flag_icon[s],
+                                            image=self._icon_disabled_files,
+                                            state="normal")
+                        else:
+                            c.itemconfigure(self._pool_flag_icon[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_icon2[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_icon3[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_icon4[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_star[s], state="hidden")
+                    elif is_overwrite:
+                        # No conflict overrides — still show modified flag if present.
+                        c.itemconfigure(self._pool_conflict_icon1[s], state="hidden")
+                        c.itemconfigure(self._pool_conflict_icon2[s], state="hidden")
+                        c.itemconfigure(self._pool_bsa_dot1[s], state="hidden")
+                        c.itemconfigure(self._pool_bsa_dot2[s], state="hidden")
+                        c.itemconfigure(self._pool_bsa_sep[s], state="hidden")
+                        if (self._mod_is_modified_in_mf(OVERWRITE_NAME)
+                                and self._icon_disabled_files):
+                            c.coords(self._pool_flag_icon[s],
+                                     _FLAG_X + _FLAG_W // 2, y_mid)
+                            c.itemconfigure(self._pool_flag_icon[s],
+                                            image=self._icon_disabled_files,
+                                            state="normal")
+                        else:
+                            c.itemconfigure(self._pool_flag_icon[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_icon2[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_icon3[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_icon4[s], state="hidden")
+                        c.itemconfigure(self._pool_flag_star[s], state="hidden")
                     elif _sep_is_collapsed:
                         # Aggregate conflict/flag state from all mods in this block
                         _blk = self._sep_block_range(i)
