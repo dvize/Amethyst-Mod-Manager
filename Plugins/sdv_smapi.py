@@ -431,7 +431,13 @@ class SmapiWizardFixed(ctk.CTkFrame):
 
             self._set_status("Extracting SMAPI archive\u2026")
             self._log(f"SMAPI Wizard: extracting {archive.name}")
-            tmp_dir = Path(tempfile.mkdtemp(prefix="smapi_install_"))
+            # Extract under ~/.cache, not /tmp. Inside a flatpak /tmp is a
+            # private sandbox mount the host can't see, so flatpak-spawn
+            # --host bash /tmp/... fails with "No such file or directory".
+            # ~/.cache is shared because the flatpak has --filesystem=home.
+            cache_root = Path.home() / ".cache" / "amethyst-smapi"
+            cache_root.mkdir(parents=True, exist_ok=True)
+            tmp_dir = Path(tempfile.mkdtemp(prefix="smapi_install_", dir=str(cache_root)))
             _extract_zip(archive, tmp_dir)
 
             script: Path | None = None
