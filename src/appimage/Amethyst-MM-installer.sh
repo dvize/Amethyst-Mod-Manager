@@ -48,20 +48,14 @@ else
     JSON="$(wget -qO- "$URL")"
 fi
 
-if [ "$ALLOW_PRERELEASE" = "1" ]; then
-    # Pre-release path: /releases returns an array, newest-first by created_at.
-    # Pick the first non-draft release. Requires python3 (present on Steam Deck
-    # and virtually all desktop Linux installs).
-    if ! command -v python3 &>/dev/null; then
-        echo "Error: --prerelease requires python3 to parse the releases list." >&2
-        exit 1
-    fi
-    LATEST_VERSION="$(echo "$JSON" | python3 -c "import sys,json; rs=[r for r in json.load(sys.stdin) if not r.get('draft')]; print(rs[0]['tag_name'].lstrip('v') if rs else '')")"
-    APPIMAGE_URL="$(echo "$JSON" | python3 -c "import sys,json; rs=[r for r in json.load(sys.stdin) if not r.get('draft')]; assets=rs[0].get('assets',[]) if rs else []; print(next((a['browser_download_url'] for a in assets if a['name'].endswith('.AppImage')), ''))")"
-else
-    LATEST_VERSION="$(echo "$JSON" | grep -o '"tag_name" *: *"[^"]*"' | sed 's/.*: *"v\{0,1\}\([^"]*\)"/\1/' | head -1)"
-    APPIMAGE_URL="$(echo "$JSON" | grep -o '"browser_download_url" *: *"[^"]*\.AppImage"' | sed 's/.*: *"\([^"]*\)"/\1/' | head -1)"
-fi
+# Both paths parse with the same grep/sed pipeline. On /releases/latest the
+# response is a single object; on /releases?per_page=N it's an array sorted
+# newest-first by published_at — so head -1 picks the newest release in both
+# cases. We deliberately avoid python3 here: the installer is invoked by the
+# running AppImage, whose env can leave the bundled python's sys.path pointing
+# at a now-unmounted FUSE path, causing import failures.
+LATEST_VERSION="$(echo "$JSON" | grep -o '"tag_name" *: *"[^"]*"' | sed 's/.*: *"v\{0,1\}\([^"]*\)"/\1/' | head -1)"
+APPIMAGE_URL="$(echo "$JSON" | grep -o '"browser_download_url" *: *"[^"]*\.AppImage"' | sed 's/.*: *"\([^"]*\)"/\1/' | head -1)"
 if [ -z "$APPIMAGE_URL" ]; then
     echo "Error: Could not find an AppImage asset in the latest release." >&2
     exit 1
