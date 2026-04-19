@@ -1,11 +1,12 @@
 - v1.2.10
+- Added a opt in to pre releases option in the settings menu, When toggled on the update checker will always use the latest pre release if available
 - Added a search content option to the ini files tab, This can search and highlight specific strings within all text based files in the staging folder
 - Script extenders no longer appear in the run exe dropdown, These don't work if you run them this way
 - Custom prefixes used by applications are now always filtered out of the run exe dropdown
 - Tweaks to the right click context menu in the modlist panel to stop it staying open when clicking out of it
 - You can now set a game path when the game binary is not found, it will display a warning instead
 - Fixed scrollbar/mousewheel speeds in the flatpak to be the same as the appimage build
-
+- Deferred fomods in collections now install in phase order
 
 - v1.2.9
 - The collection install window is now more informative, Shows currently downloading mods and mods being extracted
