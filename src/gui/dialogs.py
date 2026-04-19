@@ -185,6 +185,62 @@ def confirm_deploy_appdata(parent, game) -> bool:
     return alert.get() == "Deploy anyway"
 
 
+def confirm_cet_symlink(parent, game) -> bool:
+    """Warn when Cyber Engine Tweaks is staged but deploy mode is symlink.
+
+    CET's ASI loader refuses to load symlinked `cyber_engine_tweaks.asi`,
+    so the mod silently fails. Scans the effective filemap for the asi and
+    only warns for Cyberpunk 2077 with SYMLINK mode.
+
+    Returns True to proceed, False if the user cancels.
+    """
+    if getattr(game, "name", "") != "Cyberpunk 2077":
+        return True
+    try:
+        from Utils.deploy import LinkMode
+        if not hasattr(game, "get_deploy_mode"):
+            return True
+        if game.get_deploy_mode() != LinkMode.SYMLINK:
+            return True
+    except Exception:
+        return True
+    try:
+        filemap_path = game.get_effective_filemap_path()
+    except Exception:
+        return True
+    if not filemap_path or not Path(filemap_path).is_file():
+        return True
+    found = False
+    try:
+        with Path(filemap_path).open(encoding="utf-8") as f:
+            for line in f:
+                if "\t" not in line:
+                    continue
+                rel_str, _ = line.rstrip("\n").split("\t", 1)
+                if rel_str.lower().endswith("cyber_engine_tweaks.asi"):
+                    found = True
+                    break
+    except Exception:
+        return True
+    if not found:
+        return True
+    alert = CTkAlert(
+        state="warning",
+        title="Cyber Engine Tweaks requires Hardlink mode",
+        body_text=(
+            "Cyber Engine Tweaks is enabled, but the deploy mode is set to "
+            "Symlink.\n\nCET will not load from a symlinked "
+            "cyber_engine_tweaks.asi — switch the deploy mode to Hardlink "
+            "for CET to work.\n\nDeploy anyway?"
+        ),
+        btn1="Deploy anyway",
+        btn2="Cancel",
+        parent=parent,
+        width=640,
+    )
+    return alert.get() == "Deploy anyway"
+
+
 from gui.text_utils import build_tree_str as _build_tree_str
 
 

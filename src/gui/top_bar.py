@@ -41,6 +41,7 @@ from gui.dialogs import (
     _MewgenicsLaunchCommandDialog,
     ask_yes_no,
     confirm_deploy_appdata,
+    confirm_cet_symlink,
 )
 from gui.ctk_components import CTkAlert
 from gui.path_utils import pick_file_mod_archive, pick_files_mod_archive
@@ -975,6 +976,22 @@ class TopBar(ctk.CTkFrame):
                         )
                     except Exception as fm_err:
                         _tlog(f"Filemap rebuild warning: {fm_err}")
+
+                # CET + symlink warning (Cyberpunk 2077 only, after filemap rebuild)
+                _cet_result = {"proceed": True}
+                _cet_done = threading.Event()
+                def _ask_cet():
+                    try:
+                        _cet_result["proceed"] = confirm_cet_symlink(
+                            self.winfo_toplevel(), game
+                        )
+                    finally:
+                        _cet_done.set()
+                self.after(0, _ask_cet)
+                _cet_done.wait()
+                if not _cet_result["proceed"]:
+                    _tlog("Deploy: cancelled — CET requires Hardlink mode.")
+                    return
 
                 # Backup modlist/plugins before deploy
                 profile_dir = modlist_path.parent
