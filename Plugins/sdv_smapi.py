@@ -125,34 +125,87 @@ def _build_wrapper(script: Path, wrapper_dir: Path) -> Path:
     return wrapper
 
 
-def _find_terminal_cmd(wrapper: str) -> list[str] | None:
-    """Return a command list to run *wrapper* inside a terminal emulator,
-    preferring flatpak-spawn --host when running inside a flatpak."""
-    candidates = [
-        ("konsole", ["konsole", "--hold", "-e", "bash", wrapper]),
-        ("alacritty", ["alacritty", "-e", "bash", wrapper]),
-        ("gnome-terminal", ["gnome-terminal", "--", "bash", wrapper]),
-        ("xfce4-terminal", ["xfce4-terminal", "--hold", "-e", f"bash {wrapper}"]),
-        ("kitty", ["kitty", "--hold", "bash", wrapper]),
-        ("xterm", ["xterm", "-hold", "-e", "bash", wrapper]),
+def _terminal_candidates(wrapper: str) -> list[tuple[str, list[str]]]:
+    return [
+        ("konsole",         ["konsole", "--hold", "-e", "bash", wrapper]),
+        ("alacritty",       ["alacritty", "-e", "bash", wrapper]),
+        ("gnome-terminal",  ["gnome-terminal", "--wait", "--", "bash", wrapper]),
+        ("xfce4-terminal",  ["xfce4-terminal", "--hold", "-e", f"bash {wrapper}"]),
+        ("kitty",           ["kitty", "--hold", "bash", wrapper]),
+        ("ptyxis",          ["ptyxis", "--new-window", "--", "bash", wrapper]),
+        ("xterm",           ["xterm", "-hold", "-e", "bash", wrapper]),
     ]
 
-    in_flatpak = _is_flatpak()
+
+def _clean_env() -> dict:
+    """Copy of os.environ with AppImage / bundle vars removed.
+
+    AppImage exports LD_LIBRARY_PATH, QT_PLUGIN_PATH, PYTHONHOME etc. pointing
+    into its bundle. Inherited by konsole, those make it load the wrong Qt
+    libs and exit immediately. Strip them so the terminal uses host libraries.
+    """
+    env = os.environ.copy()
+    for var in (
+        "LD_LIBRARY_PATH", "LD_PRELOAD",
+        "PYTHONHOME", "PYTHONPATH",
+        "QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "GTK_PATH", "GIO_MODULE_DIR", "GSETTINGS_SCHEMA_DIR",
+        "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR",
+        "XDG_DATA_DIRS_APPIMAGE", "PERLLIB", "GCONV_PATH",
+        "APPDIR", "APPIMAGE", "ARGV0", "OWD",
+    ):
+        env.pop(var, None)
+    env.setdefault("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+    return env
+
+
+def _find_terminal_cmd(wrapper: str, log_fn=None) -> tuple[list[str], dict] | None:
+    """Return (argv, env) for a terminal that actually launches, or None.
+
+    Probes each candidate with `<bin> --version` under the cleaned env so that
+    a konsole which is on PATH but fails to start (library conflict) doesn't
+    silently eat the install.
+    """
+    log = log_fn or (lambda m: None)
+    env = _clean_env()
     have_spawn = shutil.which("flatpak-spawn") is not None
 
-    # 1) When inside a flatpak, try the host's terminals first via flatpak-spawn.
-    if in_flatpak and have_spawn:
-        for _exe, cmd in candidates:
-            return ["flatpak-spawn", "--host"] + cmd  # first candidate wins
-        # fallthrough if candidates list is ever empty
-    # 2) Direct detection (host install).
-    for exe, cmd in candidates:
-        if shutil.which(exe):
-            return cmd
-    # 3) Last-ditch flatpak-spawn attempt even if we didn't detect flatpak env.
+    def _probe(exe: str, use_host: bool) -> bool:
+        cmd = (["flatpak-spawn", "--host"] if use_host else []) + [exe, "--version"]
+        try:
+            r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            log(f"SMAPI Wizard: probe {exe} (host={use_host}) failed: {exc}")
+            return False
+        if r.returncode != 0:
+            log(f"SMAPI Wizard: probe {exe} (host={use_host}) rc={r.returncode} "
+                f"stderr={r.stderr.strip()[:200]}")
+            return False
+        return True
+
+    candidates = _terminal_candidates(wrapper)
+
+    for exe, argv in candidates:
+        if shutil.which(exe) and _probe(exe, use_host=False):
+            log(f"SMAPI Wizard: selected host terminal: {exe}")
+            return argv, env
+
     if have_spawn:
-        for _exe, cmd in candidates:
-            return ["flatpak-spawn", "--host"] + cmd
+        for exe, argv in candidates:
+            if _probe(exe, use_host=True):
+                log(f"SMAPI Wizard: selected host terminal via flatpak-spawn: {exe}")
+                return ["flatpak-spawn", "--host"] + argv, env
+
+    for generic in ("x-terminal-emulator", "xdg-terminal-exec"):
+        if shutil.which(generic):
+            log(f"SMAPI Wizard: falling back to {generic}")
+            return [generic, "-e", "bash", wrapper], env
+
+    for exe, argv in candidates:
+        if shutil.which(exe):
+            log(f"SMAPI Wizard: no terminal passed probe, forcing {exe}")
+            return argv, env
+
     return None
 
 
@@ -362,18 +415,28 @@ class SmapiWizardFixed(ctk.CTkFrame):
             )
             self._log("SMAPI Wizard: launching SMAPI installer in terminal")
 
-            terminal_cmd = _find_terminal_cmd(str(wrapper))
-            if terminal_cmd is None:
+            result = _find_terminal_cmd(str(wrapper), log_fn=self._log)
+            if result is None:
                 raise RuntimeError(
                     "No terminal emulator found (tried konsole, alacritty, gnome-terminal, "
-                    "xfce4-terminal, kitty, xterm). Please run the installer manually:\n"
+                    "xfce4-terminal, kitty, ptyxis, xterm). Please run the installer manually:\n"
                     f"  {wrapper}"
                 )
+            terminal_cmd, term_env = result
 
             self._log(f"SMAPI Wizard: terminal cmd: {' '.join(terminal_cmd)}")
-            proc = subprocess.run(terminal_cmd, cwd=str(script.parent))
+            proc = subprocess.run(
+                terminal_cmd,
+                cwd=str(script.parent),
+                env=term_env,
+                capture_output=True,
+                text=True,
+            )
             if proc.returncode != 0:
                 self._log(f"SMAPI Wizard: terminal exited with code {proc.returncode}")
+                stderr = (proc.stderr or "").strip()
+                if stderr:
+                    self._log(f"SMAPI Wizard: terminal stderr: {stderr[:500]}")
 
             self._set_status(
                 "SMAPI installer finished.\n\n"
