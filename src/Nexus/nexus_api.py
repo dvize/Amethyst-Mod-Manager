@@ -177,6 +177,7 @@ class NexusRateLimits:
     daily_remaining: int = -1
     hourly_limit: int = -1
     daily_limit: int = -1
+    last_updated: Optional[datetime] = None
 
 
 @dataclass
@@ -500,14 +501,21 @@ class NexusAPI:
     def _update_rate_limits(self, resp: requests.Response) -> None:
         """Parse rate-limit headers from the response."""
         h = resp.headers
+        updated = False
         if "x-rl-hourly-remaining" in h:
             self._rate.hourly_remaining = int(h["x-rl-hourly-remaining"])
+            updated = True
         if "x-rl-daily-remaining" in h:
             self._rate.daily_remaining = int(h["x-rl-daily-remaining"])
+            updated = True
         if "x-rl-hourly-limit" in h:
             self._rate.hourly_limit = int(h["x-rl-hourly-limit"])
+            updated = True
         if "x-rl-daily-limit" in h:
             self._rate.daily_limit = int(h["x-rl-daily-limit"])
+            updated = True
+        if updated:
+            self._rate.last_updated = datetime.now(timezone.utc)
 
     def _log_response(self, method: str, path: str, resp: requests.Response) -> None:
         """Log request and response status to the app log.

@@ -232,6 +232,30 @@ class StatusBar(ctk.CTkFrame):
             command=self._open_changelog,
         ).pack(side="right", padx=(0, 2), pady=2)
 
+        self._rate_limit_label = ctk.CTkLabel(
+            label_bar, text="Nexus: —", font=FONT_SMALL, text_color=TEXT_DIM,
+        )
+        self._rate_limit_label.pack(side="right", padx=(0, 8), pady=2)
+
+        from gui.tk_tooltip import TkTooltip
+        self._rate_limit_tooltip = TkTooltip(
+            self, bg=BG_HEADER, fg=TEXT_MAIN, font=FONT_SMALL,
+        )
+        self._rate_limit_tooltip_text = "Nexus API rate limits — no data yet."
+
+        def _rl_enter(event):
+            self._rate_limit_tooltip.show(
+                event.x_root + 12, event.y_root + 12,
+                self._rate_limit_tooltip_text,
+            )
+
+        def _rl_leave(_event):
+            self._rate_limit_tooltip.hide()
+
+        self._rate_limit_label.bind("<Enter>", _rl_enter, add="+")
+        self._rate_limit_label.bind("<Leave>", _rl_leave, add="+")
+        self._schedule_rate_limit_refresh()
+
         self._progress_popup: CTkProgressPopup | None = None
         self._progress_bind_id: str | None = None
 
@@ -255,6 +279,67 @@ class StatusBar(ctk.CTkFrame):
         mod_panel = getattr(app, "_mod_panel", None)
         if mod_panel is not None:
             mod_panel._on_changelog()
+
+    def _schedule_rate_limit_refresh(self):
+        """Periodically refresh the rate-limit label from cached API state.
+
+        Reads `api.rate_limits` only — never makes a network call. Values are
+        captured passively from response headers on every Nexus API request.
+        """
+        self._refresh_rate_limit_label()
+        try:
+            self.after(10_000, self._schedule_rate_limit_refresh)
+        except tk.TclError:
+            pass
+
+    def _refresh_rate_limit_label(self):
+        try:
+            label = self._rate_limit_label
+        except AttributeError:
+            return
+        if not label.winfo_exists():
+            return
+        app = self.winfo_toplevel()
+        api = getattr(app, "_nexus_api", None)
+        r = getattr(api, "rate_limits", None) if api is not None else None
+        if r is None or (r.hourly_remaining < 0 and r.daily_remaining < 0):
+            label.configure(text="Nexus: —", text_color=TEXT_DIM)
+            self._rate_limit_tooltip_text = (
+                "Nexus API rate limits — no data yet.\n"
+                "Values will appear after the first API request."
+            )
+            return
+
+        h = r.hourly_remaining
+        d = r.daily_remaining
+        h_str = f"{h:,}" if h >= 0 else "—"
+        d_str = f"{d:,}" if d >= 0 else "—"
+        label.configure(text=f"Nexus H:{h_str}  D:{d_str}")
+        if h >= 0 and r.hourly_limit > 0 and h < r.hourly_limit * 0.1:
+            label.configure(text_color=TEXT_WARN)
+        elif h == 0 or d == 0:
+            label.configure(text_color=TEXT_ERR)
+        else:
+            label.configure(text_color=TEXT_DIM)
+
+        if r.last_updated is not None:
+            age = (datetime.now(r.last_updated.tzinfo) - r.last_updated).total_seconds()
+            if age < 60:
+                age_str = f"{int(age)}s ago"
+            elif age < 3600:
+                age_str = f"{int(age // 60)}m ago"
+            else:
+                age_str = f"{int(age // 3600)}h ago"
+        else:
+            age_str = "unknown"
+        hl = f"{r.hourly_limit:,}" if r.hourly_limit > 0 else "—"
+        dl = f"{r.daily_limit:,}" if r.daily_limit > 0 else "—"
+        self._rate_limit_tooltip_text = (
+            f"Nexus API rate limits\n"
+            f"Hourly: {h_str} / {hl} remaining\n"
+            f"Daily:  {d_str} / {dl} remaining\n"
+            f"Last updated: {age_str}"
+        )
 
     def _open_settings(self):
         root = self.winfo_toplevel()
