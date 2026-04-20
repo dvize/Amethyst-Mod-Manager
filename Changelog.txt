@@ -1,3 +1,12 @@
+- v1.2.11
+- Added Red Dead Redemption 2
+- Moved the set deployment paths window/option to the mod files tab
+- Tweaks/fixes to reverse priority ordering
+- Fixed the enter keybind disabling/enabling a mod when a modal is open
+- Nexus api rate limit is now displayed on the status bar
+- Added a warning when trying to sylink with cyber engine tweaks
+- Copying mods to another profile now shows progress and also copies over fomod options
+
 - v1.2.10
 - Added a opt in to pre releases option in the settings menu, When toggled on the update checker will always use the latest pre release if available
 - Added a search content option to the ini files tab, This can search and highlight specific strings within all text based files in the staging folder
