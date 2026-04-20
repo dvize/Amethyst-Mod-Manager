@@ -65,6 +65,12 @@ class FomodDialog(ctk.CTkFrame):
 
     IMAGE_WIDTH   = 300
     IMAGE_HEIGHT  = 210
+    # Fraction of the overlay width allotted to the left (image + description)
+    # panel. The image scales to fill this panel's width.
+    LEFT_PANEL_FRAC = 0.35
+    LEFT_PANEL_MIN  = 260
+    LEFT_PANEL_MAX  = 900
+    IMAGE_ASPECT    = 300 / 210  # width / height ratio used for image area
 
     def __init__(self, parent, config: ModuleConfig,
                  mod_root: str,
@@ -93,6 +99,11 @@ class FomodDialog(ctk.CTkFrame):
         # Prevent CTkImage GC
         self._current_image: Optional[ctk.CTkImage] = None
         self._current_image_path: Optional[str] = None
+        # Currently displayed plugin (so we can reload its image on resize)
+        self._current_plugin: Optional[Plugin] = None
+        # Cached last-computed image box; used to skip unnecessary reloads
+        self._last_image_box: tuple[int, int] = (0, 0)
+        self._resize_after_id: Optional[str] = None
         self.result: Optional[dict] = None
 
         self._build_ui()
@@ -180,16 +191,23 @@ class FomodDialog(ctk.CTkFrame):
     def _build_content_area(self):
         content = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         content.grid(row=1, column=0, sticky="nsew")
-        content.grid_columnconfigure(0, weight=0, minsize=310)
+        # Left panel is resized imperatively by _on_content_resize via minsize,
+        # so it stays at the computed width while the right panel absorbs extra.
+        content.grid_columnconfigure(0, weight=0, minsize=self.LEFT_PANEL_MIN)
         content.grid_columnconfigure(1, weight=0, minsize=1)
         content.grid_columnconfigure(2, weight=1)
         content.grid_rowconfigure(0, weight=1)
+        self._content_frame = content
 
         # --- Left panel: image + description ---
         left = ctk.CTkFrame(content, fg_color=BG_PANEL, corner_radius=0)
         left.grid(row=0, column=0, sticky="nsew")
         left.grid_rowconfigure(1, weight=1)
         left.grid_columnconfigure(0, weight=1)
+        # Prevent the image's natural size from forcing the frame wider/taller
+        # than the column we've allotted to it.
+        left.grid_propagate(False)
+        self._left_panel = left
 
         self._image_label = ctk.CTkLabel(
             left, text="", fg_color=BG_DEEP,
@@ -198,6 +216,9 @@ class FomodDialog(ctk.CTkFrame):
         )
         self._image_label.grid(row=0, column=0, sticky="ew")
         self._image_label.bind("<Button-1>", self._on_image_click)
+
+        # React to overlay resizes so the image fills the available width.
+        content.bind("<Configure>", self._on_content_resize)
 
         self._desc_box = ctk.CTkTextbox(
             left, fg_color=BG_DEEP, text_color=TEXT_MAIN,
@@ -684,6 +705,8 @@ class FomodDialog(ctk.CTkFrame):
         self._current_image_path = None
 
     def _update_description_and_image(self, plugin: Plugin):
+        self._current_plugin = plugin
+
         # Description
         self._desc_box.configure(state="normal")
         self._desc_box.delete("1.0", "end")
@@ -708,16 +731,42 @@ class FomodDialog(ctk.CTkFrame):
 
     def _clear_left_panel(self):
         self._clear_image()
+        self._current_plugin = None
         self._image_label.configure(text="")
         self._image_label.grid_remove()
         self._desc_box.configure(state="normal")
         self._desc_box.delete("1.0", "end")
         self._desc_box.configure(state="disabled")
 
+    def _current_image_box(self) -> tuple[int, int]:
+        """
+        Return (max_w, max_h) the image should fit in.
+        Width comes from the left panel; height is capped to roughly half the
+        panel's visible height so the description box still has room.
+        """
+        try:
+            panel_w = self._left_panel.winfo_width()
+            panel_h = self._left_panel.winfo_height()
+        except Exception:
+            panel_w, panel_h = 0, 0
+        if panel_w < 2:
+            panel_w = self.LEFT_PANEL_MIN
+        if panel_h < 2:
+            panel_h = self.IMAGE_HEIGHT * 2
+        # Leave a small inset so the image doesn't touch the panel edge
+        max_w = max(1, panel_w - 8)
+        # Cap height at half the panel so description stays visible, but never
+        # smaller than the historical default
+        max_h = max(self.IMAGE_HEIGHT, panel_h // 2)
+        # Also clamp width-derived height via aspect so we don't letterbox
+        aspect_h = int(max_w / self.IMAGE_ASPECT)
+        max_h = min(max_h, aspect_h)
+        return max_w, max(1, max_h)
+
     def _load_image(self, image_os_path: str) -> Optional[ctk.CTkImage]:
         """
         Load an image from mod_root/image_os_path.
-        Returns a CTkImage scaled to fit the display area, or None on failure.
+        Returns a CTkImage scaled to fit the current image box, or None on failure.
         Supports any format PIL can read (PNG, DDS, JPG, BMP, etc.).
         Uses case-insensitive path resolution so Windows-authored FOMOD paths
         work correctly on Linux.
@@ -727,15 +776,67 @@ class FomodDialog(ctk.CTkFrame):
             return None
         try:
             pil_img = PilImage.open(full_path)
-            # Compute display size preserving aspect ratio
+            # Compute display size preserving aspect ratio, fitting the current box.
+            box_w, box_h = self._current_image_box()
+            self._last_image_box = (box_w, box_h)
             orig_w, orig_h = pil_img.size
-            scale = min(self.IMAGE_WIDTH / orig_w, self.IMAGE_HEIGHT / orig_h, 1.0)
+            scale = min(box_w / orig_w, box_h / orig_h, 1.0)
             display_w = max(1, int(orig_w * scale))
             display_h = max(1, int(orig_h * scale))
             return ctk.CTkImage(light_image=pil_img, dark_image=pil_img,
                                 size=(display_w, display_h))
         except Exception:
             return None
+
+    def _on_content_resize(self, event=None):
+        """
+        Resize the left panel based on total overlay width and reload the
+        current image so it fills the new panel width.
+        """
+        try:
+            total_w = self._content_frame.winfo_width()
+        except Exception:
+            return
+        if total_w < 2:
+            return
+
+        target = int(total_w * self.LEFT_PANEL_FRAC)
+        target = max(self.LEFT_PANEL_MIN, min(self.LEFT_PANEL_MAX, target))
+        try:
+            # Pin both minsize AND the left panel's explicit width so a large
+            # CTkImage can't push the column wider than we want.
+            self._content_frame.grid_columnconfigure(0, minsize=target)
+            self._left_panel.configure(width=target)
+            # Also cap the image label so its natural size never exceeds the
+            # allotted column width.
+            self._image_label.configure(width=max(1, target - 8))
+        except Exception:
+            return
+
+        # Debounce image reloads — <Configure> fires many times during a drag.
+        if self._resize_after_id is not None:
+            try:
+                self.after_cancel(self._resize_after_id)
+            except Exception:
+                pass
+        self._resize_after_id = self.after(60, self._reload_image_for_current_size)
+
+    def _reload_image_for_current_size(self):
+        self._resize_after_id = None
+        plugin = self._current_plugin
+        if plugin is None or not plugin.image_os_path:
+            return
+        new_box = self._current_image_box()
+        if new_box == self._last_image_box:
+            return
+        img = self._load_image(plugin.image_os_path)
+        if img is None:
+            return
+        self._clear_image()
+        self._current_image = img
+        self._current_image_path = self._resolve_path_ci(self._mod_root, plugin.image_os_path)
+        self._image_label.configure(image=img, text="")
+        self._image_label.grid()
 
     @staticmethod
     def _resolve_path_ci(base: str, rel: str) -> Optional[str]:
