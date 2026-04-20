@@ -5840,6 +5840,29 @@ class ModListPanel(ctk.CTkFrame):
             parent_dismiss=parent_dismiss, parent_popup=parent_popup,
         )
 
+    def _make_copy_progress_popup(self, target_profile: str, total: int) -> CTkProgressPopup:
+        """Create a progress popup for a copy-to-profile operation."""
+        popup = CTkProgressPopup(
+            self.winfo_toplevel(),
+            title=f"Copying to '{target_profile}'",
+            label="Starting…",
+            message=f"0 / {total}",
+        )
+        # The X button on CTkProgressPopup sets `cancelled` and destroys the window.
+        # The worker thread checks `popup.cancelled` between mods, but mid-copy the
+        # current shutil.copytree finishes before we stop.
+        return popup
+
+    def _finish_copy_popup(self, popup: CTkProgressPopup, copied: int, skipped: int,
+                           target_profile: str, copied_names: list[str]) -> None:
+        """Log result and close the copy progress popup."""
+        self._log(
+            f"Copied {copied} mod(s) → profile '{target_profile}'"
+            + (f" ({skipped} skipped)" if skipped else "")
+        )
+        if popup.winfo_exists():
+            popup.destroy()
+
     def _show_copy_to_profile_picker(self, mod_name: str, profiles: list[str],
                                      parent_dismiss=None,
                                      parent_popup=None) -> tk.Toplevel:
@@ -5896,16 +5919,22 @@ class ModListPanel(ctk.CTkFrame):
                 shutil.rmtree(dest_folder, onexc=_force_remove)
 
         src_profile_dir = self._modlist_path.parent
+        popup = self._make_copy_progress_popup(target_profile, total=1)
+        popup.update_label(mod_name)
+        popup.update_message(f"0 / 1")
 
         def _do_copy():
             try:
                 shutil.copytree(str(src_folder), str(dest_folder))
                 _copy_fomod_choice(src_profile_dir, target_profile_dir, mod_name)
-                self.after(0, lambda: self._log(
-                    f"Copied '{mod_name}' → profile '{target_profile}'"))
+                self.after(0, lambda: self._finish_copy_popup(
+                    popup, 1, 0, target_profile, [mod_name]))
             except Exception as exc:
-                self.after(0, lambda e=exc: show_error(
-                    "Copy Failed", f"Failed to copy mod:\n{e}", parent=self.winfo_toplevel()))
+                self.after(0, lambda e=exc: (
+                    self._finish_copy_popup(popup, 0, 0, target_profile, []),
+                    show_error("Copy Failed", f"Failed to copy mod:\n{e}",
+                               parent=self.winfo_toplevel()),
+                ))
 
         threading.Thread(target=_do_copy, daemon=True).start()
 
@@ -5952,12 +5981,25 @@ class ModListPanel(ctk.CTkFrame):
             for mn in mod_names
         ]
         src_profile_dir = self._modlist_path.parent
+        src_staging_root = self._staging_root
+        total = len(_ordered_mods)
+        popup = self._make_copy_progress_popup(target_profile, total=total)
+
+        def _update_popup(done: int, current: str):
+            if not popup.winfo_exists() or popup.cancelled:
+                return
+            popup.update_label(current)
+            popup.update_message(f"{done} / {total}")
+            popup.update_progress(done / total if total else 1.0)
 
         def _do_copy():
             copied, skipped = 0, 0
             copied_mods: list[tuple[str, bool]] = []
-            for mod_name, enabled in _ordered_mods:
-                src_folder = self._staging_root / mod_name
+            for idx, (mod_name, enabled) in enumerate(_ordered_mods):
+                if popup.winfo_exists() and popup.cancelled:
+                    break
+                self.after(0, _update_popup, idx, mod_name)
+                src_folder = src_staging_root / mod_name
                 if not src_folder.is_dir():
                     skipped += 1
                     continue
@@ -5976,8 +6018,12 @@ class ModListPanel(ctk.CTkFrame):
                     copied += 1
                     copied_mods.append((mod_name, enabled))
                 except Exception as exc:
-                    self.after(0, lambda e=exc, n=mod_name: show_error(
-                        "Copy Failed", f"Failed to copy '{n}':\n{e}", parent=self.winfo_toplevel()))
+                    self.after(0, lambda e=exc, n=mod_name: (
+                        self._finish_copy_popup(popup, copied, skipped,
+                                                target_profile, [m for m, _ in copied_mods]),
+                        show_error("Copy Failed", f"Failed to copy '{n}':\n{e}",
+                                   parent=self.winfo_toplevel()),
+                    ))
                     return
 
             # Insert copied mods into the target profile's modlist,
@@ -5997,9 +6043,8 @@ class ModListPanel(ctk.CTkFrame):
                     entries = new_entries + entries
                     write_modlist(target_modlist, entries)
 
-            self.after(0, lambda c=copied, s=skipped: self._log(
-                f"Copied {c} mod(s) → profile '{target_profile}'"
-                + (f" ({s} skipped)" if s else "")))
+            self.after(0, lambda c=copied, s=skipped: self._finish_copy_popup(
+                popup, c, s, target_profile, [m for m, _ in copied_mods]))
 
         threading.Thread(target=_do_copy, daemon=True).start()
 
