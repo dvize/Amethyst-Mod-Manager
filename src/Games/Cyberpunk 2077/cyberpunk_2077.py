@@ -8,11 +8,18 @@ Mod structure:
 """
 
 import json
-import shutil
 from pathlib import Path
 
 from Games.base_game import BaseGame
-from Utils.deploy import LinkMode, deploy_filemap_to_root, load_per_mod_strip_prefixes, restore_filemap_from_root
+from Utils.deploy import (
+    CustomRule,
+    LinkMode,
+    deploy_custom_rules,
+    deploy_filemap_to_root,
+    load_per_mod_strip_prefixes,
+    restore_custom_rules,
+    restore_filemap_from_root,
+)
 from Utils.config_paths import get_profiles_dir
 from Utils.steam_finder import find_prefix
 
@@ -62,7 +69,7 @@ class Cyberpunk2077(BaseGame):
 
     @property
     def mod_required_top_level_folders(self) -> set[str]:
-        return {"bin", "r6", "archive", "red4ext","engine","mods"}
+        return {"bin", "r6", "archive", "red4ext","engine","mods","tools"}
 
     @property
     def mod_required_file_types(self) -> set[str]:
@@ -88,26 +95,16 @@ class Cyberpunk2077(BaseGame):
         return True
 
     @property
-    def additional_install_logic(self) -> list:
-        """Move loose .archive files to archive/pc/mod (Cyberpunk mod structure)."""
-        return [self._move_loose_archives]
+    def custom_routing_rules(self) -> list[CustomRule]:
+        return [
+            CustomRule(
+                dest="archive/pc/mod",
+                extensions=[".archive"],
+                loose_only=True,
+            ),
+        ]
 
-    def _move_loose_archives(self, dest_root: Path, mod_name: str, log_fn) -> None:
-        """Move loose .archive files (direct children of mod root) into archive/pc/mod."""
-        archive_mod_dir = dest_root / "archive" / "pc" / "mod"
-        archive_mod_dir.mkdir(parents=True, exist_ok=True)
-        to_move = []
-        for path in dest_root.iterdir():
-            if path.is_file() and path.suffix.lower() == ".archive":
-                to_move.append(path)
-        for path in to_move:
-            dest = archive_mod_dir / path.name
-            if dest.exists():
-                dest.unlink()
-            shutil.move(str(path), str(dest))
-        if to_move:
-            log_fn(f"Cyberpunk: moved {len(to_move)} loose .archive file(s) to archive/pc/mod/")
-    
+
     @property
     def frameworks(self) -> dict[str, str]:
         return {"Cyber Engine Tweaks": "bin/x64/plugins/cyber_engine_tweaks.asi",
@@ -240,15 +237,29 @@ class Cyberpunk2077(BaseGame):
                 "Run 'Build Filemap' before deploying."
             )
 
-        _log(f"Transferring mod files into game root ({mode.name}) ...")
         profile_dir = self.get_profile_root() / "profiles" / profile
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)
+
+        custom_rules = self.custom_routing_rules
+        custom_exclude: set[str] = set()
+        if custom_rules:
+            _log("Routing loose .archive files to archive/pc/mod/ ...")
+            custom_exclude = deploy_custom_rules(
+                filemap, game_root, staging,
+                rules=custom_rules,
+                mode=mode,
+                strip_prefixes=self.mod_folder_strip_prefixes,
+                log_fn=_log,
+            )
+
+        _log(f"Transferring mod files into game root ({mode.name}) ...")
         linked_mod, _ = deploy_filemap_to_root(filemap, game_root, staging,
                                                mode=mode,
                                                strip_prefixes=self.mod_folder_strip_prefixes,
                                                per_mod_strip_prefixes=per_mod_strip,
                                                log_fn=_log,
-                                               progress_fn=progress_fn)
+                                               progress_fn=progress_fn,
+                                               exclude=custom_exclude or None)
         _log(f"Deploy complete. {linked_mod} mod file(s) placed in game root.")
 
     def restore(self, log_fn=None, progress_fn=None) -> None:
@@ -260,6 +271,11 @@ class Cyberpunk2077(BaseGame):
 
         filemap   = self.get_effective_filemap_path()
         game_root = self._game_path
+
+        custom_rules = self.custom_routing_rules
+        if custom_rules:
+            _log("Restore: removing custom-routed .archive files ...")
+            restore_custom_rules(filemap, game_root, rules=custom_rules, log_fn=_log)
 
         _log("Restore: removing mod files and restoring vanilla files ...")
         removed = restore_filemap_from_root(filemap, game_root, log_fn=_log)
