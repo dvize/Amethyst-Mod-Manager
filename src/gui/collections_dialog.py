@@ -2840,14 +2840,21 @@ class CollectionDetailDialog(tk.Frame):
                 try:
                     # Group bundle variants under locked separators.
                     # Bundle variants use the <bundle>__<variant> naming convention.
-                    _bundle_map: dict[str, list[ModEntry]] = {}
-                    _non_bundle: list[ModEntry] = []
+                    # A single mod with "__" in its name (e.g. a Nexus filename
+                    # that happens to contain double underscores) is NOT a
+                    # bundle — require 2+ entries sharing the same prefix.
+                    _candidates: dict[str, list[ModEntry]] = {}
+                    _order: list[ModEntry] = []
                     for me in modlist_entries:
+                        _order.append(me)
                         if "__" in me.name:
                             bname = me.name.split("__", 1)[0]
-                            _bundle_map.setdefault(bname, []).append(me)
-                        else:
-                            _non_bundle.append(me)
+                            _candidates.setdefault(bname, []).append(me)
+                    _bundle_map: dict[str, list[ModEntry]] = {
+                        k: v for k, v in _candidates.items() if len(v) >= 2
+                    }
+                    _bundle_members = {id(e) for vs in _bundle_map.values() for e in vs}
+                    _non_bundle = [e for e in _order if id(e) not in _bundle_members]
                     # Rebuild: non-bundle entries first, then bundle blocks
                     final_entries: list[ModEntry] = list(_non_bundle)
                     for bname, variants in _bundle_map.items():
@@ -4150,14 +4157,21 @@ class CollectionDetailDialog(tk.Frame):
             ]
             if modlist_entries:
                 try:
-                    _bundle_map: dict[str, list[ModEntry]] = {}
-                    _non_bundle: list[ModEntry] = []
+                    # Only treat <prefix>__<variant> names as bundle variants
+                    # when 2+ entries share the same prefix. Lone mods with
+                    # "__" in their Nexus filenames must not be promoted.
+                    _candidates: dict[str, list[ModEntry]] = {}
+                    _order: list[ModEntry] = []
                     for me in modlist_entries:
+                        _order.append(me)
                         if "__" in me.name:
                             bname = me.name.split("__", 1)[0]
-                            _bundle_map.setdefault(bname, []).append(me)
-                        else:
-                            _non_bundle.append(me)
+                            _candidates.setdefault(bname, []).append(me)
+                    _bundle_map: dict[str, list[ModEntry]] = {
+                        k: v for k, v in _candidates.items() if len(v) >= 2
+                    }
+                    _bundle_members = {id(e) for vs in _bundle_map.values() for e in vs}
+                    _non_bundle = [e for e in _order if id(e) not in _bundle_members]
                     final_entries: list[ModEntry] = list(_non_bundle)
                     for bname, variants in _bundle_map.items():
                         sep_name = f"{bname}_separator"
