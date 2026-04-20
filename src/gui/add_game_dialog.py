@@ -115,6 +115,7 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         self._auto_deploy_var = tk.BooleanVar(value=False)
         self._archive_invalidation_var = tk.BooleanVar(value=True)
         self._profile_ini_files_var = tk.BooleanVar(value=False)
+        self._patch_version_var = tk.StringVar(value="8")
 
         # Optional: when embedded in a modal CTkToplevel, set this to that
         # window so _run_folder_picker can release/re-acquire the grab.
@@ -149,6 +150,8 @@ class ReconfigureGamePanel(ctk.CTkFrame):
             self._archive_invalidation_var.set(game.archive_invalidation)
             if hasattr(game, "profile_ini_files"):
                 self._profile_ini_files_var.set(game.profile_ini_files)
+            if hasattr(game, "get_patch_version"):
+                self._patch_version_var.set(str(game.get_patch_version()))
         else:
             self._start_scan()
             default_root = load_default_staging_path()
@@ -413,6 +416,30 @@ class ReconfigureGamePanel(ctk.CTkFrame):
                 font=FONT_NORMAL, text_color=TEXT_MAIN,
                 fg_color=ACCENT, hover_color=ACCENT_HOV,
             ).grid(row=20, column=0, sticky="w", padx=16, pady=(0, 8))
+
+        if hasattr(self._game, "get_patch_version"):
+            ctk.CTkLabel(
+                body, text="Game Patch Version",
+                font=FONT_BOLD, text_color=TEXT_SEP, anchor="w"
+            ).grid(row=21, column=0, sticky="ew", padx=16, pady=(6, 2))
+            ctk.CTkLabel(
+                body,
+                text=("Select the patch level your game is running. "
+                      "Controls the modsettings.lsx format written on deploy "
+                      "(Patch 8 = GustavX campaign, Patch 7 = Gustav campaign, "
+                      "Patch 6 = legacy ModOrder schema)."),
+                font=FONT_SMALL, text_color=TEXT_DIM, wraplength=scaled(560),
+                anchor="w", justify="left",
+            ).grid(row=22, column=0, sticky="ew", padx=16, pady=(0, 4))
+            _patch_row = ctk.CTkFrame(body, fg_color="transparent")
+            _patch_row.grid(row=23, column=0, sticky="w", padx=16, pady=(0, 10))
+            for label, value in (("Patch 8", "8"), ("Patch 7", "7"), ("Patch 6", "6")):
+                ctk.CTkRadioButton(
+                    _patch_row, text=label,
+                    variable=self._patch_version_var, value=value,
+                    font=FONT_NORMAL, text_color=TEXT_MAIN,
+                    fg_color=ACCENT, hover_color=ACCENT_HOV,
+                ).pack(side="left", padx=(0, 20))
 
         # Button bar
         btn_bar = ctk.CTkFrame(self, fg_color=BG_PANEL, corner_radius=0, height=52)
@@ -1250,6 +1277,11 @@ class ReconfigureGamePanel(ctk.CTkFrame):
         self._game.archive_invalidation = self._archive_invalidation_var.get()
         if hasattr(self._game, "set_profile_ini_files"):
             self._game.set_profile_ini_files(self._profile_ini_files_var.get())
+        if hasattr(self._game, "set_patch_version"):
+            try:
+                self._game.set_patch_version(int(self._patch_version_var.get()))
+            except (TypeError, ValueError):
+                self._game.set_patch_version(8)
         _create_profile_structure(self._game)
         self.result = self._found_path
 

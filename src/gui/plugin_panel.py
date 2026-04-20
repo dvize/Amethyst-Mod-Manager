@@ -554,23 +554,32 @@ class PluginPanel(ctk.CTkFrame):
             game_exe_path: Path | None = None
 
             if game is not None:
-                # 0. Add the game's own exe (exe_name resolved against game_path)
+                # 0. Add the game's own exe (exe_name resolved against game_path).
+                #    Also try exe_name_alts so native Linux binaries (e.g. bin/bg3)
+                #    are picked up when the Windows exe isn't installed.
                 game_path = game.get_game_path() if hasattr(game, "get_game_path") else None
                 exe_name = game.exe_name if hasattr(game, "exe_name") else None
-                if game_path and exe_name:
-                    candidate = game_path / exe_name
-                    if candidate.is_file():
-                        game_exe_path = candidate
-                        exes.append(candidate)
+                exe_name_alts = list(getattr(game, "exe_name_alts", []) or [])
+                candidates_rel = [n for n in [exe_name, *exe_name_alts] if n]
+                if game_path and candidates_rel:
+                    for rel in candidates_rel:
+                        candidate = game_path / rel
+                        if candidate.is_file():
+                            game_exe_path = candidate
+                            exes.append(candidate)
+                            break
                     else:
-                        # Fallback: search recursively for the bare exe name
+                        # Fallback: search recursively for any of the bare exe names
                         # (needed for UE5 games where the exe lives in Binaries/Win64/)
-                        bare = Path(exe_name).name
                         try:
-                            for found in game_path.rglob(bare):
-                                if found.is_file():
-                                    game_exe_path = found
-                                    exes.append(found)
+                            for rel in candidates_rel:
+                                bare = Path(rel).name
+                                for found in game_path.rglob(bare):
+                                    if found.is_file():
+                                        game_exe_path = found
+                                        exes.append(found)
+                                        break
+                                if game_exe_path is not None:
                                     break
                         except OSError:
                             pass
@@ -933,10 +942,15 @@ class PluginPanel(ctk.CTkFrame):
         game_exe_name = getattr(self._game, "exe_name", None)
         if not game_exe_name:
             return False
-        if exe_path.name.lower() == Path(game_exe_name).name.lower():
+        candidate_name = exe_path.name.lower()
+        if candidate_name == Path(game_exe_name).name.lower():
             return True
+        # Alternate launch exes (e.g. native Linux binary bin/bg3 vs bg3.exe)
+        for alt in getattr(self._game, "exe_name_alts", []) or []:
+            if candidate_name == Path(alt).name.lower():
+                return True
         preferred_rel = getattr(self._game, "preferred_launch_exe", "")
-        if preferred_rel and exe_path.name.lower() == Path(preferred_rel).name.lower():
+        if preferred_rel and candidate_name == Path(preferred_rel).name.lower():
             return True
         # Framework exes (e.g. skse64_loader.exe) should also launch via Steam/Heroic
         # rather than being run directly via Proton, since the game must initialise
@@ -1418,6 +1432,24 @@ class PluginPanel(ctk.CTkFrame):
                 if heroic_app_names and self._game_is_heroic_install(game):
                     self._run_game_via_heroic(heroic_app_names)
                     return
+
+            # Native Linux binary (no .exe / .bat suffix): run directly instead
+            # of routing through Proton, which would fail on an ELF executable.
+            suffix = exe_path.suffix.lower()
+            if suffix not in (".exe", ".bat"):
+                self._log(f"Run EXE: launching native binary: {exe_path}")
+                def _elf_worker():
+                    try:
+                        subprocess.Popen(
+                            [str(exe_path)],
+                            cwd=str(exe_path.parent),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception as e:
+                        self._safe_after(0, lambda err=e: self._log(f"Run EXE error: {err}"))
+                threading.Thread(target=_elf_worker, daemon=True).start()
+                return
 
         self._run_exe_via_proton(exe_path, game)
 

@@ -50,8 +50,18 @@ _SYSTEM_UUIDS: frozenset[str] = frozenset({
     "ee5a55ff-eb38-0b27-c5b0-f358dc306d34",   # ModBrowser
     "55ef175c-59e3-b44b-3fb2-8f86acc5d550",   # PhotoMode
     "e1ce736b-52e6-e713-e9e7-e6abbb15a198",   # CrossplayUI
+    # Engine / patch 6 builtin
+    "9dff4c3b-fda7-43de-a763-ce1383039999",   # Engine
 })
 
+# Campaign / adventure base-game entry — varies by patch.  Values taken from
+# the BG3MM tag that shipped for each patch:
+#   Patch 8  → GustavX (BG3MM master)
+#   Patch 7  → GustavDev (BG3MM 1.0.11.1 — MAIN_CAMPAIGN_UUID)
+#   Patch 6  → Gustav (BG3MM 1.0.10.0)
+# Version64 for patch 6/7 is a 1.0.0.0 placeholder — the engine doesn't
+# reject "low" campaign versions, so we don't need to read it from the
+# installed Gustav.pak.
 _GUSTAV_X = {
     "Folder":        "GustavX",
     "MD5":           "ef3fcba3f3684b3088ad1f9874d4957c",
@@ -61,8 +71,26 @@ _GUSTAV_X = {
     "Version64":     "145241946983300916",
 }
 
-# Patch 7+ modsettings.lsx template
-_MODSETTINGS_HEADER = """\
+_GUSTAV_DEV = {
+    "Folder":        "GustavDev",
+    "MD5":           "",
+    "Name":          "GustavDev",
+    "PublishHandle": "0",
+    "UUID":          "28ac9ce2-2aba-8cda-b3b5-6e922f71b6b8",
+    "Version64":     "36028797018963968",
+}
+
+_GUSTAV_CLASSIC = {
+    "Folder":        "Gustav",
+    "MD5":           "",
+    "Name":          "Gustav",
+    "PublishHandle": "0",
+    "UUID":          "991c9c7a-fb80-40cb-8f0d-b92d4e80e9b1",
+    "Version64":     "36028797018963968",
+}
+
+# Patch 8 modsettings.lsx template — LSX version stamp 4/8/0/100.
+_MODSETTINGS_HEADER_P8 = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <save>
   <version major="4" minor="8" revision="0" build="100"/>
@@ -73,7 +101,21 @@ _MODSETTINGS_HEADER = """\
           <children>
 """
 
-_MODSETTINGS_FOOTER = """\
+# Patch 7 modsettings.lsx template — LSX version stamp 4/7/1/3 (from
+# BG3MM 1.0.11.1, the last release targeting patch 7).  Same structure
+# as patch 8 otherwise (no ModOrder block).
+_MODSETTINGS_HEADER_P7 = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<save>
+  <version major="4" minor="7" revision="1" build="3"/>
+  <region id="ModuleSettings">
+    <node id="root">
+      <children>
+        <node id="Mods">
+          <children>
+"""
+
+_MODSETTINGS_FOOTER_P7 = """\
           </children>
         </node>
       </children>
@@ -82,7 +124,36 @@ _MODSETTINGS_FOOTER = """\
 </save>
 """
 
-_MOD_ENTRY_TEMPLATE = """\
+# Patch 6 modsettings.lsx template — includes a ModOrder node and
+# uses the LSX version stamp shipped by BG3MM 1.0.10.0 (the last release
+# targeting patch 6): major=4, minor=0, revision=9, build=331.
+_MODSETTINGS_HEADER_P6 = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<save>
+  <version major="4" minor="0" revision="9" build="331"/>
+  <region id="ModuleSettings">
+    <node id="root">
+      <children>
+        <node id="ModOrder">
+          <children>
+{MOD_ORDER}\
+          </children>
+        </node>
+        <node id="Mods">
+          <children>
+"""
+
+_MODSETTINGS_FOOTER_P6 = """\
+          </children>
+        </node>
+      </children>
+    </node>
+  </region>
+</save>
+"""
+
+# Patch 7/8 mod entry — uses PublishHandle + Version64
+_MOD_ENTRY_TEMPLATE_P7 = """\
             <node id="ModuleShortDesc">
               <attribute id="Folder" type="LSString" value="{Folder}"/>
               <attribute id="MD5" type="LSString" value="{MD5}"/>
@@ -90,6 +161,26 @@ _MOD_ENTRY_TEMPLATE = """\
               <attribute id="PublishHandle" type="uint64" value="{PublishHandle}"/>
               <attribute id="UUID" type="guid" value="{UUID}"/>
               <attribute id="Version64" type="int64" value="{Version64}"/>
+            </node>
+"""
+
+# Patch 6 mod entry — no PublishHandle; UUID is FixedString instead of guid.
+# Based verbatim on BG3MM 1.0.10.0's XML_MODULE_SHORT_DESC (the last BG3MM
+# release that targeted patch 6).
+_MOD_ENTRY_TEMPLATE_P6 = """\
+            <node id="ModuleShortDesc">
+              <attribute id="Folder" value="{Folder}" type="LSString"/>
+              <attribute id="MD5" value="{MD5}" type="LSString"/>
+              <attribute id="Name" value="{Name}" type="LSString"/>
+              <attribute id="UUID" value="{UUID}" type="FixedString"/>
+              <attribute id="Version64" value="{Version64}" type="int64"/>
+            </node>
+"""
+
+# Patch 6 ModOrder entry (just UUID references, in load order)
+_MOD_ORDER_ENTRY_P6 = """\
+            <node id="Module">
+              <attribute id="UUID" value="{UUID}" type="FixedString"/>
             </node>
 """
 
@@ -107,6 +198,9 @@ class BG3ModInfo:
     version64: str
     md5: str = ""
     publish_handle: str = "0"
+    # Legacy 32-bit Version attribute used by patch 6 and earlier.
+    # Populated when meta.lsx has a "Version" attribute instead of "Version64".
+    version: str = ""
     # UUIDs of mods this mod depends on
     dependencies: list[str] = field(default_factory=list)
     # The mod-list name (staging folder name) this came from
@@ -145,7 +239,9 @@ def parse_meta_lsx(xml_text: str) -> BG3ModInfo | None:
     name = _attr_value(module_info, "Name")
     folder = _attr_value(module_info, "Folder")
     version64 = _attr_value(module_info, "Version64")
+    version32 = _attr_value(module_info, "Version")
     md5 = _attr_value(module_info, "MD5")
+    publish_handle = _attr_value(module_info, "PublishHandle") or "0"
 
     if not uuid:
         return None
@@ -167,6 +263,8 @@ def parse_meta_lsx(xml_text: str) -> BG3ModInfo | None:
         folder=folder,
         version64=version64,
         md5=md5,
+        publish_handle=publish_handle,
+        version=version32,
         dependencies=deps,
     )
 
@@ -289,29 +387,121 @@ def resolve_load_order(
 # modsettings.lsx generation
 # ---------------------------------------------------------------------------
 
-def _format_entry(info: dict[str, str]) -> str:
-    return _MOD_ENTRY_TEMPLATE.format(**info)
+def _xml_escape(value: str) -> str:
+    """Escape &, <, >, and " for safe insertion into LSX attribute values."""
+    return (
+        value.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace('"', "&quot;")
+    )
 
 
-def build_modsettings_xml(ordered_mods: list[BG3ModInfo]) -> str:
-    """Build the full modsettings.lsx XML string."""
-    parts = [_MODSETTINGS_HEADER]
+def _format_entry_p7(info: dict[str, str]) -> str:
+    escaped = {k: _xml_escape(v) for k, v in info.items()}
+    return _MOD_ENTRY_TEMPLATE_P7.format(**escaped)
 
-    # GustavX always first
-    parts.append(_format_entry(_GUSTAV_X))
 
-    # Then each mod in resolved order
+def _format_entry_p6(info: dict[str, str]) -> str:
+    escaped = {k: _xml_escape(v) for k, v in info.items()}
+    return _MOD_ENTRY_TEMPLATE_P6.format(**escaped)
+
+
+def _campaign_entry(patch_version: int) -> dict[str, str]:
+    """Return the base-game campaign entry appropriate for the given patch."""
+    if patch_version >= 8:
+        return _GUSTAV_X
+    if patch_version == 7:
+        return _GUSTAV_DEV
+    return _GUSTAV_CLASSIC
+
+
+def _version64_or_default(info: BG3ModInfo) -> str:
+    """Return a Version64 string, falling back to a 1.0.0.0 placeholder.
+
+    Some older mods only expose the 32-bit ``Version`` attribute; we
+    up-convert by left-shifting into the Version64 layout.  Default is
+    36028797018963968 (== 1<<55, which DivinityModVersion2 treats as 1.0.0.0).
+    """
+    if info.version64:
+        return info.version64
+    if info.version:
+        try:
+            v32 = int(info.version)
+            # Version64 is 16 bits per part; Version32 packs 4 parts in 32 bits.
+            # Up-shift preserves the semantic version without loss.
+            return str(v32 << 32) if v32 else "36028797018963968"
+        except ValueError:
+            pass
+    return "36028797018963968"
+
+
+def build_modsettings_xml(
+    ordered_mods: list[BG3ModInfo],
+    patch_version: int = 8,
+) -> str:
+    """Build the full modsettings.lsx XML string for the given patch."""
+    if patch_version <= 6:
+        return _build_modsettings_xml_p6(ordered_mods)
+    return _build_modsettings_xml_p7(ordered_mods, patch_version)
+
+
+def _build_modsettings_xml_p7(
+    ordered_mods: list[BG3ModInfo],
+    patch_version: int,
+) -> str:
+    header = _MODSETTINGS_HEADER_P8 if patch_version >= 8 else _MODSETTINGS_HEADER_P7
+    parts = [header]
+    parts.append(_format_entry_p7(_campaign_entry(patch_version)))
+
     for mod in ordered_mods:
-        parts.append(_format_entry({
+        parts.append(_format_entry_p7({
             "Folder":        mod.folder,
             "MD5":           mod.md5,
             "Name":          mod.name,
-            "PublishHandle": mod.publish_handle,
+            "PublishHandle": mod.publish_handle or "0",
             "UUID":          mod.uuid,
-            "Version64":     mod.version64,
+            "Version64":     mod.version64 or "36028797018963968",
         }))
 
-    parts.append(_MODSETTINGS_FOOTER)
+    parts.append(_MODSETTINGS_FOOTER_P7)
+    return "".join(parts)
+
+
+def _build_modsettings_xml_p6(ordered_mods: list[BG3ModInfo]) -> str:
+    campaign = _GUSTAV_CLASSIC
+
+    # ModOrder block: campaign first, then each mod in load order.
+    mod_order_parts: list[str] = []
+    mod_order_parts.append(
+        _MOD_ORDER_ENTRY_P6.format(UUID=_xml_escape(campaign["UUID"]))
+    )
+    for mod in ordered_mods:
+        mod_order_parts.append(
+            _MOD_ORDER_ENTRY_P6.format(UUID=_xml_escape(mod.uuid))
+        )
+    mod_order_block = "".join(mod_order_parts)
+
+    parts = [_MODSETTINGS_HEADER_P6.format(MOD_ORDER=mod_order_block)]
+
+    # Mods block: campaign entry first, then each mod.
+    parts.append(_format_entry_p6({
+        "Folder":    campaign["Folder"],
+        "MD5":       campaign["MD5"],
+        "Name":      campaign["Name"],
+        "UUID":      campaign["UUID"],
+        "Version64": campaign["Version64"],
+    }))
+    for mod in ordered_mods:
+        parts.append(_format_entry_p6({
+            "Folder":    mod.folder,
+            "MD5":       mod.md5,
+            "Name":      mod.name,
+            "UUID":      mod.uuid,
+            "Version64": _version64_or_default(mod),
+        }))
+
+    parts.append(_MODSETTINGS_FOOTER_P6)
     return "".join(parts)
 
 
@@ -321,6 +511,7 @@ def write_modsettings(
     staging_root: Path,
     log_fn=None,
     game_data_path: Path | None = None,
+    patch_version: int = 8,
 ) -> int:
     """End-to-end: scan paks, resolve order, write modsettings.lsx.
 
@@ -329,7 +520,12 @@ def write_modsettings(
     patch module UUIDs are recognised during the dependency check and don't
     produce false "not installed" warnings.
 
-    Returns the number of mod entries written (excluding GustavX).
+    *patch_version* — 6, 7, or 8.  Controls the modsettings.lsx schema:
+      - 8: GustavX campaign, Mods node only, Version64 + PublishHandle
+      - 7: Gustav campaign, Mods node only, Version64 + PublishHandle
+      - 6: Gustav campaign, ModOrder + Mods nodes, 32-bit Version
+
+    Returns the number of mod entries written (excluding the campaign entry).
     """
     _log = _safe_log(log_fn)
 
@@ -339,13 +535,13 @@ def write_modsettings(
     # lowest-priority-first (later entries override earlier ones in BG3).
     enabled = list(reversed(enabled))
 
-    _log("Scanning .pak files for mod metadata ...")
+    _log(f"Scanning .pak files for mod metadata (patch {patch_version}) ...")
     mod_infos = scan_mod_paks(staging_root, enabled)
     _log(f"  Found metadata for {len(mod_infos)} mod(s).")
 
     if not mod_infos:
         _log("No mod metadata found — writing vanilla modsettings.lsx.")
-        xml = build_modsettings_xml([])
+        xml = build_modsettings_xml([], patch_version=patch_version)
         modsettings_path.parent.mkdir(parents=True, exist_ok=True)
         modsettings_path.write_text(xml, encoding="utf-8")
         return 0
@@ -370,7 +566,7 @@ def write_modsettings(
                 _log(f"  WARNING: {mod.name} requires a mod (UUID {dep_uuid}) "
                      f"that is not installed.")
 
-    xml = build_modsettings_xml(ordered)
+    xml = build_modsettings_xml(ordered, patch_version=patch_version)
     modsettings_path.parent.mkdir(parents=True, exist_ok=True)
     modsettings_path.write_text(xml, encoding="utf-8")
 
@@ -378,10 +574,15 @@ def write_modsettings(
     return len(ordered)
 
 
-def write_vanilla_modsettings(modsettings_path: Path, log_fn=None) -> None:
-    """Write a clean modsettings.lsx with only the GustavX entry."""
+def write_vanilla_modsettings(
+    modsettings_path: Path,
+    log_fn=None,
+    patch_version: int = 8,
+) -> None:
+    """Write a clean modsettings.lsx with only the campaign entry."""
     _log = _safe_log(log_fn)
-    xml = build_modsettings_xml([])
+    xml = build_modsettings_xml([], patch_version=patch_version)
     modsettings_path.parent.mkdir(parents=True, exist_ok=True)
     modsettings_path.write_text(xml, encoding="utf-8")
-    _log("Reset modsettings.lsx to vanilla (GustavX only).")
+    campaign_name = _campaign_entry(patch_version)["Name"]
+    _log(f"Reset modsettings.lsx to vanilla ({campaign_name} only, patch {patch_version}).")

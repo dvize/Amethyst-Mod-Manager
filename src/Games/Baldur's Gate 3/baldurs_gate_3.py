@@ -3,8 +3,13 @@ baldurs_gate_3.py
 Game handler for Baldur's Gate 3.
 
 Mod structure:
-  Mods install into the Proton prefix AppData folder:
-    drive_c/users/steamuser/AppData/Local/Larian Studios/Baldur's Gate 3/Mods/
+  Mods install into the Larian AppData Mods folder.  Two layouts are
+  supported:
+    - Proton prefix:  <prefix>/drive_c/users/steamuser/AppData/Local/
+                      Larian Studios/Baldur's Gate 3/Mods/
+    - Native Linux:   ~/.local/share/Larian Studios/Baldur's Gate 3/Mods/
+  The prefix is preferred when configured; otherwise the native Linux
+  root is used if it exists.
   Staged mods live in Profiles/Baldur's Gate 3/mods/
 
   Only .pak files are deployed to the Mods folder — other files (readmes,
@@ -37,16 +42,19 @@ from Utils.steam_finder import find_prefix
 
 _PROFILES_DIR = get_profiles_dir()
 
-# Path inside the Proton prefix where BG3 reads mods from
-_MODS_SUBPATH = Path(
-    "drive_c/users/steamuser/AppData/Local/Larian Studios/Baldur's Gate 3/Mods"
+# Path inside the Proton prefix where the Larian data folder lives
+_PREFIX_LARIAN_SUBPATH = Path(
+    "drive_c/users/steamuser/AppData/Local/Larian Studios/Baldur's Gate 3"
 )
 
-# Path inside the Proton prefix where BG3 reads modsettings.lsx
-_MODSETTINGS_SUBPATH = Path(
-    "drive_c/users/steamuser/AppData/Local/Larian Studios"
-    "/Baldur's Gate 3/PlayerProfiles/Public/modsettings.lsx"
+# Native Linux (Steam Deck) build stores its data here
+_NATIVE_LARIAN_ROOT = (
+    Path.home() / ".local/share/Larian Studios/Baldur's Gate 3"
 )
+
+# Subpaths within the Larian root
+_MODS_REL = Path("Mods")
+_MODSETTINGS_REL = Path("PlayerProfiles/Public/modsettings.lsx")
 
 
 class BaldursGate3(BaseGame):
@@ -56,6 +64,7 @@ class BaldursGate3(BaseGame):
         self._prefix_path: Path | None = None
         self._deploy_mode: LinkMode = LinkMode.HARDLINK
         self._staging_path: Path | None = None
+        self._patch_version: int = 8
         self.load_paths()
 
     # -----------------------------------------------------------------------
@@ -73,6 +82,11 @@ class BaldursGate3(BaseGame):
     @property
     def exe_name(self) -> str:
         return "bin/bg3.exe"
+
+    @property
+    def exe_name_alts(self) -> list[str]:
+        # Native Linux build ships a bare ELF binary at bin/bg3
+        return ["bin/bg3"]
 
     @property
     def steam_id(self) -> str:
@@ -137,11 +151,18 @@ class BaldursGate3(BaseGame):
     def get_game_path(self) -> Path | None:
         return self._game_path
 
+    def _larian_root(self) -> Path | None:
+        """Return the Larian data root, preferring Proton prefix, then native Linux."""
+        if self._prefix_path is not None:
+            return self._prefix_path / _PREFIX_LARIAN_SUBPATH
+        if _NATIVE_LARIAN_ROOT.is_dir():
+            return _NATIVE_LARIAN_ROOT
+        return None
+
     def get_mod_data_path(self) -> Path | None:
-        """Mods deploy into the Proton prefix AppData Mods folder."""
-        if self._prefix_path is None:
-            return None
-        return self._prefix_path / _MODS_SUBPATH
+        """Mods deploy into the Larian AppData Mods folder (prefix or native)."""
+        root = self._larian_root()
+        return root / _MODS_REL if root is not None else None
 
     def get_mod_staging_path(self) -> Path:
         if self._staging_path is not None:
@@ -149,9 +170,15 @@ class BaldursGate3(BaseGame):
         return _PROFILES_DIR / self.name / "mods"
 
     def get_hardlink_deploy_targets(self) -> list[tuple[str, "Path | None"]]:
+        if self._prefix_path is None and _NATIVE_LARIAN_ROOT.is_dir():
+            data_target: Path | None = _NATIVE_LARIAN_ROOT
+            label = "Larian data (native Linux)"
+        else:
+            data_target = self._prefix_path
+            label = "Proton prefix"
         return [
             ("Game directory", self._game_path),
-            ("Proton prefix", self._prefix_path),
+            (label, data_target),
         ]
 
     # -----------------------------------------------------------------------
@@ -181,12 +208,18 @@ class BaldursGate3(BaseGame):
             raw_staging = data.get("staging_path", "")
             if raw_staging:
                 self._staging_path = Path(raw_staging)
+            try:
+                pv = int(data.get("patch_version", 8))
+            except (TypeError, ValueError):
+                pv = 8
+            self._patch_version = pv if pv in (6, 7, 8) else 8
             self._validate_staging()
             if not self._prefix_path or not self._prefix_path.is_dir():
-                found = find_prefix(self.steam_id)
-                if found:
-                    self._prefix_path = found
-                    self.save_paths()
+                if not _NATIVE_LARIAN_ROOT.is_dir():
+                    found = find_prefix(self.steam_id)
+                    if found:
+                        self._prefix_path = found
+                        self.save_paths()
             return bool(self._game_path)
         except (json.JSONDecodeError, OSError):
             pass
@@ -205,6 +238,7 @@ class BaldursGate3(BaseGame):
             "prefix_path":  str(self._prefix_path)  if self._prefix_path  else "",
             "deploy_mode":  mode_str,
             "staging_path": str(self._staging_path) if self._staging_path else "",
+            "patch_version": self._patch_version,
         }
         self._paths_file.write_text(
             json.dumps(data, indent=2), encoding="utf-8"
@@ -232,6 +266,15 @@ class BaldursGate3(BaseGame):
         self._prefix_path = Path(path) if path else None
         self.save_paths()
 
+    def get_patch_version(self) -> int:
+        return self._patch_version
+
+    def set_patch_version(self, version: int) -> None:
+        if version not in (6, 7, 8):
+            version = 8
+        self._patch_version = version
+        self.save_paths()
+
     # -----------------------------------------------------------------------
     # Deployment
     # -----------------------------------------------------------------------
@@ -250,10 +293,14 @@ class BaldursGate3(BaseGame):
         """
         _log = log_fn or (lambda _: None)
 
-        if self._prefix_path is None:
-            raise RuntimeError("Prefix path is not configured.")
+        larian_root = self._larian_root()
+        if larian_root is None:
+            raise RuntimeError(
+                "No Larian data folder found. Configure the Proton prefix, "
+                f"or install the native Linux build so {_NATIVE_LARIAN_ROOT} exists."
+            )
 
-        mods_dir = self._prefix_path / _MODS_SUBPATH
+        mods_dir = larian_root / _MODS_REL
         filemap  = self.get_effective_filemap_path()
         staging  = self.get_effective_mod_staging_path()
         modlist  = self.get_profile_root() / "profiles" / profile / "modlist.txt"
@@ -305,11 +352,12 @@ class BaldursGate3(BaseGame):
         _log(f"  Transferred {linked_core} vanilla file(s).")
 
         _log("Step 4: Generating modsettings.lsx ...")
-        modsettings = self._prefix_path / _MODSETTINGS_SUBPATH
+        modsettings = larian_root / _MODSETTINGS_REL
         game_data = self._game_path / "Data" if self._game_path else None
         mod_count = write_modsettings(modsettings, modlist, staging,
                                       log_fn=_log,
-                                      game_data_path=game_data)
+                                      game_data_path=game_data,
+                                      patch_version=self._patch_version)
 
         _log(
             f"Deploy complete. "
@@ -322,10 +370,14 @@ class BaldursGate3(BaseGame):
         """Remove deployed mods and restore the vanilla Mods folder."""
         _log = log_fn or (lambda _: None)
 
-        if self._prefix_path is None:
-            raise RuntimeError("Prefix path is not configured.")
+        larian_root = self._larian_root()
+        if larian_root is None:
+            raise RuntimeError(
+                "No Larian data folder found. Configure the Proton prefix, "
+                f"or install the native Linux build so {_NATIVE_LARIAN_ROOT} exists."
+            )
 
-        mods_dir = self._prefix_path / _MODS_SUBPATH
+        mods_dir = larian_root / _MODS_REL
 
         # Undo custom-routed files (bin/ and generated/ → game root / Data/)
         if self._game_path:
@@ -348,14 +400,17 @@ class BaldursGate3(BaseGame):
         _log(f"  Restored {restored} file(s). Mods_Core/ removed.")
 
         _log("Restore: resetting modsettings.lsx to vanilla ...")
-        modsettings = self._prefix_path / _MODSETTINGS_SUBPATH
-        write_vanilla_modsettings(modsettings, log_fn=_log)
+        modsettings = larian_root / _MODSETTINGS_REL
+        write_vanilla_modsettings(modsettings, log_fn=_log,
+                                  patch_version=self._patch_version)
 
         _log("Restore complete.")
 
     def post_clean_game_folder(self, log_fn=None) -> None:
         """Reset modsettings.lsx to vanilla after Clean Game Folder."""
-        if self._prefix_path is None:
+        larian_root = self._larian_root()
+        if larian_root is None:
             return
-        modsettings = self._prefix_path / _MODSETTINGS_SUBPATH
-        write_vanilla_modsettings(modsettings, log_fn=log_fn)
+        modsettings = larian_root / _MODSETTINGS_REL
+        write_vanilla_modsettings(modsettings, log_fn=log_fn,
+                                  patch_version=self._patch_version)
