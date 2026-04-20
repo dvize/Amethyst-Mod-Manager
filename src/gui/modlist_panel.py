@@ -141,6 +141,16 @@ from gui.text_utils import truncate_text as _truncate_text_for_width, clear_trun
 from gui.tk_tooltip import TkTooltip
 
 
+def _copy_fomod_choice(src_profile_dir: Path, dst_profile_dir: Path, mod_name: str) -> None:
+    """Copy a mod's saved FOMOD choice JSON from one profile to another, if present."""
+    src = src_profile_dir / "fomod" / f"{mod_name}.json"
+    if not src.is_file():
+        return
+    dst_dir = dst_profile_dir / "fomod"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(src), str(dst_dir / f"{mod_name}.json"))
+
+
 def _scan_meta_flags_impl(entries: list, mods_dir: Path) -> dict:
     """Pure scan over meta.ini; returns dict of results. Safe to run in thread."""
     update_mods: set[str] = set()
@@ -5885,9 +5895,12 @@ class ModListPanel(ctk.CTkFrame):
                     func(path)
                 shutil.rmtree(dest_folder, onexc=_force_remove)
 
+        src_profile_dir = self._modlist_path.parent
+
         def _do_copy():
             try:
                 shutil.copytree(str(src_folder), str(dest_folder))
+                _copy_fomod_choice(src_profile_dir, target_profile_dir, mod_name)
                 self.after(0, lambda: self._log(
                     f"Copied '{mod_name}' → profile '{target_profile}'"))
             except Exception as exc:
@@ -5938,6 +5951,7 @@ class ModListPanel(ctk.CTkFrame):
             (mn, _entry_map[mn].enabled if mn in _entry_map else True)
             for mn in mod_names
         ]
+        src_profile_dir = self._modlist_path.parent
 
         def _do_copy():
             copied, skipped = 0, 0
@@ -5958,6 +5972,7 @@ class ModListPanel(ctk.CTkFrame):
                             func(path)
                         shutil.rmtree(dest_folder, onexc=_force_remove)
                     shutil.copytree(str(src_folder), str(dest_folder))
+                    _copy_fomod_choice(src_profile_dir, target_profile_dir, mod_name)
                     copied += 1
                     copied_mods.append((mod_name, enabled))
                 except Exception as exc:
