@@ -184,6 +184,8 @@ EXE_FILTER_DEFAULTS: frozenset[str] = frozenset({
     "obse_loader.exe",          # Oblivion OBSE
     "sfse_loader.exe",          # Starfield SFSE
     "mwse-launcher.exe",        # Morrowind MWSE
+    
+    "synthesis.exe", # Only works via the wizard menu
 })
 
 # ---------------------------------------------------------------------------

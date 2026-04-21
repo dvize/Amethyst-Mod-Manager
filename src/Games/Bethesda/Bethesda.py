@@ -102,6 +102,7 @@ class Fallout_3(BaseGame):
 
     plugins_use_star_prefix = False
     plugins_include_vanilla = True
+    synthesis_registry_name = "Fallout3"
 
     def __init__(self):
         self._game_path: Path | None = None
@@ -264,6 +265,12 @@ class Fallout_3(BaseGame):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_fo3",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -760,6 +767,12 @@ class Fallout3_GOTY(Fallout_3):
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
             ),
+            WizardTool(
+                id="run_synthesis_fo3goty",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
+            ),
         ]
 
 
@@ -850,6 +863,7 @@ class Fallout_4(Fallout_3):
     plugins_use_star_prefix = True
     plugins_include_vanilla = False
     supports_esl_flag = True
+    synthesis_registry_name = "Fallout4"
 
     @property
     def reshade_dll(self) -> str:
@@ -883,6 +897,12 @@ class Fallout_4(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_fo4",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -939,6 +959,7 @@ class Fallout_4VR(Fallout_3):
     plugins_use_star_prefix = True
     plugins_include_vanilla = False
     supports_esl_flag = True
+    synthesis_registry_name = "Fallout 4 VR"
 
     @property
     def reshade_dll(self) -> str:
@@ -966,6 +987,12 @@ class Fallout_4VR(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_fo4vr",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -1017,6 +1044,8 @@ class Fallout_4VR(Fallout_3):
 
 class Oblivion(Fallout_3):
 
+    synthesis_registry_name = "Oblivion"
+
     @property
     def wizard_tools(self) -> list[WizardTool]:
         return self._base_wizard_tools() + [
@@ -1035,6 +1064,12 @@ class Oblivion(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_oblivion",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -1138,6 +1173,8 @@ class Oblivion(Fallout_3):
 
 class Skyrim(Fallout_3):
 
+    synthesis_registry_name = "Skyrim"
+
     @property
     def wizard_tools(self) -> list[WizardTool]:
         return self._base_wizard_tools() + [
@@ -1156,6 +1193,12 @@ class Skyrim(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_skyrim",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -1212,6 +1255,7 @@ class SkyrimVR(Fallout_3):
     plugins_use_star_prefix = True
     plugins_include_vanilla = False
     supports_esl_flag = True
+    synthesis_registry_name = "Skyrim VR"
 
     @property
     def reshade_dll(self) -> str:
@@ -1239,6 +1283,12 @@ class SkyrimVR(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_skyrimvr",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -1293,6 +1343,7 @@ class Starfield(Fallout_3):
     plugins_use_star_prefix = True
     plugins_include_vanilla = False
     supports_esl_flag = True
+    synthesis_registry_name = "Starfield"
 
     @property
     def reshade_dll(self) -> str:
@@ -1326,6 +1377,12 @@ class Starfield(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_starfield",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]
 
@@ -1413,6 +1470,8 @@ class Starfield(Fallout_3):
 
 class Enderal(Fallout_3):
 
+    synthesis_registry_name = "Enderal"
+
     @property
     def name(self) -> str:
         return "Enderal"
@@ -1460,6 +1519,12 @@ class Enderal(Fallout_3):
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
             ),
+            WizardTool(
+                id="run_synthesis_enderal",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
+            ),
         ]
 
 class EnderalSE(Fallout_3):
@@ -1467,6 +1532,7 @@ class EnderalSE(Fallout_3):
     plugins_use_star_prefix = True
     plugins_include_vanilla = False
     supports_esl_flag = True
+    synthesis_registry_name = "Enderal Special Edition"
 
     @property
     def name(self) -> str:
@@ -1514,5 +1580,11 @@ class EnderalSE(Fallout_3):
                 label="Run Wrye Bash",
                 description="Download and run Wrye Bash.",
                 dialog_class_path="wizards.wrye_bash.WryeBashWizard",
+            ),
+            WizardTool(
+                id="run_synthesis_enderalse",
+                label="Run Synthesis",
+                description="Install and run Mutagen Synthesis patcher in its own prefix.",
+                dialog_class_path="wizards.synthesis.SynthesisWizard",
             ),
         ]

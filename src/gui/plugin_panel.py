@@ -646,7 +646,10 @@ class PluginPanel(ctk.CTkFrame):
                                         continue
                                 mod_dir = staging / mod_name
                                 candidate = mod_dir / rel_path
-                                if any(part.startswith("prefix_") for part in candidate.parts):
+                                if any(
+                                    part.startswith("prefix_") or part in ("prefix", "pfx")
+                                    for part in candidate.parts
+                                ):
                                     continue
                                 if candidate.is_file():
                                     exes.append(candidate)
@@ -665,7 +668,10 @@ class PluginPanel(ctk.CTkFrame):
                         for ext in self._EXE_SCAN_EXTENSIONS:
                             for entry in apps_dir.rglob(f"*{ext}"):
                                 if entry.is_file() and entry.name not in _all_data_folder_exes:
-                                    if not any(part.startswith("prefix_") for part in entry.parts):
+                                    if not any(
+                                        part.startswith("prefix_") or part in ("prefix", "pfx")
+                                        for part in entry.parts
+                                    ):
                                         exes.append(entry)
 
                 # 3. Custom exes saved via "Add custom EXE" (arbitrary paths on disk)
