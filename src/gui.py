@@ -52,6 +52,9 @@ import customtkinter as ctk
 ctk.set_widget_scaling(_UI_SCALE)
 ctk.set_window_scaling(_UI_SCALE)
 
+from gui.wheel_compat import patch_ctk_scrollable_frame
+patch_ctk_scrollable_frame()
+
 from gui.theme import ACCENT, ACCENT_HOV, BG_DEEP, BG_HEADER, BG_HOVER, BORDER, FONT_BOLD, FONT_NORMAL, FS9, TEXT_DIM, TEXT_MAIN, init_fonts, scaled, scaled_layout_minsize
 from gui.game_helpers import (
     _GAMES,

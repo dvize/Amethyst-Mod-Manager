@@ -1328,6 +1328,16 @@ class PluginPanel(ctk.CTkFrame):
                 self._safe_after(0, lambda m=msg: self._log(m))
 
             try:
+                # Activate the last-deployed profile for restore so rescued
+                # runtime files land in *that* profile's overwrite/ — not
+                # the shared default. Critical for profile_specific_mods.
+                profile_root = game.get_profile_root()
+                last_deployed = game.get_last_deployed_profile()
+                if last_deployed:
+                    game.set_active_profile_dir(
+                        profile_root / "profiles" / last_deployed
+                    )
+
                 if getattr(game, "restore_before_deploy", True) and hasattr(game, "restore"):
                     try:
                         game.restore(log_fn=_tlog)
@@ -1340,13 +1350,12 @@ class PluginPanel(ctk.CTkFrame):
 
                 # Switch to the target profile before deploy.
                 game.set_active_profile_dir(
-                    game.get_profile_root() / "profiles" / profile
+                    profile_root / "profiles" / profile
                 )
 
-                profile_root = game.get_profile_root()
                 staging = game.get_effective_mod_staging_path()
                 modlist_path = profile_root / "profiles" / profile / "modlist.txt"
-                filemap_out = profile_root / "filemap.txt"
+                filemap_out = game.get_effective_filemap_path()
                 if modlist_path.is_file():
                     try:
                         _exc_raw = read_excluded_mod_files(modlist_path.parent, None)
@@ -1366,6 +1375,7 @@ class PluginPanel(ctk.CTkFrame):
 
                 deploy_mode = game.get_deploy_mode() if hasattr(game, "get_deploy_mode") else LinkMode.HARDLINK
                 game.deploy(log_fn=_tlog, profile=profile, mode=deploy_mode)
+                game.save_last_deployed_profile(profile)
 
                 # Apply Wine DLL overrides (user-added + handler-defined)
                 from Utils.wine_dll_config import deploy_game_wine_dll_overrides

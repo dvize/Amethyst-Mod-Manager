@@ -273,6 +273,15 @@ class ScriptMergerWizard(ctk.CTkFrame):
             def _tlog(msg):
                 self.after(0, lambda m=msg: self._log(m))
 
+            # Activate the last-deployed profile for restore so rescued
+            # runtime files land in *that* profile's overwrite/ — not
+            # the shared default. Critical for profile_specific_mods.
+            last_deployed = game.get_last_deployed_profile()
+            if last_deployed:
+                game.set_active_profile_dir(
+                    game.get_profile_root() / "profiles" / last_deployed
+                )
+
             # Restore previous deployment first
             if getattr(game, "restore_before_deploy", True) and hasattr(game, "restore"):
                 try:

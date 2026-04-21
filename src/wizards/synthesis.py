@@ -522,6 +522,17 @@ class SynthesisWizard(ctk.CTkFrame):
         self._append_log(f"Deploying profile '{profile}' before launch \u2026")
 
         try:
+            # Activate the last-deployed profile for restore so rescued
+            # runtime files land in *that* profile's overwrite/ (critical
+            # for profile_specific_mods profiles). Then switch to the
+            # target profile for deploy.
+            profile_root = game.get_profile_root()
+            last_deployed = game.get_last_deployed_profile()
+            if last_deployed:
+                game.set_active_profile_dir(
+                    profile_root / "profiles" / last_deployed
+                )
+
             if getattr(game, "restore_before_deploy", True) and hasattr(game, "restore"):
                 try:
                     game.restore(log_fn=self._append_log)
@@ -533,13 +544,12 @@ class SynthesisWizard(ctk.CTkFrame):
                 restore_root_folder(restore_rf_dir, game_root, log_fn=self._append_log)
 
             game.set_active_profile_dir(
-                game.get_profile_root() / "profiles" / profile
+                profile_root / "profiles" / profile
             )
 
-            profile_root = game.get_profile_root()
             staging = game.get_effective_mod_staging_path()
             modlist_path = profile_root / "profiles" / profile / "modlist.txt"
-            filemap_out = profile_root / "filemap.txt"
+            filemap_out = game.get_effective_filemap_path()
             if modlist_path.is_file():
                 try:
                     _exc_raw = read_excluded_mod_files(modlist_path.parent, None)
@@ -559,6 +569,7 @@ class SynthesisWizard(ctk.CTkFrame):
 
             deploy_mode = game.get_deploy_mode() if hasattr(game, "get_deploy_mode") else LinkMode.HARDLINK
             game.deploy(log_fn=self._append_log, profile=profile, mode=deploy_mode)
+            game.save_last_deployed_profile(profile)
 
             _pfx = game.get_prefix_path()
             if _pfx and _pfx.is_dir():
@@ -603,6 +614,12 @@ class SynthesisWizard(ctk.CTkFrame):
         env = os.environ.copy()
         env["STEAM_COMPAT_DATA_PATH"] = str(_synthesis_prefix_parent(self._game))
         env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(Path.home() / ".local" / "share" / "Steam")
+        # Bind-mount the synthesis working dir into the sniper container so
+        # `dotnet build` under Flatpak can write obj/bin/ and read Synthesis'
+        # Data/ cache. Without this, Flatpak's sandbox + Proton's sniper
+        # combine to hide parts of the tree inside the container and MSBuild
+        # exits 1 with truncated output ("SynthesisBuildFailure: Unknown (1)").
+        env["STEAM_COMPAT_INSTALL_PATH"] = str(synthesis_dir)
         env["WINEDEBUG"] = "-all"
         env.setdefault("DISPLAY", os.environ.get("DISPLAY", ":0"))
         # NuGet: skip online CRL/OCSP checks (Wine's WinHTTP can't reach them
@@ -612,15 +629,17 @@ class SynthesisWizard(ctk.CTkFrame):
 
         self._append_log(f"Launching {exe} via {proton_script.parent.name} \u2026")
         try:
-            proc = subprocess.Popen(
-                ["python3", str(proton_script), "run", str(exe)],
-                env=env,
-                cwd=str(synthesis_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.wait()
-            self._append_log("Synthesis closed.")
+            log_path = synthesis_dir / "synthesis.log"
+            with log_path.open("w", encoding="utf-8", errors="replace") as log_f:
+                proc = subprocess.Popen(
+                    ["python3", str(proton_script), "run", str(exe)],
+                    env=env,
+                    cwd=str(synthesis_dir),
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                )
+                proc.wait()
+            self._append_log(f"Synthesis closed. Output log: {log_path}")
         except Exception as exc:
             self._append_log(f"Launch error: {exc}")
         finally:
