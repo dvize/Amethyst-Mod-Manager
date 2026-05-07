@@ -15,7 +15,7 @@ from pathlib import Path
 from Utils.app_log import safe_log as _safe_log
 
 _TIMESTAMP_FMT = "%Y%m%d_%H%M%S"
-_MAX_BACKUPS = 10
+_MAX_BACKUPS = 20
 _BACKUPS_SUBDIR = "backups"
 _TIMESTAMP_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 

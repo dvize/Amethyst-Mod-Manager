@@ -18,7 +18,10 @@ from gui.theme import (
     scaled,
     TEXT_ON_ACCENT,
 )
-from Utils.profile_backup import list_backups, restore_backup, is_backup_kept, set_backup_kept
+from Utils.profile_backup import (
+    create_backup, list_backups, restore_backup,
+    is_backup_kept, set_backup_kept,
+)
 
 _BG_HOVER_BTN = "#3e3e40"  # subtle grey hover for buttons (not the blue selection hover)
 _KEEP_BG      = "#1a3a1a"  # dark green background for kept backups
@@ -66,23 +69,31 @@ class BackupRestorePanel(ctk.CTkFrame):
         ).pack(side="right", padx=scaled(4))
         ctk.CTkFrame(self, fg_color=BORDER, height=1, corner_radius=0).pack(fill="x")
 
+        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        self._body.pack(fill="both", expand=True)
+        self._build()
+
+    def _rebuild_body(self):
+        for child in self._body.winfo_children():
+            child.destroy()
+        self._backups = list_backups(self._profile_dir)
         self._build()
 
     def _build(self):
         ctk.CTkLabel(
-            self, text="Restore backup",
+            self._body, text="Restore backup",
             font=_font_bold(), text_color=TEXT_MAIN,
         ).pack(padx=16, pady=(8, 0), anchor="w")
 
         ctk.CTkLabel(
-            self,
+            self._body,
             text="Select a backup to restore modlist and plugins for this profile.",
             font=_font_small(), text_color=TEXT_DIM,
         ).pack(padx=16, pady=(2, 12), anchor="w")
 
-        ctk.CTkFrame(self, fg_color=BORDER, height=1).pack(fill="x", padx=16, pady=2)
+        ctk.CTkFrame(self._body, fg_color=BORDER, height=1).pack(fill="x", padx=16, pady=2)
 
-        list_frame = ctk.CTkFrame(self, fg_color="transparent")
+        list_frame = ctk.CTkFrame(self._body, fg_color="transparent")
         list_frame.pack(padx=16, pady=8, fill="both", expand=True)
 
         self._restore_btn = None
@@ -119,7 +130,7 @@ class BackupRestorePanel(ctk.CTkFrame):
             self._listbox.bind("<<ListboxSelect>>", self._on_selection)
             self._listbox.selection_clear(0, "end")
 
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame = ctk.CTkFrame(self._body, fg_color="transparent")
         btn_frame.pack(fill="x", padx=16, pady=(8, 16))
 
         self._restore_btn = ctk.CTkButton(
@@ -141,6 +152,12 @@ class BackupRestorePanel(ctk.CTkFrame):
             font=_font_normal(), fg_color=BG_HEADER, hover_color=BORDER,
             text_color=TEXT_MAIN, command=self._on_cancel,
         ).pack(side="right")
+
+        ctk.CTkButton(
+            btn_frame, text="New backup", width=110, height=32,
+            font=_font_normal(), fg_color=BG_HEADER, hover_color=BORDER,
+            text_color=TEXT_MAIN, command=self._on_create,
+        ).pack(side="left")
 
     def _on_selection(self, *_):
         if self._restore_btn is not None and self._backups:
@@ -193,6 +210,13 @@ class BackupRestorePanel(ctk.CTkFrame):
         restore_backup(self._profile_dir, backup_dir)
         self._on_restored()
         self._on_done(self)
+
+    def _on_create(self):
+        try:
+            create_backup(self._profile_dir)
+        except Exception:
+            pass
+        self._rebuild_body()
 
     def _on_cancel(self):
         self._on_done(self)
