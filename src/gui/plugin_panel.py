@@ -3085,6 +3085,16 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 else:
                     bg = BG_ROW if row % 2 == 0 else BG_ROW_ALT
 
+                has_missing = entry.name in self._missing_masters
+                has_late = entry.name in self._late_masters
+                has_vmm = entry.name in self._version_mismatch_masters
+                has_ul = name_lower in self._userlist_plugins
+                has_ul_cycle = name_lower in self._userlist_cycle_plugins
+                has_esl = name_lower in self._esl_flagged_plugins
+                is_vanilla = name_lower in self._vanilla_plugins
+                is_locked = bool(self._plugin_locks.get(entry.name, False))
+                has_loot = self._has_loot_tooltip_content(entry.name)
+
                 state_key = (
                     "v",
                     actual_idx,
@@ -3094,15 +3104,15 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                     dragging,
                     entry.name,
                     entry.enabled,
-                    entry.name in self._missing_masters,
-                    entry.name in self._late_masters,
-                    entry.name in self._version_mismatch_masters,
-                    name_lower in self._userlist_plugins,
-                    name_lower in self._userlist_cycle_plugins,
-                    name_lower in self._esl_flagged_plugins,
-                    name_lower in self._vanilla_plugins,
-                    bool(self._plugin_locks.get(entry.name, False)),
-                    self._has_loot_tooltip_content(entry.name),
+                    has_missing,
+                    has_late,
+                    has_vmm,
+                    has_ul,
+                    has_ul_cycle,
+                    has_esl,
+                    is_vanilla,
+                    is_locked,
+                    has_loot,
                 )
                 if _pool_last_state[s] == state_key and self._pool_data_idx[s] == actual_idx:
                     continue
@@ -3110,15 +3120,14 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 c.coords(self._pool_bg[s], 0, y_top, cw, y_bot)
                 c.itemconfigure(self._pool_bg[s], fill=bg, state="normal")
 
-                has_missing_now = entry.name in self._missing_masters
-                if has_missing_now:
+                if has_missing:
                     c.coords(self._pool_missing_strip[s], 0, y_top, scaled(3), y_bot)
                     c.itemconfigure(self._pool_missing_strip[s], state="normal")
                 else:
                     c.itemconfigure(self._pool_missing_strip[s], state="hidden")
 
                 _theme_bgs = (_theme.conflict_higher, _theme.conflict_lower, _theme.plugin_mod)
-                if entry.name in self._missing_masters:
+                if has_missing:
                     name_color = STATUS_BADGE_RED
                 elif bg in _theme_bgs:
                     name_color = _theme.contrasting_text_color(bg)
@@ -3137,12 +3146,6 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 c.itemconfigure(self._pool_idx_text[s], text=f"{actual_idx:03d}",
                                 fill=TEXT_DIM, state="normal")
 
-                has_missing = entry.name in self._missing_masters
-                has_late = entry.name in self._late_masters
-                has_vmm = entry.name in self._version_mismatch_masters
-                has_ul = entry.name.lower() in self._userlist_plugins
-                has_esl = entry.name.lower() in self._esl_flagged_plugins
-                has_loot = self._has_loot_tooltip_content(entry.name)
                 flags_x0 = self._pcol_x[2]
                 flags_x1 = self._pcol_x[3]
                 active_flags = [f for f in [has_missing, has_late, has_vmm, has_ul, has_esl, has_loot] if f]
@@ -3183,9 +3186,8 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                         cx = next(_flag_pos)
                         r = scaled(4)
                         c.coords(ul_dot_id, cx - r, y_mid - r, cx + r, y_mid + r)
-                        in_cycle = name_lower in self._userlist_cycle_plugins
                         c.itemconfigure(ul_dot_id,
-                                        fill=STATUS_BADGE_RED if in_cycle else TEXT_WHITE,
+                                        fill=STATUS_BADGE_RED if has_ul_cycle else TEXT_WHITE,
                                         state="normal")
                     else:
                         c.itemconfigure(ul_dot_id, state="hidden")
@@ -3209,7 +3211,6 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 self._pool_data_idx[s] = actual_idx
 
                 if not dragging:
-                    is_vanilla = entry.name.lower() in self._vanilla_plugins
                     cb_cx = self._pcol_x[0] + scaled(12)
                     cb_size = scaled(18)
                     cx1, cy1 = cb_cx - cb_size // 2, y_mid - cb_size // 2
@@ -3223,7 +3224,6 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                                     fill=TEXT_DIM if is_vanilla else ACCENT,
                                     state="normal" if entry.enabled else "hidden")
 
-                    is_locked = bool(self._plugin_locks.get(entry.name, False))
                     lk_cx = self._pcol_x[3] + scaled(12)
                     c.coords(self._pool_lock_rects[s], lk_cx - cb_size // 2, cy1,
                              lk_cx + cb_size // 2, cy2)

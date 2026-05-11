@@ -77,6 +77,31 @@ _index_cache_lock = threading.Lock()
 _filemap_winner_cache: dict[str, frozenset] = {}
 _filemap_winner_cache_lock = threading.Lock()
 
+# Cache for the lowercase-set form of `disabled_plugins`, keyed by the dict's
+# id() plus a fingerprint covering its mod-keys and per-mod plugin-list lengths.
+# Skips re-lowercasing on every filemap rebuild when the underlying dict hasn't
+# meaningfully changed. The fingerprint is cheap enough that even a miss is
+# bounded; on a hit we avoid re-allocating len(mods) sets per build.
+_disabled_lower_cache: tuple[int, tuple, dict[str, frozenset[str]]] | None = None
+_disabled_lower_cache_lock = threading.Lock()
+
+
+def _get_disabled_lower(disabled_plugins: dict[str, list[str]]) -> dict[str, frozenset[str]]:
+    global _disabled_lower_cache
+    dp_id = id(disabled_plugins)
+    dp_fp = tuple(sorted((m, len(n)) for m, n in disabled_plugins.items()))
+    with _disabled_lower_cache_lock:
+        cached = _disabled_lower_cache
+        if cached is not None and cached[0] == dp_id and cached[1] == dp_fp:
+            return cached[2]
+    built = {
+        mod: frozenset(n.lower() for n in names)
+        for mod, names in disabled_plugins.items()
+    }
+    with _disabled_lower_cache_lock:
+        _disabled_lower_cache = (dp_id, dp_fp, built)
+    return built
+
 
 def _scan_dir(
     source_name: str,
@@ -659,7 +684,7 @@ def _compute_conflict_status(
 def _write_filemap(
     output_path: Path,
     filemap: dict[str, tuple[str, str]],
-    disabled_lower: dict[str, set[str]],
+    disabled_lower: dict[str, frozenset[str]],
 ) -> int:
     """Sort and write filemap.txt, returning the number of lines written."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -799,6 +824,9 @@ def build_filemap(
     # When conflict_key_fn is provided (e.g. UE5 routing), two staged paths that land
     # at the same game location are treated as conflicting even if their staged keys differ.
     conflict_winner: dict[str, str] = {}
+    # Parallel index ck → staged rel_key for the current winner. Avoids an O(n)
+    # scan of filemap_winner per conflicting file in UE5 builds.
+    conflict_staged: dict[str, str] = {}
 
     for name in priority_order:
         entry = index.get(name)
@@ -844,17 +872,17 @@ def build_filemap(
                 ck = conflict_key_fn(rel_key).lower()
                 prev_ck = conflict_winner.get(ck)
                 if prev_ck is not None and prev_ck != name:
-                    prev_staged = next(
-                        (k for k, v in filemap_winner.items() if v == prev_ck and conflict_key_fn(k) == ck),
-                        None,
-                    )
-                    if prev_staged is not None and prev_staged != rel_key:
+                    prev_staged = conflict_staged.get(ck)
+                    if (prev_staged is not None
+                            and prev_staged != rel_key
+                            and filemap_winner.get(prev_staged) == prev_ck):
                         filemap_winner.pop(prev_staged, None)
                         filemap.pop(prev_staged, None)
                         win_count[prev_ck] = win_count.get(prev_ck, 0) - 1
                     overrides[name].add(prev_ck)
                     overridden_by[prev_ck].add(name)
                 conflict_winner[ck] = name
+                conflict_staged[ck] = rel_key
         if had_file:
             mods_with_files.add(name)
 
@@ -892,18 +920,17 @@ def build_filemap(
             for _rk, _rs in _files.items():
                 filemap_root[_rk] = (_rs, _mn)
 
-    # Build per-mod disabled-plugin sets for fast lookup (lowercase filenames, root-level only)
-    _disabled_lower: dict[str, set[str]] = {}
-    if disabled_plugins:
-        for _mod, _names in disabled_plugins.items():
-            _disabled_lower[_mod] = {n.lower() for n in _names}
+    # Build per-mod disabled-plugin sets for fast lookup (lowercase filenames, root-level only).
+    # Cached by (id, fingerprint) to avoid rebuilding the lowercase sets on every
+    # rebuild when the upstream dict hasn't changed.
+    _disabled_lower = _get_disabled_lower(disabled_plugins) if disabled_plugins else {}
 
     # Skip-if-unchanged: fingerprint the winner map + disabled state.
     # If identical to the last write for this output path, skip the expensive
     # sort + string build + disk write (and post_build_filemap re-read).
     # disabled_plugins is rare but must be included since it affects written lines.
     _disabled_frozen = (
-        frozenset((m, frozenset(ns)) for m, ns in _disabled_lower.items())
+        frozenset(_disabled_lower.items())
         if _disabled_lower else frozenset()
     )
     _winner_snapshot = (frozenset(filemap_winner.items()), _disabled_frozen, frozenset(filemap_root.items()))
