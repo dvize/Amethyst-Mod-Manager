@@ -233,7 +233,12 @@ class PluginPanelIniMixin:
         self._ini_content_query: str | None = None
         self._ini_content_matches: set[tuple[str, str]] | None = None
         self._ini_content_extra_entries: list[tuple[str, str, Path]] = []
-        self._ini_filter_extensions: set[str] = set()  # empty = no filter
+        self._ini_filter_extensions: set[str] = set()           # include-only
+        self._ini_filter_extensions_exclude: set[str] = set()   # hide these
+        # Source filter — one of {"mod", "profile", "game"} per entry.
+        # Empty include set = "all sources allowed".
+        self._ini_filter_sources: set[str] = set()
+        self._ini_filter_sources_exclude: set[str] = set()
         self._ini_filter_panel_open: bool = False
 
     def _build_ini_filter_side_panel(self) -> None:
@@ -282,14 +287,23 @@ class PluginPanelIniMixin:
         scroll_frame.pack(fill="both", expand=True, padx=8, pady=6)
         self._ini_filter_scroll_frame = scroll_frame
 
-        ctk.CTkLabel(
+        tk.Label(
             scroll_frame, text="By file type",
-            font=_theme.FONT_BOLD, text_color=TEXT_MAIN, anchor="w",
+            font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
         ).pack(anchor="w", pady=(2, 4))
 
         self._ifsp_filetype_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         self._ifsp_filetype_frame.pack(anchor="w", fill="x", pady=(2, 0))
         self._ifsp_filetype_vars = {}
+
+        tk.Label(
+            scroll_frame, text="By source",
+            font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
+        ).pack(anchor="w", pady=(10, 4))
+
+        self._ifsp_source_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        self._ifsp_source_frame.pack(anchor="w", fill="x", pady=(2, 0))
+        self._ifsp_source_vars: dict[str, tk.IntVar] = {}
 
         self._bind_ini_filter_panel_scroll()
 
@@ -328,6 +342,65 @@ class PluginPanelIniMixin:
                 counts[ext] = counts.get(ext, 0) + 1
         return counts
 
+    @staticmethod
+    def _ini_entry_source(mod_name: str) -> str:
+        """Classify an ini entry's origin from its mod_name field.
+
+        Synthetic names "Game Folder" / "Profile" mark non-mod sources;
+        anything else is a real mod folder.
+        """
+        if mod_name == "Game Folder":
+            return "game"
+        if mod_name == "Profile":
+            return "profile"
+        return "mod"
+
+    _INI_SOURCE_LABELS = (
+        ("mod",     "Mod folders"),
+        ("profile", "Profile"),
+        ("game",    "Game folder"),
+    )
+
+    def _get_ini_source_counts(self) -> "dict[str, int]":
+        counts: dict[str, int] = {}
+        for _rel, mod_name, _p in self._ini_files_entries:
+            src = self._ini_entry_source(mod_name)
+            counts[src] = counts.get(src, 0) + 1
+        return counts
+
+    def _refresh_ini_filter_source_list(self) -> None:
+        frame = getattr(self, "_ifsp_source_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        self._ifsp_source_vars.clear()
+        counts = self._get_ini_source_counts()
+        from gui.tri_state_checkbox import TriStateCheckBox
+        for key, label in self._INI_SOURCE_LABELS:
+            count = counts.get(key, 0)
+            if key in self._ini_filter_sources:
+                init = 1
+            elif key in self._ini_filter_sources_exclude:
+                init = 2
+            else:
+                init = 0
+            var = tk.IntVar(value=init)
+            self._ifsp_source_vars[key] = var
+            TriStateCheckBox(
+                frame,
+                text=f"{label}  ({count:,})",
+                variable=var,
+                font=_theme.FONT_SMALL,
+                text_color=TEXT_MAIN,
+                fg_color=ACCENT,
+                hover_color=ACCENT_HOV,
+                border_color=BORDER,
+                checkmark_color="white",
+                command=self._on_ini_filter_panel_change,
+            ).pack(anchor="w", pady=2)
+        self._bind_ini_filter_panel_scroll()
+
     def _refresh_ini_filter_filetype_list(self) -> None:
         frame = self._ifsp_filetype_frame
         if frame is None:
@@ -343,10 +416,17 @@ class PluginPanelIniMixin:
             ).pack(anchor="w", pady=2)
             self._bind_ini_filter_panel_scroll()
             return
+        from gui.tri_state_checkbox import TriStateCheckBox
         for ext, count in sorted(counts.items(), key=lambda kv: kv[0]):
-            var = tk.BooleanVar(value=ext in self._ini_filter_extensions)
+            if ext in self._ini_filter_extensions:
+                init = 1
+            elif ext in self._ini_filter_extensions_exclude:
+                init = 2
+            else:
+                init = 0
+            var = tk.IntVar(value=init)
             self._ifsp_filetype_vars[ext] = var
-            ctk.CTkCheckBox(
+            TriStateCheckBox(
                 frame,
                 text=f"{ext}  ({count:,})",
                 variable=var,
@@ -362,15 +442,31 @@ class PluginPanelIniMixin:
 
     def _on_ini_filter_panel_change(self) -> None:
         self._ini_filter_extensions = {
-            ext for ext, v in self._ifsp_filetype_vars.items() if v.get()
+            ext for ext, v in self._ifsp_filetype_vars.items() if v.get() == 1
+        }
+        self._ini_filter_extensions_exclude = {
+            ext for ext, v in self._ifsp_filetype_vars.items() if v.get() == 2
+        }
+        self._ini_filter_sources = {
+            k for k, v in self._ifsp_source_vars.items() if v.get() == 1
+        }
+        self._ini_filter_sources_exclude = {
+            k for k, v in self._ifsp_source_vars.items() if v.get() == 2
         }
         self._update_ini_filter_btn_color()
         self._apply_ini_search_filter()
 
     def _clear_all_ini_filters(self) -> None:
         self._ini_filter_extensions = set()
+        self._ini_filter_extensions_exclude = set()
+        self._ini_filter_sources = set()
+        self._ini_filter_sources_exclude = set()
         for v in self._ifsp_filetype_vars.values():
-            v.set(False)
+            v.set(0)
+        for v in self._ifsp_source_vars.values():
+            v.set(0)
+        self._refresh_ini_filter_filetype_list()
+        self._refresh_ini_filter_source_list()
         self._update_ini_filter_btn_color()
         self._apply_ini_search_filter()
 
@@ -411,6 +507,7 @@ class PluginPanelIniMixin:
         mod_panel.grid_columnconfigure(0, minsize=scaled(380))
         self._ini_filter_side_panel.grid()
         self._refresh_ini_filter_filetype_list()
+        self._refresh_ini_filter_source_list()
         self._update_ini_filter_btn_color()
 
     def _close_ini_filter_panel(self) -> None:
@@ -426,7 +523,8 @@ class PluginPanelIniMixin:
         btn = getattr(self, "_ini_filter_btn", None)
         if btn is None:
             return
-        if self._ini_filter_extensions:
+        if (self._ini_filter_extensions or self._ini_filter_extensions_exclude
+                or self._ini_filter_sources or self._ini_filter_sources_exclude):
             btn.configure(fg_color=ACCENT_HOV, hover_color=ACCENT_HOV)
         else:
             btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOV)
@@ -570,8 +668,17 @@ class PluginPanelIniMixin:
             entries = [e for e in combined if (e[0], e[1]) in content_matches]
             entries.sort(key=lambda t: (t[0].lower(), t[1].lower()))
         ext_filter = self._ini_filter_extensions
+        ext_exclude = self._ini_filter_extensions_exclude
         if ext_filter:
             entries = [e for e in entries if Path(e[0]).suffix.lower() in ext_filter]
+        if ext_exclude:
+            entries = [e for e in entries if Path(e[0]).suffix.lower() not in ext_exclude]
+        src_filter = self._ini_filter_sources
+        src_exclude = self._ini_filter_sources_exclude
+        if src_filter:
+            entries = [e for e in entries if self._ini_entry_source(e[1]) in src_filter]
+        if src_exclude:
+            entries = [e for e in entries if self._ini_entry_source(e[1]) not in src_exclude]
         if not query:
             self._ini_files_displayed = list(entries)
         else:

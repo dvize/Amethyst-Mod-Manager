@@ -258,7 +258,19 @@ def cleanup_custom_deploy_dirs(
     removed = 0
     skipped_unknown = 0
     dirs_to_prune: set[Path] = set()
+    # Seed stop_dirs with the user-configured custom deploy roots — those are
+    # always-existing parents we must never remove. Subfolders we created
+    # underneath them are fair game for empty-dir pruning so the destination
+    # is left clean.
     stop_dirs: set[Path] = set()
+    try:
+        _sep_paths_for_stops = load_separator_deploy_paths(profile_dir)
+        for _info in _sep_paths_for_stops.values():
+            _p = _info.get("path", "") if isinstance(_info, dict) else ""
+            if isinstance(_p, str) and _p:
+                stop_dirs.add(Path(_p))
+    except Exception:
+        pass
 
     for abs_str, src_str in file_list:
         # Entries are absolute filesystem paths by design — only reject ``..``
@@ -303,7 +315,6 @@ def cleanup_custom_deploy_dirs(
             target.unlink()
             removed += 1
             dirs_to_prune.add(target.parent)
-            stop_dirs.add(target.parent)
         except OSError as exc:
             _log(f"  WARN: could not remove custom-deployed {target}: {exc}")
 

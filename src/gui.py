@@ -2144,16 +2144,44 @@ class App(ctk.CTk):
     def show_settings_panel(self):
         self._ensure_plugin_panel_visible()
         from gui.status_bar import SettingsPanel
+
+        def _on_done(p):
+            self._hide_plugin_overlay("_settings_panel")
+            if hasattr(self._mod_panel, "refresh_show_summary_tooltips"):
+                self._mod_panel.refresh_show_summary_tooltips()
+
         self._show_plugin_overlay(
             "_settings_panel",
             lambda: SettingsPanel(
                 self._plugin_panel_container,
-                on_done=lambda p: self._hide_plugin_overlay("_settings_panel"),
+                on_done=_on_done,
             ),
         )
 
     def hide_settings_panel(self):
         self._hide_plugin_overlay("_settings_panel")
+
+    # -- Cache manager panel -------------------------------------------------
+
+    def show_cache_manager_panel(self):
+        self._ensure_plugin_panel_visible()
+        from gui.cache_manager_overlay import CacheManagerOverlay
+        active_game = ""
+        try:
+            active_game = self._topbar._game_var.get() or ""
+        except Exception:
+            active_game = ""
+        self._show_plugin_overlay(
+            "_cache_manager_panel",
+            lambda: CacheManagerOverlay(
+                self._plugin_panel_container,
+                on_close=lambda: self._hide_plugin_overlay("_cache_manager_panel"),
+                active_game_name=active_game,
+            ),
+        )
+
+    def hide_cache_manager_panel(self):
+        self._hide_plugin_overlay("_cache_manager_panel")
 
     def _sync_custom_handlers(self):
         """Background-download every custom handler from GitHub, overwriting stale copies."""

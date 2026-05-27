@@ -142,8 +142,10 @@ PALETTE: dict[str, str | tuple] = {
     "BG_GREEN_ROW":    "#d0e8d0",
     "BG_GREEN_DEEP":   "#c8e0c8",
     "BG_RED_DEEP":     "#f0d0d0",
+    "BG_ORANGE_DEEP":  "#f5e0c0",
     "BG_GREEN_TEXT":   "#1a4d1a",
     "BG_RED_TEXT":     "#6b1a1a",
+    "BG_ORANGE_TEXT":  "#7a4a00",
     "BG_DARK_BLUE":    "#b4c8e4",   # Root Folder separator — saturated so it reads on grey panel
     "BG_DARK_GREEN":   "#b4d8b4",   # Overwrite separator — same treatment
     "BG_ENTRY":        "#ffffff",

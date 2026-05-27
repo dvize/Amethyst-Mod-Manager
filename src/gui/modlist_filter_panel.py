@@ -20,6 +20,10 @@ from gui.theme import (
 )
 import gui.theme as _theme
 from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
+from gui.tri_state_checkbox import TriStateCheckBox, STATE_OFF
+
+# Keys that should remain plain on/off (no exclude state).
+_PLAIN_TOGGLES = frozenset({"filter_hide_separators"})
 
 
 # (var_key, label, host_state_attr) — single source of truth for the
@@ -27,21 +31,21 @@ from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
 # the dict key emitted by _on_filter_panel_change; host_state_attr is
 # the live field on ModListPanel that _open / _apply read and write.
 _FILTER_CHECKBOXES: tuple[tuple[str, str, str], ...] = (
-    ("filter_show_disabled",        "Show only disabled mods",              "_filter_show_disabled"),
-    ("filter_show_enabled",         "Show only enabled mods",               "_filter_show_enabled"),
-    ("filter_hide_separators",      "Hide separators",                      "_filter_hide_separators"),
-    ("filter_winning",              "Show only winning conflicts",          "_filter_conflict_winning"),
-    ("filter_losing",               "Show only losing conflicts",           "_filter_conflict_losing"),
-    ("filter_partial",              "Show only winning & losing conflicts", "_filter_conflict_partial"),
-    ("filter_full",                 "Show only fully conflicted mods",      "_filter_conflict_full"),
-    ("filter_missing_reqs",         "Show only missing requirements",       "_filter_missing_reqs"),
-    ("filter_has_disabled_plugins", "Show only mods with disabled plugins", "_filter_has_disabled_plugins"),
-    ("filter_has_plugins",          "Show only mods with plugins",          "_filter_has_plugins"),
-    ("filter_has_disabled_files",   "Show mods modified in Mod Files tab",  "_filter_has_disabled_files"),
-    ("filter_has_updates",          "Show only mods with updates",          "_filter_has_updates"),
-    ("filter_has_notes",            "Show only mods with notes",            "_filter_has_notes"),
-    ("filter_fomod_only",           "Show only FOMOD mods",                 "_filter_fomod_only"),
-    ("filter_has_bsa",              "Show only mods with BSA archives",     "_filter_has_bsa"),
+    ("filter_show_disabled",        "Disabled mods",                  "_filter_show_disabled"),
+    ("filter_show_enabled",         "Enabled mods",                   "_filter_show_enabled"),
+    ("filter_hide_separators",      "Hide separators",                "_filter_hide_separators"),
+    ("filter_winning",              "Winning conflicts",              "_filter_conflict_winning"),
+    ("filter_losing",               "Losing conflicts",               "_filter_conflict_losing"),
+    ("filter_partial",              "Winning & losing conflicts",     "_filter_conflict_partial"),
+    ("filter_full",                 "Fully conflicted mods",          "_filter_conflict_full"),
+    ("filter_missing_reqs",         "Missing requirements",           "_filter_missing_reqs"),
+    ("filter_has_disabled_plugins", "Mods with disabled plugins",     "_filter_has_disabled_plugins"),
+    ("filter_has_plugins",          "Mods with plugins",              "_filter_has_plugins"),
+    ("filter_has_disabled_files",   "Mods modified in Mod Files tab", "_filter_has_disabled_files"),
+    ("filter_has_updates",          "Mods with updates",              "_filter_has_updates"),
+    ("filter_has_notes",            "Mods with notes",                "_filter_has_notes"),
+    ("filter_fomod_only",           "FOMOD mods",                     "_filter_fomod_only"),
+    ("filter_has_bsa",              "Mods with BSA archives",         "_filter_has_bsa"),
 )
 
 
@@ -100,13 +104,17 @@ class ModListFilterPanelMixin:
         )
         scroll_frame.pack(fill="both", expand=True, padx=8, pady=6)
 
-        self._fsp_vars: dict[str, tk.BooleanVar] = {}
+        tk.Label(
+            scroll_frame, text="By status",
+            font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
+        ).pack(anchor="w", pady=(2, 4))
+
+        self._fsp_vars: dict[str, tk.IntVar] = {}
         self._fsp_checkboxes: dict[str, ctk.CTkCheckBox] = {}
         for key, label, _attr in _FILTER_CHECKBOXES:
-            var = tk.BooleanVar(value=False)
+            var = tk.IntVar(value=0)
             self._fsp_vars[key] = var
-            cb = ctk.CTkCheckBox(
-                scroll_frame,
+            common = dict(
                 text=label,
                 variable=var,
                 font=_theme.FONT_SMALL,
@@ -117,30 +125,28 @@ class ModListFilterPanelMixin:
                 checkmark_color="white",
                 command=self._on_filter_panel_change,
             )
+            if key in _PLAIN_TOGGLES:
+                cb = ctk.CTkCheckBox(scroll_frame, onvalue=1, offvalue=0, **common)
+            else:
+                cb = TriStateCheckBox(scroll_frame, **common)
             cb.pack(anchor="w", fill="x", pady=3)
             self._fsp_checkboxes[key] = cb
 
-        ctk.CTkLabel(
-            scroll_frame, text="", height=8, fg_color="transparent",
-        ).pack(anchor="w")
-        ctk.CTkLabel(
-            scroll_frame, text="Show only categories:",
-            font=_theme.FONT_SMALL, text_color=TEXT_DIM, anchor="w",
-        ).pack(anchor="w")
+        tk.Label(
+            scroll_frame, text="By category",
+            font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
+        ).pack(anchor="w", pady=(10, 4))
         self._fsp_category_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        self._fsp_category_frame.pack(anchor="w", pady=(2, 0))
-        self._fsp_category_vars: dict[str, tk.BooleanVar] = {}
+        self._fsp_category_frame.pack(anchor="w", fill="x", pady=(2, 0))
+        self._fsp_category_vars: dict[str, tk.IntVar] = {}
 
-        ctk.CTkLabel(
-            scroll_frame, text="", height=8, fg_color="transparent",
-        ).pack(anchor="w")
-        ctk.CTkLabel(
-            scroll_frame, text="Show only mods with filetype:",
-            font=_theme.FONT_SMALL, text_color=TEXT_DIM, anchor="w",
-        ).pack(anchor="w")
+        tk.Label(
+            scroll_frame, text="By file type",
+            font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
+        ).pack(anchor="w", pady=(10, 4))
         self._fsp_filetype_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         self._fsp_filetype_frame.pack(anchor="w", fill="x", pady=(2, 0))
-        self._fsp_filetype_vars: dict[str, tk.BooleanVar] = {}
+        self._fsp_filetype_vars: dict[str, tk.IntVar] = {}
 
         self._filter_scroll_frame = scroll_frame
         self._bind_filter_panel_scroll()
@@ -218,11 +224,18 @@ class ModListFilterPanelMixin:
             set(self._category_names.values()) | {""},
             key=lambda c: ("(Uncategorized)" if c == "" else c).lower(),
         )
+        cat_excludes = getattr(self, "_filter_categories_exclude", frozenset())
         for cat in categories:
             label = "(Uncategorized)" if cat == "" else cat
-            var = tk.BooleanVar(value=cat in self._filter_categories)
+            if cat in self._filter_categories:
+                init = 1
+            elif cat in cat_excludes:
+                init = 2
+            else:
+                init = 0
+            var = tk.IntVar(value=init)
             self._fsp_category_vars[cat] = var
-            ctk.CTkCheckBox(
+            TriStateCheckBox(
                 self._fsp_category_frame,
                 text=label,
                 variable=var,
@@ -256,10 +269,17 @@ class ModListFilterPanelMixin:
             self._bind_filter_panel_scroll()
             return
         ordered = sorted(counts.items(), key=lambda kv: kv[0])
+        ft_excludes = getattr(self, "_filter_filetypes_exclude", frozenset())
         for ext, count in ordered:
-            var = tk.BooleanVar(value=ext in self._filter_filetypes)
+            if ext in self._filter_filetypes:
+                init = 1
+            elif ext in ft_excludes:
+                init = 2
+            else:
+                init = 0
+            var = tk.IntVar(value=init)
             self._fsp_filetype_vars[ext] = var
-            ctk.CTkCheckBox(
+            TriStateCheckBox(
                 self._fsp_filetype_frame,
                 text=f"{ext}  ({count:,})",
                 variable=var,
@@ -275,24 +295,38 @@ class ModListFilterPanelMixin:
         self._bind_filter_panel_scroll()
 
     def _clear_all_filters(self):
-        for v in self._fsp_vars.values():
-            v.set(False)
+        for key, cb in self._fsp_checkboxes.items():
+            if isinstance(cb, TriStateCheckBox):
+                cb.set_state(STATE_OFF)
+            else:
+                self._fsp_vars[key].set(0)
         for v in self._fsp_category_vars.values():
-            v.set(False)
+            v.set(0)
         for v in self._fsp_filetype_vars.values():
-            v.set(False)
+            v.set(0)
+        # Force category/filetype checkbox widgets to redraw their visuals.
+        self._refresh_filter_category_list()
+        self._refresh_filter_filetype_list()
         self._apply_modlist_filters({
             "filter_categories": frozenset(),
+            "filter_categories_exclude": frozenset(),
             "filter_filetypes": frozenset(),
+            "filter_filetypes_exclude": frozenset(),
         })
 
     def _on_filter_panel_change(self):
         state = {k: v.get() for k, v in self._fsp_vars.items()}
         state["filter_categories"] = frozenset(
-            c for c, v in self._fsp_category_vars.items() if v.get()
+            c for c, v in self._fsp_category_vars.items() if v.get() == 1
+        )
+        state["filter_categories_exclude"] = frozenset(
+            c for c, v in self._fsp_category_vars.items() if v.get() == 2
         )
         state["filter_filetypes"] = frozenset(
-            ext for ext, v in self._fsp_filetype_vars.items() if v.get()
+            ext for ext, v in self._fsp_filetype_vars.items() if v.get() == 1
+        )
+        state["filter_filetypes_exclude"] = frozenset(
+            ext for ext, v in self._fsp_filetype_vars.items() if v.get() == 2
         )
         self._apply_modlist_filters(state)
 
@@ -311,16 +345,28 @@ class ModListFilterPanelMixin:
             plugin_panel._close_data_filter_panel()
         if plugin_panel is not None and getattr(plugin_panel, "_ini_filter_panel_open", False):
             plugin_panel._close_ini_filter_panel()
+        # Remember plugin panel state so _close restores only if it was visible.
+        app = self.winfo_toplevel()
+        self._filter_plugin_panel_was_visible = bool(getattr(app, "_plugin_panel_visible", False))
         self._filter_panel_open = True
         # Use scaled minsize so the panel isn't squeezed at higher UI scale.
         self.grid_columnconfigure(0, minsize=scaled(380))
         self._filter_side_panel.grid()
         for key, _label, attr in _FILTER_CHECKBOXES:
-            self._fsp_vars[key].set(getattr(self, attr))
+            cb = self._fsp_checkboxes[key]
+            val = int(getattr(self, attr) or 0)
+            if isinstance(cb, TriStateCheckBox):
+                cb.set_state(val)
+            else:
+                self._fsp_vars[key].set(1 if val else 0)
         self._refresh_archive_filter_label()
         self._refresh_filter_category_list()
         self._refresh_filter_filetype_list()
         self._update_filter_btn_color()
+        # Defer the plugin-panel hide so the filter panel paints first; the
+        # modlist reflow that follows is the slow part.
+        if self._filter_plugin_panel_was_visible and hasattr(app, "_toggle_plugin_panel"):
+            self.after_idle(app._toggle_plugin_panel)
 
     def _refresh_archive_filter_label(self) -> None:
         """Relabel the 'has archives' checkbox to match the active game's
@@ -332,9 +378,9 @@ class ModListFilterPanelMixin:
             return
         archive_exts = getattr(self._game, "archive_extensions", None) if getattr(self, "_game", None) else None
         if archive_exts and ".ba2" in archive_exts:
-            label = "Show only mods with BA2 archives"
+            label = "Mods with BA2 archives"
         else:
-            label = "Show only mods with BSA archives"
+            label = "Mods with BSA archives"
         try:
             cb.configure(text=label)
         except Exception:
@@ -345,13 +391,22 @@ class ModListFilterPanelMixin:
         self._filter_side_panel.grid_remove()
         self.grid_columnconfigure(0, minsize=0)
         self._update_filter_btn_color()
+        # Restore the plugins panel only if it was visible when we opened.
+        app = self.winfo_toplevel()
+        if getattr(self, "_filter_plugin_panel_was_visible", False) \
+                and not getattr(app, "_plugin_panel_visible", True) \
+                and hasattr(app, "_toggle_plugin_panel"):
+            app._toggle_plugin_panel()
+        self._filter_plugin_panel_was_visible = False
 
     def _apply_modlist_filters(self, state: dict):
         """Apply filter state from the side panel and redraw."""
         for key, _label, attr in _FILTER_CHECKBOXES:
-            setattr(self, attr, state.get(key, False))
+            setattr(self, attr, int(state.get(key, 0) or 0))
         self._filter_categories = state.get("filter_categories") or frozenset()
+        self._filter_categories_exclude = state.get("filter_categories_exclude") or frozenset()
         self._filter_filetypes = state.get("filter_filetypes") or frozenset()
+        self._filter_filetypes_exclude = state.get("filter_filetypes_exclude") or frozenset()
         self._update_filter_btn_color()
         self._invalidate_derived_caches()
         self._redraw()
@@ -359,7 +414,11 @@ class ModListFilterPanelMixin:
     def _any_modlist_filters_active(self) -> bool:
         if any(getattr(self, attr) for _key, _label, attr in _FILTER_CHECKBOXES):
             return True
-        return bool(self._filter_categories) or bool(self._filter_filetypes)
+        if self._filter_categories or self._filter_filetypes:
+            return True
+        if getattr(self, "_filter_categories_exclude", None) or getattr(self, "_filter_filetypes_exclude", None):
+            return True
+        return False
 
     def _update_filter_btn_color(self) -> None:
         btn = getattr(self, "_filter_btn", None)

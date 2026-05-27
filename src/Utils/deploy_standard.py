@@ -336,6 +336,9 @@ def deploy_filemap(
     for (_eff_dir_s, _top_lower), _owner in _top_folder_owner.items():
         if _owner is None:
             continue
+        _owner_mode = _per_mode.get(_owner, mode)
+        if _owner_mode is not LinkMode.SYMLINK:
+            continue
         _sample = _top_folder_sample.get((_eff_dir_s, _top_lower))
         if _sample is None:
             continue

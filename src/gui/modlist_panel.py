@@ -90,6 +90,7 @@ from Utils.filemap import (
     build_filemap,
     read_mod_index,
     rebuild_mod_index,
+    rescan_mods_in_index,
     remove_from_mod_index,
     rename_in_mod_index,
     fix_flat_staging_folders,
@@ -150,7 +151,7 @@ from gui.nexus_browser_overlay import NexusBrowserOverlay
 from gui.changelog_overlay import ChangelogOverlay
 from Nexus.nexus_meta import ensure_installed_stamp, read_meta, write_meta
 from Utils.config_paths import get_download_cache_dir, list_all_cache_dirs
-from Utils.ui_config import load_column_widths, load_column_order, load_normalize_folder_case, load_sort_state, save_sort_state, load_column_hidden
+from Utils.ui_config import load_column_widths, load_column_order, load_normalize_folder_case, load_sort_state, save_sort_state, load_column_hidden, load_show_summary_tooltips
 
 
 from gui.text_utils import truncate_text as _truncate_text_for_width, clear_truncate_cache as _clear_truncate_cache
@@ -396,6 +397,12 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         # Set of mod names that have a Nexus update available
         self._update_mods: set[str] = set()
 
+        # Lazy cache of mod_name → description (Nexus summary), loaded from meta.ini
+        # on first hover. Cleared whenever update info is recomputed (since the
+        # update checker is what backfills descriptions).
+        self._description_cache: dict[str, str] = {}
+        self._show_summary_tooltips: bool = load_show_summary_tooltips()
+
         # Set of mod names that have missing Nexus requirements
         self._missing_reqs: set[str] = set()
         # Map mod name → list of missing requirement names (for tooltips / context menu)
@@ -424,6 +431,10 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         self._fomod_mods: set[str] = set()
         # Set of mod names flagged for root-level (engine) deployment
         self._root_folder_mods: set[str] = set()
+        # Set of mod names that own at least one file matched by a custom
+        # routing rule with dest="" (i.e. files that deploy to the game root).
+        # Auto-detected from the mod index + game's custom_routing_rules.
+        self._root_rule_mods: set[str] = set()
         # Sets of mod names tagged by collection install — populated from
         # meta.ini's fromCollectionBundled / fromCollectionPatched flags.
         self._collection_bundled_mods: set[str] = set()
@@ -503,23 +514,27 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
 
         # Search/filter
         self._filter_text: str = ""
-        self._filter_show_disabled: bool = False
-        self._filter_show_enabled: bool = False
-        self._filter_hide_separators: bool = False
-        self._filter_conflict_winning: bool = False
-        self._filter_conflict_losing: bool = False
-        self._filter_conflict_partial: bool = False
-        self._filter_conflict_full: bool = False
-        self._filter_missing_reqs: bool = False
-        self._filter_has_disabled_plugins: bool = False
-        self._filter_has_plugins: bool = False
-        self._filter_has_disabled_files: bool = False
-        self._filter_has_updates: bool = False
-        self._filter_fomod_only: bool = False
-        self._filter_has_bsa: bool = False
-        self._filter_categories: frozenset[str] = frozenset()  # when non-empty, show only these categories
-        self._filter_filetypes: frozenset[str] = frozenset()   # when non-empty, show only mods containing these extensions
-        self._filter_has_notes: bool = False
+        # Tri-state filter flags: 0 = off, 1 = include (show only matches),
+        # 2 = exclude (hide matches). Truthy == active either way.
+        self._filter_show_disabled: int = 0
+        self._filter_show_enabled: int = 0
+        self._filter_hide_separators: int = 0
+        self._filter_conflict_winning: int = 0
+        self._filter_conflict_losing: int = 0
+        self._filter_conflict_partial: int = 0
+        self._filter_conflict_full: int = 0
+        self._filter_missing_reqs: int = 0
+        self._filter_has_disabled_plugins: int = 0
+        self._filter_has_plugins: int = 0
+        self._filter_has_disabled_files: int = 0
+        self._filter_has_updates: int = 0
+        self._filter_fomod_only: int = 0
+        self._filter_has_bsa: int = 0
+        self._filter_categories: frozenset[str] = frozenset()         # include-only categories
+        self._filter_categories_exclude: frozenset[str] = frozenset() # categories to hide
+        self._filter_filetypes: frozenset[str] = frozenset()
+        self._filter_filetypes_exclude: frozenset[str] = frozenset()
+        self._filter_has_notes: int = 0
         self._disabled_plugins_map: dict[str, list[str]] = {}  # mod_name → [plugin, ...]
         self._excluded_mod_files_map: dict[str, list[str]] = {}  # mod_name → [rel_key, ...]
         self._mod_notes_map: dict[str, str] = {}  # mod_name → note text (profile_state.json)
@@ -1386,6 +1401,7 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         if "_modlist_path" in results and results["_modlist_path"] != self._modlist_path:
             return  # Stale: user switched game before scan finished
         self._update_mods = results["update_mods"]
+        self._description_cache.clear()
         self._missing_reqs = results["missing_reqs"]
         self._missing_reqs_detail = results["missing_reqs_detail"]
         self._endorsed_mods = results["endorsed_mods"]
@@ -1395,6 +1411,7 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         self._mod_versions = results.get("mod_versions", {})
         self._fomod_mods = results.get("fomod_mods", set())
         self._root_folder_mods = results.get("root_folder_mods", set())
+        self._root_rule_mods = self._compute_root_rule_mods()
         self._collection_bundled_mods = results.get("collection_bundled_mods", set())
         self._collection_patched_mods = results.get("collection_patched_mods", set())
         if self._filter_panel_open:
@@ -1403,6 +1420,32 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         self._mod_to_sep_idx = None
         self._redraw()
         self._update_info()
+
+    def _compute_root_rule_mods(self) -> set[str]:
+        """Mods owning files matched by a custom routing rule with dest=""."""
+        game = self._game
+        if game is None:
+            return set()
+        try:
+            rules = list(getattr(game, "custom_routing_rules", None) or [])
+        except Exception:
+            return set()
+        if not any(r.dest == "" and not r.to_prefix for r in rules):
+            return set()
+        try:
+            from Utils.filemap import read_mod_index
+            from Utils.deploy_custom_rules import mods_matching_root_rules
+        except Exception:
+            return set()
+        index_path = self._staging_root.parent / "modindex.bin"
+        index = read_mod_index(index_path)
+        if not index:
+            return set()
+        mod_files = {
+            name: list(normal.values()) + list(root.values())
+            for name, (normal, root) in index.items()
+        }
+        return mods_matching_root_rules(mod_files, rules)
 
     def _scan_update_flags(self):
         """Scan meta.ini for update flags. Uses async to avoid blocking UI."""
@@ -2198,7 +2241,9 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                             if self._mod_is_modified_in_mf(_be.name) and self._icon_disabled_files and "disabled" not in _seen_flag:
                                 _agg_flags.append(("img", self._icon_disabled_files))
                                 _seen_flag.add("disabled")
-                            if _be.name in self._root_folder_mods and self._icon_root_folder and "root" not in _seen_flag:
+                            if ((_be.name in self._root_folder_mods
+                                 or _be.name in self._root_rule_mods)
+                                and self._icon_root_folder and "root" not in _seen_flag):
                                 _agg_flags.append(("img", self._icon_root_folder))
                                 _seen_flag.add("root")
                         # Only 5 image slots exist in the pool — cap before the
@@ -2430,7 +2475,9 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                         _flags.append(("img", self._icon_info))
                     if self._mod_is_modified_in_mf(entry.name) and self._icon_disabled_files:
                         _flags.append(("img", self._icon_disabled_files))
-                    if entry.name in self._root_folder_mods and self._icon_root_folder:
+                    if ((entry.name in self._root_folder_mods
+                         or entry.name in self._root_rule_mods)
+                        and self._icon_root_folder):
                         _flags.append(("img", self._icon_root_folder))
 
                     self._render_flag_strip(s, _flags, _FLAG_X, _FLAG_W, y_mid)
@@ -2681,54 +2728,78 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                 else:
                     base.append(i)
 
-        # Step 2: hide separators filter (keep synthetic Overwrite/Root Folder rows)
-        if self._filter_hide_separators:
+        # Step 2: hide separators filter (keep synthetic Overwrite/Root Folder rows).
+        # Tri-state: include = hide separators; exclude = SHOW separators (no-op,
+        # since separators are visible by default anyway).
+        if self._filter_hide_separators == 1:
             base = [i for i in base
                     if not self._entries[i].is_separator
                     or self._entries[i].name in (OVERWRITE_NAME, ROOT_FOLDER_NAME)]
 
-        # Step 3: enabled/disabled filter (mutually exclusive — both/neither = off)
-        if self._filter_show_disabled and not self._filter_show_enabled:
+        # Step 3: enabled/disabled filter (tri-state per side).
+        # Include "show only enabled" ≡ exclude "show only disabled" and vice versa,
+        # so we evaluate each side independently rather than picking a winner.
+        if self._filter_show_disabled == 1:
             base = self._apply_filter(
                 base, lambda e: not e.enabled, self._sep_block_has_disabled,
             )
-        elif self._filter_show_enabled and not self._filter_show_disabled:
+        elif self._filter_show_disabled == 2:
+            base = self._exclude_filter(base, lambda e: not e.enabled)
+        if self._filter_show_enabled == 1:
             base = self._apply_filter(
                 base, lambda e: e.enabled, self._sep_block_has_enabled,
             )
+        elif self._filter_show_enabled == 2:
+            base = self._exclude_filter(base, lambda e: e.enabled)
 
-        # Step 4: conflict-type filter — combines four sub-flags into one allowed set.
-        if (self._filter_conflict_winning or self._filter_conflict_losing
-                or self._filter_conflict_partial or self._filter_conflict_full):
-            allowed: set = set()
-            if self._filter_conflict_winning: allowed.add(CONFLICT_WINS)
-            if self._filter_conflict_losing:  allowed.add(CONFLICT_LOSES)
-            if self._filter_conflict_partial: allowed.add(CONFLICT_PARTIAL)
-            if self._filter_conflict_full:    allowed.add(CONFLICT_FULL)
-            cmap, bmap = self._conflict_map, self._bsa_conflict_map
+        # Step 4: conflict-type filter — handle include + exclude sets separately.
+        include_conflicts: set = set()
+        exclude_conflicts: set = set()
+        for state, kind in (
+            (self._filter_conflict_winning, CONFLICT_WINS),
+            (self._filter_conflict_losing,  CONFLICT_LOSES),
+            (self._filter_conflict_partial, CONFLICT_PARTIAL),
+            (self._filter_conflict_full,    CONFLICT_FULL),
+        ):
+            if state == 1:
+                include_conflicts.add(kind)
+            elif state == 2:
+                exclude_conflicts.add(kind)
+        cmap, bmap = self._conflict_map, self._bsa_conflict_map
+        if include_conflicts:
             base = self._apply_filter(
                 base,
-                lambda e: (cmap.get(e.name, CONFLICT_NONE) in allowed
-                           or bmap.get(e.name, CONFLICT_NONE) in allowed),
-                lambda i: self._sep_block_has_conflict_in(i, allowed),
+                lambda e: (cmap.get(e.name, CONFLICT_NONE) in include_conflicts
+                           or bmap.get(e.name, CONFLICT_NONE) in include_conflicts),
+                lambda i: self._sep_block_has_conflict_in(i, include_conflicts),
+            )
+        if exclude_conflicts:
+            base = self._exclude_filter(
+                base,
+                lambda e: (cmap.get(e.name, CONFLICT_NONE) in exclude_conflicts
+                           or bmap.get(e.name, CONFLICT_NONE) in exclude_conflicts),
             )
 
         # Steps 4b–4e3: simple flag-driven filters with optional precomputed mods set.
-        # Spec: (flag attr, mod predicate factory, sep predicate factory, mods_set source)
-        # mods_set source returns None when no precompute is needed; an empty set means
-        # "filter is active but data isn't ready, so show nothing" (clears base entirely).
+        # Each attr is now tri-state. Include uses the original predicate; exclude
+        # inverts the mod predicate and leaves separators alone.
         for attr, mods_factory, mod_pred_fn, sep_pred_fn in self._SIMPLE_FILTER_SPECS:
-            if not getattr(self, attr):
+            state = getattr(self, attr)
+            if not state:
                 continue
             mods_set = mods_factory(self) if mods_factory else None
             if mods_set is not None and not mods_set:
-                base = []
+                # No mods match. Include → show nothing; Exclude → no-op.
+                if state == 1:
+                    base = []
                 continue
-            base = self._apply_filter(
-                base, mod_pred_fn(self, mods_set), sep_pred_fn(self, mods_set),
-            )
+            mod_pred = mod_pred_fn(self, mods_set)
+            if state == 1:
+                base = self._apply_filter(base, mod_pred, sep_pred_fn(self, mods_set))
+            else:
+                base = self._exclude_filter(base, mod_pred)
 
-        # Step 4f: category filter — driven by a non-empty frozenset, not a bool.
+        # Step 4f: category filter — include and exclude sets are independent.
         if self._filter_categories:
             allowed_cats = self._filter_categories
             cats = self._category_names
@@ -2737,8 +2808,15 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                 lambda e: (cats.get(e.name, "") or "") in allowed_cats,
                 lambda i: self._sep_block_has_category(i, allowed_cats),
             )
+        if self._filter_categories_exclude:
+            blocked_cats = self._filter_categories_exclude
+            cats = self._category_names
+            base = self._exclude_filter(
+                base,
+                lambda e: (cats.get(e.name, "") or "") in blocked_cats,
+            )
 
-        # Step 4g: filetype filter — frozenset of extensions (lowercase, with dot).
+        # Step 4g: filetype filter — include and exclude sets are independent.
         if self._filter_filetypes:
             mods_set = self._get_mods_with_filetypes(self._filter_filetypes)
             if not mods_set:
@@ -2749,6 +2827,10 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                     lambda e: e.name in mods_set,
                     lambda i: self._sep_block_has_filetypes(i, mods_set),
                 )
+        if self._filter_filetypes_exclude:
+            ex_mods = self._get_mods_with_filetypes(self._filter_filetypes_exclude)
+            if ex_mods:
+                base = self._exclude_filter(base, lambda e: e.name in ex_mods)
 
         # Step 5: apply column sort (visual only)
         if self._sort_column is not None:
@@ -2765,6 +2847,21 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                 if sep_pred(i):
                     result.append(i)
             elif mod_pred(entry):
+                result.append(i)
+        return result
+
+    def _exclude_filter(self, base: list[int], mod_pred) -> list[int]:
+        """Tri-state EXCLUDE step: drop mods matching `mod_pred(entry)`.
+
+        Separators are always retained (they're filtered elsewhere) — an
+        exclude filter has no concept of "block has any matching mod".
+        """
+        result = []
+        for i in base:
+            entry = self._entries[i]
+            if entry.is_separator:
+                result.append(i)
+            elif not mod_pred(entry):
                 result.append(i)
         return result
 
@@ -3000,7 +3097,8 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                                and name not in self._ignored_missing_reqs)
                 is_locked    = self._entries[i].locked
                 has_update   = name in self._update_mods
-                has_root     = name in self._root_folder_mods
+                has_root     = (name in self._root_folder_mods
+                                or name in self._root_rule_mods)
                 has_disabled = self._mod_is_modified_in_mf(name)
                 has_info     = name in self._prertx_mods
                 has_endorsed = name in self._endorsed_mods
@@ -3239,6 +3337,8 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                     _items.append("disabled_files")
                 if entry.name in self._root_folder_mods:
                     _items.append("root")
+                elif entry.name in self._root_rule_mods:
+                    _items.append("root_rule")
                 _n = len(_items)
                 if _n > 0:
                     _group_w = (_n - 1) * _FLAG_ICON_SPACING
@@ -4051,6 +4151,33 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         self._redraw()
         self._update_info()
 
+    def refresh_show_summary_tooltips(self) -> None:
+        """Re-read the show_summary_tooltips setting from disk (live update)."""
+        self._show_summary_tooltips = load_show_summary_tooltips()
+        if not self._show_summary_tooltips:
+            self._tooltip.hide()
+
+    def _get_mod_description(self, mod_name: str) -> str:
+        """Return the cached Nexus summary for *mod_name*, or "" if none.
+
+        Reads ``meta.ini`` lazily on first request per mod; subsequent calls
+        hit the in-memory cache. Cache is cleared when the update checker
+        completes (the only thing that refreshes descriptions).
+        """
+        if mod_name in self._description_cache:
+            return self._description_cache[mod_name]
+        desc = ""
+        if self._staging_root is not None:
+            meta_path = self._staging_root / mod_name / "meta.ini"
+            if meta_path.is_file():
+                try:
+                    meta = read_meta(meta_path)
+                    desc = (meta.description or "").strip()
+                except Exception:
+                    desc = ""
+        self._description_cache[mod_name] = desc
+        return desc
+
     def _on_mouse_motion(self, event):
         """Update hover highlight as the mouse moves over the modlist."""
         if not self._entries or self._drag_idx >= 0:
@@ -4103,6 +4230,8 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                     _items.append("disabled_files")
                 if entry.name in self._root_folder_mods:
                     _items.append("root")
+                elif entry.name in self._root_rule_mods:
+                    _items.append("root_rule")
                 _n = len(_items)
                 if _n > 0:
                     _group_w = (_n - 1) * _FLAG_ICON_SPACING
@@ -4132,6 +4261,8 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                             tip = "Modified in Mod Files tab"
                         elif _kind == "root":
                             tip = "This mod is sent to the root folder"
+                        elif _kind == "root_rule":
+                            tip = "This mod contains files that route to the game root"
                         else:
                             tip = ""
                         if tip:
@@ -4175,6 +4306,22 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                     else:
                         tip = f"BSA conflict - {_conflict_label[bsa]}"
                     self._tooltip.show(event.x_root, event.y_root, tip)
+                    return
+
+        # Show tooltip with the Nexus summary when hovering over the name column.
+        if not self._show_summary_tooltips:
+            self._tooltip.hide()
+            return
+        name_slot = self._col_pos.get(1, 1)
+        name_col_start = self._COL_X[name_slot]
+        name_col_end = name_col_start + self._COL_W[name_slot]
+        if name_col_start <= x < name_col_end and 0 <= row < len(vis):
+            entry = self._entries[vis[row]]
+            if not entry.is_separator:
+                desc = self._get_mod_description(entry.name)
+                if desc:
+                    tip = (desc[:500] + "…") if len(desc) > 500 else desc
+                    self._tooltip.show(event.x_root, event.y_root, tip, side="right")
                     return
 
         # Show tooltip when hovering over the separator lock checkbox.
@@ -4738,6 +4885,11 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         self._vis_dirty = True
         self._mod_to_sep_idx = None
         self._redraw()
+        # The cached index stores paths with strip_prefixes applied for non-root
+        # mods and verbatim for root-flagged mods. Toggling the flag invalidates
+        # the entry, so rescan just this mod before rebuilding the filemap.
+        self._rescan_root_toggled_mods([mod_name])
+        self._rebuild_filemap()
 
     def _set_root_folder_flag_multi(self, mod_names: list[str], enable: bool) -> None:
         """Apply rootFolder=enable to every mod in mod_names. Skips mods already
@@ -4772,8 +4924,37 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
             self._vis_dirty = True
             self._mod_to_sep_idx = None
             self._redraw()
+            # Index entries for these mods were scanned with the old strip
+            # semantics — rescan before rebuilding the filemap.
+            self._rescan_root_toggled_mods(changed)
         # Rebuild filemap so filemap_root.txt reflects the updated root-folder assignment.
         self._rebuild_filemap()
+
+    def _rescan_root_toggled_mods(self, mod_names: list[str]) -> None:
+        """Rescan the index entries for *mod_names* using current root-flag state.
+
+        The index caches each mod's file list with strip_prefixes applied only
+        for non-root mods (see filemap.rebuild_mod_index). When a mod's
+        root_folder flag flips, its cached paths are wrong for the new state,
+        so this re-runs the scan for just those mods.
+        """
+        if not mod_names or self._filemap_path is None:
+            return
+        try:
+            rescan_mods_in_index(
+                self._filemap_path.parent / "modindex.bin",
+                self._staging_root,
+                mod_names,
+                strip_prefixes=self._strip_prefixes,
+                per_mod_strip_prefixes=self._mod_strip_prefixes or None,
+                allowed_extensions=self._install_extensions or None,
+                normalize_folder_case=self._normalize_folder_case,
+                exclude_dirs=self._filemap_exclude_dirs,
+                log_fn=self._log,
+                root_folder_mods=set(self._root_folder_mods) if self._root_folder_mods else None,
+            )
+        except Exception as exc:
+            self._log(f"Root-folder toggle: index rescan failed — {exc}")
 
     def _on_sep_lock_toggle(self, sep_name: str) -> None:
         self._sep_locks[sep_name] = not self._sep_locks.get(sep_name, False)
@@ -6639,11 +6820,29 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
         if dialog.result is None:
             return
         sep_name = self._unique_separator_name(dialog.result.strip() + "_separator")
-        # Under inverted priority sort, visual above/below is flipped in natural order.
-        visually_above = above
-        if self._sort_column == "priority" and self._sort_ascending:
-            visually_above = not above
-        insert_at = ref_idx if visually_above else ref_idx + 1
+        inverted = (self._sort_column == "priority" and self._sort_ascending)
+        ref_is_sep = self._entries[ref_idx].is_separator
+
+        if ref_is_sep:
+            # A separator is a group header that owns the mod block following it
+            # in natural order. Inserting between the header and its mods would
+            # transfer those mods to the new separator, so we must anchor to the
+            # whole group block — and account for inverted display where group
+            # order is reversed (visual-above == natural-after-block, and
+            # visual-below == natural-before-header).
+            block_end = ref_idx + 1
+            while (block_end < len(self._entries)
+                   and not self._entries[block_end].is_separator):
+                block_end += 1
+            if inverted:
+                insert_at = block_end if above else ref_idx
+            else:
+                insert_at = ref_idx if above else block_end
+        else:
+            # Under inverted priority sort, visual above/below is flipped in
+            # natural order for mod rows (mods within a group are reversed).
+            visually_above = (not above) if inverted else above
+            insert_at = ref_idx if visually_above else ref_idx + 1
         entry = ModEntry(name=sep_name, enabled=True, locked=True, is_separator=True)
         self._entries.insert(insert_at, entry)
         # Keep check_vars aligned (None for separators)
@@ -7392,6 +7591,10 @@ class ModListPanel(ModListFilterPanelMixin, ModListDownloadBarMixin,
                 self._prertx_mods   = prertx_mods
                 self._apply_loose_bsa_fold(loose_over_bsa, bsa_over_loose)
                 self._log(f"Filemap updated: {count} file(s).")
+            # Refresh the auto-detected root-rule flag set now that the index
+            # is guaranteed to exist / be current (handles first-install where
+            # the meta scan ran before the index was written).
+            self._root_rule_mods = self._compute_root_rule_mods()
             self._vis_dirty = True  # conflict filters depend on conflict_map
             self._mod_to_sep_idx = None
             self._redraw()

@@ -20,6 +20,7 @@ import customtkinter as ctk
 import gui.theme as _theme
 from gui.ctk_components import CTkPopupMenu
 from gui.wheel_compat import LEGACY_WHEEL_REDUNDANT
+from gui.tri_state_checkbox import TriStateCheckBox
 from gui.download_locations_overlay import (
     DownloadLocationsOverlay,
     is_cache_default_disabled,
@@ -344,23 +345,25 @@ class DownloadsPanel:
 
         # Filter side panel state
         self._filter_panel_open: bool = False
-        self._fsp_vars: dict[str, tk.BooleanVar] = {}
-        self._fsp_ext_vars: dict[str, tk.BooleanVar] = {}
+        self._fsp_vars: dict[str, tk.IntVar] = {}
+        self._fsp_ext_vars: dict[str, tk.IntVar] = {}
         # Per-location filter — keyed by the resolved source-dir string so
         # the section header label shown in the panel can change without
         # losing the user's selection.
-        self._fsp_loc_vars: dict[str, tk.BooleanVar] = {}
-        # Show-only-installed / Show-only-not-installed toggles. They're
-        # treated as mutually exclusive at apply time (you can't be both).
-        self._fsp_only_installed_var: Optional[tk.BooleanVar] = None
-        self._fsp_only_not_installed_var: Optional[tk.BooleanVar] = None
-        self._filter_state: dict[str, bool] = {}
+        self._fsp_loc_vars: dict[str, tk.IntVar] = {}
+        # Show-only-installed / Show-only-not-installed toggles — tri-state.
+        # Both can be set independently (include and exclude don't conflict).
+        self._fsp_only_installed_var: Optional[tk.IntVar] = None
+        self._fsp_only_not_installed_var: Optional[tk.IntVar] = None
+        self._filter_state: dict[str, int] = {}
         self._filter_extensions: frozenset[str] = frozenset()
+        self._filter_extensions_exclude: frozenset[str] = frozenset()
         # Set of resolved-path strings whose section is allowed through.
         # Empty = no location filter (all locations allowed).
         self._filter_locations: frozenset[str] = frozenset()
-        self._filter_only_installed: bool = False
-        self._filter_only_not_installed: bool = False
+        self._filter_locations_exclude: frozenset[str] = frozenset()
+        self._filter_only_installed: int = 0
+        self._filter_only_not_installed: int = 0
         self._filter_side_panel = None
         self._filter_scroll_frame = None
         self._filter_ext_frame = None
@@ -1326,8 +1329,8 @@ class DownloadsPanel:
             bg=BG_PANEL, anchor="w",
         ).pack(anchor="w", pady=(2, 4))
 
-        self._fsp_only_installed_var = tk.BooleanVar(value=self._filter_only_installed)
-        ctk.CTkCheckBox(
+        self._fsp_only_installed_var = tk.IntVar(value=int(self._filter_only_installed or 0))
+        TriStateCheckBox(
             scroll_frame,
             text="Show only installed",
             variable=self._fsp_only_installed_var,
@@ -1340,8 +1343,8 @@ class DownloadsPanel:
             command=self._on_filter_panel_change,
         ).pack(anchor="w", fill="x", pady=2)
 
-        self._fsp_only_not_installed_var = tk.BooleanVar(value=self._filter_only_not_installed)
-        ctk.CTkCheckBox(
+        self._fsp_only_not_installed_var = tk.IntVar(value=int(self._filter_only_not_installed or 0))
+        TriStateCheckBox(
             scroll_frame,
             text="Show only not installed",
             variable=self._fsp_only_not_installed_var,
@@ -1454,15 +1457,15 @@ class DownloadsPanel:
                 labels[key] = self._section_label_for_dir(entry.src_dir)
 
         # Preserve checked state across rebuilds.
-        prev_checked = {k for k, var in self._fsp_loc_vars.items() if var.get()}
+        prev_state = {k: var.get() for k, var in self._fsp_loc_vars.items()}
         self._fsp_loc_vars = {}
 
         # Sort by label for stable display.
         for key in sorted(counts.keys(), key=lambda k: labels.get(k, k).lower()):
             label = labels.get(key, key)
-            var = tk.BooleanVar(value=key in prev_checked)
+            var = tk.IntVar(value=int(prev_state.get(key, 0)))
             self._fsp_loc_vars[key] = var
-            ctk.CTkCheckBox(
+            TriStateCheckBox(
                 frame,
                 text=f"{label}  ({counts[key]})",
                 variable=var,
@@ -1495,13 +1498,13 @@ class DownloadsPanel:
             counts[ext] = counts.get(ext, 0) + 1
 
         # Preserve checked state across rebuilds
-        prev_checked = {ext for ext, var in self._fsp_ext_vars.items() if var.get()}
+        prev_state = {ext: var.get() for ext, var in self._fsp_ext_vars.items()}
         self._fsp_ext_vars = {}
 
         for ext in sorted(counts.keys()):
-            var = tk.BooleanVar(value=ext in prev_checked)
+            var = tk.IntVar(value=int(prev_state.get(ext, 0)))
             self._fsp_ext_vars[ext] = var
-            ctk.CTkCheckBox(
+            TriStateCheckBox(
                 frame,
                 text=f"{ext}  ({counts[ext]})",
                 variable=var,
@@ -1517,31 +1520,26 @@ class DownloadsPanel:
         self._bind_filter_panel_scroll()
 
     def _on_filter_panel_change(self) -> None:
-        active_exts = {ext for ext, var in self._fsp_ext_vars.items() if var.get()}
-        self._filter_extensions = frozenset(active_exts)
-        active_locs = {k for k, var in self._fsp_loc_vars.items() if var.get()}
-        self._filter_locations = frozenset(active_locs)
-        # Status filters are mutually exclusive — turning one on forces
-        # the other off so the result set isn't always empty.
-        only_inst = (self._fsp_only_installed_var.get()
-                     if self._fsp_only_installed_var is not None else False)
-        only_not = (self._fsp_only_not_installed_var.get()
-                    if self._fsp_only_not_installed_var is not None else False)
-        if only_inst and only_not:
-            # Whichever flipped last is the one the user just clicked;
-            # but we can't tell, so prefer the new value. We keep the
-            # one that *changed* by detecting which differs from current
-            # state. If both already true we just clear "not installed".
-            if not self._filter_only_installed and only_inst:
-                only_not = False
-                if self._fsp_only_not_installed_var is not None:
-                    self._fsp_only_not_installed_var.set(False)
-            else:
-                only_inst = False
-                if self._fsp_only_installed_var is not None:
-                    self._fsp_only_installed_var.set(False)
-        self._filter_only_installed = only_inst
-        self._filter_only_not_installed = only_not
+        self._filter_extensions = frozenset(
+            ext for ext, var in self._fsp_ext_vars.items() if var.get() == 1
+        )
+        self._filter_extensions_exclude = frozenset(
+            ext for ext, var in self._fsp_ext_vars.items() if var.get() == 2
+        )
+        self._filter_locations = frozenset(
+            k for k, var in self._fsp_loc_vars.items() if var.get() == 1
+        )
+        self._filter_locations_exclude = frozenset(
+            k for k, var in self._fsp_loc_vars.items() if var.get() == 2
+        )
+        self._filter_only_installed = (
+            self._fsp_only_installed_var.get()
+            if self._fsp_only_installed_var is not None else 0
+        )
+        self._filter_only_not_installed = (
+            self._fsp_only_not_installed_var.get()
+            if self._fsp_only_not_installed_var is not None else 0
+        )
 
         self._update_filter_btn_color()
         self._apply_filters()
@@ -1562,15 +1560,17 @@ class DownloadsPanel:
         with zero archives are dropped so the view stays tidy.
         """
         wanted_exts = self._filter_extensions
+        excluded_exts = self._filter_extensions_exclude
         wanted_locs = self._filter_locations
+        excluded_locs = self._filter_locations_exclude
         only_installed = self._filter_only_installed
         only_not_installed = self._filter_only_not_installed
         installed = self._installed_filenames
         query = self._search_query
 
         any_active = bool(
-            wanted_exts or wanted_locs or only_installed
-            or only_not_installed or query
+            wanted_exts or excluded_exts or wanted_locs or excluded_locs
+            or only_installed or only_not_installed or query
         )
         if not any_active:
             self._visible_files = list(self._files)
@@ -1587,14 +1587,24 @@ class DownloadsPanel:
         def _archive_matches(arc: DownloadEntry) -> bool:
             if arc.path is None:
                 return False
-            if wanted_exts and self._file_extension(arc.path.name) not in wanted_exts:
+            ext = self._file_extension(arc.path.name)
+            if wanted_exts and ext not in wanted_exts:
                 return False
-            if wanted_locs and _resolved_dir(arc.src_dir) not in wanted_locs:
+            if excluded_exts and ext in excluded_exts:
+                return False
+            loc = _resolved_dir(arc.src_dir)
+            if wanted_locs and loc not in wanted_locs:
+                return False
+            if excluded_locs and loc in excluded_locs:
                 return False
             is_installed = installed.is_archive_installed(arc.path.name)
-            if only_installed and not is_installed:
+            if only_installed == 1 and not is_installed:
                 return False
-            if only_not_installed and is_installed:
+            if only_installed == 2 and is_installed:
+                return False
+            if only_not_installed == 1 and is_installed:
+                return False
+            if only_not_installed == 2 and not is_installed:
                 return False
             if query and query not in arc.path.name.casefold():
                 return False
@@ -1651,13 +1661,16 @@ class DownloadsPanel:
 
     def _clear_all_filters(self) -> None:
         for v in self._fsp_ext_vars.values():
-            v.set(False)
+            v.set(0)
         for v in self._fsp_loc_vars.values():
-            v.set(False)
+            v.set(0)
         if self._fsp_only_installed_var is not None:
-            self._fsp_only_installed_var.set(False)
+            self._fsp_only_installed_var.set(0)
         if self._fsp_only_not_installed_var is not None:
-            self._fsp_only_not_installed_var.set(False)
+            self._fsp_only_not_installed_var.set(0)
+        # Rebuild the lists so the TriStateCheckBoxes redraw their visuals.
+        self._refresh_filter_extension_list()
+        self._refresh_filter_location_list()
         self._on_filter_panel_change()
 
     def _update_filter_btn_color(self) -> None:
@@ -1665,7 +1678,8 @@ class DownloadsPanel:
         if btn is None:
             return
         any_active = bool(
-            self._filter_extensions or self._filter_locations
+            self._filter_extensions or self._filter_extensions_exclude
+            or self._filter_locations or self._filter_locations_exclude
             or self._filter_only_installed or self._filter_only_not_installed
         )
         btn.configure(fg_color=ACCENT_HOV if any_active else ACCENT)

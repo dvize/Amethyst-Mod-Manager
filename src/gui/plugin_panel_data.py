@@ -283,13 +283,13 @@ class PluginPanelDataMixin:
         )
         scroll_frame.pack(fill="both", expand=True, padx=8, pady=6)
 
-        ctk.CTkLabel(
-            scroll_frame, text="Show only filetypes:",
-            font=_theme.FONT_SMALL, text_color=TEXT_DIM, anchor="w",
-        ).pack(anchor="w")
+        tk.Label(
+            scroll_frame, text="By file type",
+            font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
+        ).pack(anchor="w", pady=(2, 4))
         self._dfsp_filetype_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         self._dfsp_filetype_frame.pack(anchor="w", fill="x", pady=(2, 0))
-        self._dfsp_filetype_vars: dict[str, tk.BooleanVar] = {}
+        self._dfsp_filetype_vars: dict[str, tk.IntVar] = {}
 
         self._data_filter_scroll_frame = scroll_frame
         self._bind_data_filter_panel_scroll()
@@ -338,11 +338,19 @@ class PluginPanelDataMixin:
             ).pack(anchor="w", pady=2)
             self._bind_data_filter_panel_scroll()
             return
+        from gui.tri_state_checkbox import TriStateCheckBox
         ordered = sorted(counts.items(), key=lambda kv: kv[0])
+        excludes = getattr(self, "_data_filter_filetypes_exclude", frozenset())
         for ext, count in ordered:
-            var = tk.BooleanVar(value=ext in self._data_filter_filetypes)
+            if ext in self._data_filter_filetypes:
+                init = 1
+            elif ext in excludes:
+                init = 2
+            else:
+                init = 0
+            var = tk.IntVar(value=init)
             self._dfsp_filetype_vars[ext] = var
-            ctk.CTkCheckBox(
+            TriStateCheckBox(
                 self._dfsp_filetype_frame,
                 text=f"{ext}  ({count:,})",
                 variable=var,
@@ -403,19 +411,23 @@ class PluginPanelDataMixin:
         if btn is None:
             return
         # Match Downloads tab: ACCENT (idle) → ACCENT_HOV (filters active).
-        if self._data_filter_filetypes:
+        if self._data_filter_filetypes or getattr(self, "_data_filter_filetypes_exclude", None):
             btn.configure(fg_color=ACCENT_HOV, hover_color=ACCENT_HOV)
         else:
             btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOV)
 
     def _clear_all_data_filters(self) -> None:
         for v in self._dfsp_filetype_vars.values():
-            v.set(False)
+            v.set(0)
+        self._refresh_data_filter_filetype_list()
         self._on_data_filter_panel_change()
 
     def _on_data_filter_panel_change(self) -> None:
         self._data_filter_filetypes = frozenset(
-            ext for ext, v in self._dfsp_filetype_vars.items() if v.get()
+            ext for ext, v in self._dfsp_filetype_vars.items() if v.get() == 1
+        )
+        self._data_filter_filetypes_exclude = frozenset(
+            ext for ext, v in self._dfsp_filetype_vars.items() if v.get() == 2
         )
         self._update_data_filter_btn_color()
         # Re-run search/filter pipeline so the tree reflects the new filtertype set.
@@ -833,6 +845,7 @@ class PluginPanelDataMixin:
             self._data_only_conflicts_var and self._data_only_conflicts_var.get()
         )
         filetype_filter = getattr(self, "_data_filter_filetypes", frozenset())
+        filetype_exclude = getattr(self, "_data_filter_filetypes_exclude", frozenset())
 
         tree_dict: dict = {}
         for rel_path, mod_name in entries:
@@ -840,13 +853,20 @@ class PluginPanelDataMixin:
             rel_key_lower = rel_norm.lower()
             if only_conflicts and rel_key_lower not in contested_keys:
                 continue
-            if filetype_filter:
+            if filetype_filter or filetype_exclude:
                 _dot = rel_key_lower.rfind(".")
                 _slash = rel_key_lower.rfind("/")
                 if _dot <= _slash:
-                    continue
-                if rel_key_lower[_dot:] not in filetype_filter:
-                    continue
+                    # No extension → can't be filtered in/out by ext; only drop
+                    # when an include set is set (must match something).
+                    if filetype_filter:
+                        continue
+                else:
+                    _ext = rel_key_lower[_dot:]
+                    if filetype_filter and _ext not in filetype_filter:
+                        continue
+                    if filetype_exclude and _ext in filetype_exclude:
+                        continue
             parts = rel_norm.split("/")
             node = tree_dict
             for part in parts[:-1]:

@@ -668,6 +668,83 @@ def rebuild_mod_index(
     _write_mod_index(index_path, index, normalize_folder_case=normalize_folder_case)
 
 
+def rescan_mods_in_index(
+    index_path: Path,
+    staging_root: Path,
+    mod_names: list[str],
+    strip_prefixes: set[str] | None = None,
+    per_mod_strip_prefixes: dict[str, list[str]] | None = None,
+    allowed_extensions: set[str] | None = None,
+    normalize_folder_case: bool = True,
+    exclude_dirs: frozenset[str] | None = None,
+    log_fn: "Callable[[str], None] | None" = None,
+    root_folder_mods: set[str] | None = None,
+) -> None:
+    """Re-scan a specific subset of mods and update their entries in the index.
+
+    Used when a mod's root_folder flag is toggled: a root-flagged mod must not
+    have ``strip_prefixes`` (e.g. Bethesda's ``Data``) applied to its files,
+    otherwise the cached paths point to the wrong deploy location once the
+    flag flips.  Rescanning just the affected mods is far cheaper than a full
+    Refresh.
+    """
+    if not mod_names:
+        return
+    _strip = frozenset(s.lower() for s in strip_prefixes) if strip_prefixes else frozenset()
+    _per_mod = per_mod_strip_prefixes or {}
+    _root_mods = root_folder_mods or set()
+    _exts  = frozenset(e.lower() for e in allowed_extensions) if allowed_extensions else frozenset()
+    _excl_dirs = exclude_dirs if exclude_dirs is not None else frozenset()
+
+    index = read_mod_index(index_path) or {}
+
+    def _strip_for_mod(name: str) -> frozenset[str]:
+        if name in _root_mods:
+            return frozenset()
+        mod_strip = _per_mod.get(name)
+        if not mod_strip:
+            return _strip
+        segment_names = [s for s in mod_strip if "/" not in s]
+        return _strip | frozenset(s.lower() for s in segment_names)
+
+    def _path_prefixes_for_mod(name: str) -> list[str]:
+        if name in _root_mods:
+            return []
+        mod_strip = _per_mod.get(name)
+        if not mod_strip:
+            return []
+        return [s for s in mod_strip if "/" in s]
+
+    targets: list[tuple[str, str]] = []
+    for name in mod_names:
+        mod_dir = staging_root / name
+        if mod_dir.is_dir():
+            targets.append((name, str(mod_dir)))
+    if not targets:
+        return
+
+    futures = {
+        _POOL.submit(
+            _scan_dir, name, d, _strip_for_mod(name), _exts, frozenset(),
+            strip_path_prefixes=_path_prefixes_for_mod(name),
+            exclude_dirs=_excl_dirs,
+        ): name
+        for name, d in targets
+    }
+    for fut in futures:
+        name, normal, root, invalid_names = fut.result()
+        if invalid_names:
+            if log_fn is not None:
+                log_fn(
+                    f"WARN: Mod \"{name}\" skipped — contains file(s) with "
+                    f"non-UTF-8 name(s): {', '.join(invalid_names)}"
+                )
+            continue
+        index[name] = (normal, root)
+
+    _write_mod_index(index_path, index, normalize_folder_case=normalize_folder_case)
+
+
 def _compute_conflict_status(
     priority_order: list[str],
     overrides: dict[str, set[str]],

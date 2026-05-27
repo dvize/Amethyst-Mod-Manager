@@ -58,8 +58,10 @@ from gui.theme import (
     BG_GREEN_ROW,
     BG_GREEN_DEEP,
     BG_RED_DEEP,
+    BG_ORANGE_DEEP,
     BG_GREEN_TEXT,
     BG_RED_TEXT,
+    BG_ORANGE_TEXT,
     BG_OVERLAY_ERR,
     STATUS_ERR_BRIGHT,
     TEXT_WHITE,
@@ -794,6 +796,7 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
         self._data_realised_nodes: set[str] = set()
         # Data tab filter side panel state
         self._data_filter_filetypes: frozenset[str] = frozenset()
+        self._data_filter_filetypes_exclude: frozenset[str] = frozenset()
         self._data_filter_panel_open: bool = False
 
         self._build_plugins_tab()
@@ -1886,8 +1889,8 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
         mod_panel.grid_columnconfigure(0, minsize=scaled(380))
         self._plugin_filter_side_panel.grid()
         # Sync checkbox vars to current live filter state
-        for key, var in self._pfsp_vars.items():
-            var.set(self._plugin_filter_state.get(key, False))
+        for key, cb in self._pfsp_checkboxes.items():
+            cb.set_state(int(self._plugin_filter_state.get(key, 0) or 0))
         self._bind_plugin_filter_panel_scroll()
         self._update_plugin_filter_btn_color()
 
@@ -2203,27 +2206,29 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
         scroll_frame.pack(fill="both", expand=True, padx=8, pady=6)
 
         opts = [
-            ("filter_enabled",         "Show only enabled plugins"),
-            ("filter_disabled",        "Show only disabled plugins"),
-            ("filter_missing_masters", "Show only plugins with missing masters"),
-            ("filter_esl_ext",         "Show only ESL plugins (.esl extension)"),
-            ("filter_esm_ext",         "Show only ESM plugins (.esm extension)"),
-            ("filter_esp_ext",         "Show only ESP plugins (.esp extension)"),
-            ("filter_esl_flagged",     "Show only ESL-flagged (light) plugins"),
-            ("filter_esl_not_flagged",  "Show only plugins not flagged as ESL"),
-            ("filter_esl_safe",        "Show only ESL-safe plugins"),
-            ("filter_esl_unsafe",      "Show only ESL-unsafe plugins"),
-            ("filter_userlist",        "Show only plugins managed by userlist.yaml"),
-            ("filter_bos_sp",          "Show only BOS/SP-patched plugins [B/S badge]"),
-            ("filter_bos_only",        "Show only BOS-patched plugins [B badge]"),
-            ("filter_sp_only",         "Show only SkyPatcher-patched plugins [S badge]"),
+            ("filter_enabled",         "Enabled plugins"),
+            ("filter_disabled",        "Disabled plugins"),
+            ("filter_missing_masters", "Plugins with missing masters"),
+            ("filter_esl_ext",         "ESL plugins (.esl extension)"),
+            ("filter_esm_ext",         "ESM plugins (.esm extension)"),
+            ("filter_esp_ext",         "ESP plugins (.esp extension)"),
+            ("filter_esl_flagged",     "ESL-flagged (light) plugins"),
+            ("filter_esl_not_flagged", "Plugins not flagged as ESL"),
+            ("filter_esl_safe",        "ESL-safe plugins"),
+            ("filter_esl_unsafe",      "ESL-unsafe plugins"),
+            ("filter_userlist",        "Plugins managed by userlist.yaml"),
+            ("filter_bos_sp",          "BOS/SP-patched plugins [B/S badge]"),
+            ("filter_bos_only",        "BOS-patched plugins [B badge]"),
+            ("filter_sp_only",         "SkyPatcher-patched plugins [S badge]"),
         ]
 
-        self._pfsp_vars: dict[str, tk.BooleanVar] = {}
+        from gui.tri_state_checkbox import TriStateCheckBox
+        self._pfsp_vars: dict[str, tk.IntVar] = {}
+        self._pfsp_checkboxes: dict[str, TriStateCheckBox] = {}
         for key, label in opts:
-            var = tk.BooleanVar(value=False)
+            var = tk.IntVar(value=0)
             self._pfsp_vars[key] = var
-            ctk.CTkCheckBox(
+            cb = TriStateCheckBox(
                 scroll_frame,
                 text=label,
                 variable=var,
@@ -2234,7 +2239,9 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 border_color=BORDER,
                 checkmark_color="white",
                 command=self._on_plugin_filter_panel_change,
-            ).pack(anchor="w", fill="x", pady=3)
+            )
+            cb.pack(anchor="w", fill="x", pady=3)
+            self._pfsp_checkboxes[key] = cb
 
         self._plugin_filter_scroll_frame = scroll_frame
         self._bind_plugin_filter_panel_scroll()
@@ -2261,8 +2268,8 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
         _bind_recursive(scroll_frame)
 
     def _clear_all_plugin_filters(self) -> None:
-        for v in self._pfsp_vars.values():
-            v.set(False)
+        for cb in self._pfsp_checkboxes.values():
+            cb.set_state(0)
         self._on_plugin_filter_panel_change()
 
     def _on_plugin_filter_panel_change(self) -> None:
@@ -2435,8 +2442,21 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
             self._plugin_filtered_indices = None
             return
 
-        # Gather sets needed by active filters
-        missing_lower = {k.lower() for k in self._missing_masters.keys()} if fs.get("filter_missing_masters") else set()
+        # Tri-state predicate helper: returns True if entry should be kept.
+        # state 1 (include) keeps matches; state 2 (exclude) keeps non-matches.
+        def _tri(state, matches: bool) -> bool:
+            if not state:
+                return True
+            if state == 1:
+                return matches
+            return not matches
+
+        missing_lower = {k.lower() for k in self._missing_masters.keys()}
+        esl_flagged = self._esl_flagged_plugins
+        esl_safe = self._esl_safe_plugins
+        esl_unsafe = self._esl_unsafe_plugins
+        userlist = self._userlist_plugins
+        bos_sp = self._bos_sp_plugins
 
         result = []
         for i, entry in enumerate(self._plugin_entries):
@@ -2449,40 +2469,39 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 if not name_match and not (mod_name and query in mod_name.casefold()):
                     continue
 
-            # --- filter state ---
-            if fs:
-                if fs.get("filter_enabled") and not entry.enabled:
+            if not fs:
+                result.append(i)
+                continue
+
+            checks = (
+                (fs.get("filter_enabled"),         entry.enabled),
+                (fs.get("filter_disabled"),        not entry.enabled),
+                (fs.get("filter_missing_masters"), name_lower in missing_lower),
+                (fs.get("filter_esl_ext"),         name_lower.endswith(".esl")),
+                (fs.get("filter_esm_ext"),         name_lower.endswith(".esm")),
+                (fs.get("filter_esp_ext"),         name_lower.endswith(".esp")),
+                (fs.get("filter_esl_flagged"),     name_lower in esl_flagged),
+                (fs.get("filter_esl_not_flagged"), name_lower not in esl_flagged),
+                (fs.get("filter_esl_safe"),        name_lower in esl_safe),
+                (fs.get("filter_esl_unsafe"),      name_lower in esl_unsafe),
+                (fs.get("filter_userlist"),        name_lower in userlist),
+                (fs.get("filter_bos_sp"),          name_lower in bos_sp),
+            )
+            if not all(_tri(s, m) for s, m in checks):
+                continue
+
+            # BOS/SP have a union case when both are INCLUDE-checked, so keep
+            # bespoke handling for those two flags.
+            bos_state = fs.get("filter_bos_only") or 0
+            sp_state = fs.get("filter_sp_only") or 0
+            _bos_kind = bos_sp.get(name_lower, "")
+            if bos_state == 1 and sp_state == 1:
+                if not _bos_kind:
                     continue
-                if fs.get("filter_disabled") and entry.enabled:
+            else:
+                if bos_state and not _tri(bos_state, _bos_kind in ("bos", "both")):
                     continue
-                if fs.get("filter_missing_masters") and name_lower not in missing_lower:
-                    continue
-                if fs.get("filter_esl_ext") and not name_lower.endswith(".esl"):
-                    continue
-                if fs.get("filter_esm_ext") and not name_lower.endswith(".esm"):
-                    continue
-                if fs.get("filter_esp_ext") and not name_lower.endswith(".esp"):
-                    continue
-                if fs.get("filter_esl_flagged") and name_lower not in self._esl_flagged_plugins:
-                    continue
-                if fs.get("filter_esl_not_flagged") and name_lower in self._esl_flagged_plugins:
-                    continue
-                if fs.get("filter_esl_safe") and name_lower not in self._esl_safe_plugins:
-                    continue
-                if fs.get("filter_esl_unsafe") and name_lower not in self._esl_unsafe_plugins:
-                    continue
-                if fs.get("filter_userlist") and name_lower not in self._userlist_plugins:
-                    continue
-                if fs.get("filter_bos_sp") and name_lower not in self._bos_sp_plugins:
-                    continue
-                # Both checked = show any patched plugin (union)
-                _bos_kind = self._bos_sp_plugins.get(name_lower, "")
-                if fs.get("filter_bos_only") and fs.get("filter_sp_only"):
-                    if not _bos_kind:
-                        continue
-                elif fs.get("filter_bos_only") and _bos_kind not in ("bos", "both"):
-                    continue
-                elif fs.get("filter_sp_only") and _bos_kind not in ("sp", "both"):
+                if sp_state and not _tri(sp_state, _bos_kind in ("sp", "both")):
                     continue
 
             result.append(i)
@@ -2701,6 +2720,8 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
     _FW_GREEN_TEXT = BG_GREEN_TEXT
     _FW_RED_BG     = BG_RED_DEEP
     _FW_RED_TEXT   = BG_RED_TEXT
+    _FW_ORANGE_BG  = BG_ORANGE_DEEP
+    _FW_ORANGE_TEXT = BG_ORANGE_TEXT
 
     def _refresh_framework_banners(self) -> None:
         """Rebuild the framework status banners at the top of the Plugins tab.
@@ -2744,6 +2765,23 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
         # Show the container now that we know there's at least one banner to display
         self._framework_banners_frame.grid(row=1, column=0, sticky="ew")
 
+        # Set of filemap keys (deploy-relative paths, lowercased) — lets us tell
+        # "not deployed but staged in the modlist" apart from "not present at all".
+        staged_keys: set[str] = set()
+        filemap_path_str = self._get_filemap_path()
+        if filemap_path_str:
+            fm_path = Path(filemap_path_str)
+            if fm_path.is_file():
+                try:
+                    with fm_path.open(encoding="utf-8") as f:
+                        for line in f:
+                            if "\t" not in line:
+                                continue
+                            rel_path = line.split("\t", 1)[0].replace("\\", "/")
+                            staged_keys.add(rel_path.lower())
+                except OSError:
+                    pass
+
         # Build the desired banner states
         banner_data: list[tuple[str, str, str]] = []  # (msg, bg, fg)
         for label, exe in frameworks.items():
@@ -2761,6 +2799,12 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                     f"✔  {label} Installed",
                     self._FW_GREEN_BG,
                     self._FW_GREEN_TEXT,
+                ))
+            elif exe.replace("\\", "/").lower() in staged_keys:
+                banner_data.append((
+                    f"●  {label} present in modlist but not deployed",
+                    self._FW_ORANGE_BG,
+                    self._FW_ORANGE_TEXT,
                 ))
             else:
                 banner_data.append((
