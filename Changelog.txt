@@ -8,6 +8,9 @@
 - The missing requirements menu separates required/optional mods by keywords in their description
 - Added support for Bain type mods
 - Tweaked d3dcompiler_47 installer to install more up to date version
+- Fix for auto deploy removing game files when multiple deploy functions are called at the same time
+- Added sideload_apps/library.json as a install location for games installed within heroic
+- Tools in the proton menu use the proton version set in heroic's gameconfig files instead of falling back to a random version.
 
 - v1.3.6
 - Tweaked Bethesda game routing rules to stop some dll files incorrectly being sent to the root folder
