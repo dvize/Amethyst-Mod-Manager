@@ -11,6 +11,7 @@
 - Fix for auto deploy removing game files when multiple deploy functions are called at the same time
 - Added sideload_apps/library.json as a install location for games installed within heroic
 - Tools in the proton menu use the proton version set in heroic's gameconfig files instead of falling back to a random version.
+- Added a size column to the modlist panel, Hidden by default
 
 - v1.3.6
 - Tweaked Bethesda game routing rules to stop some dll files incorrectly being sent to the root folder
