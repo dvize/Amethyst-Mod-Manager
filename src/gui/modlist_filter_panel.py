@@ -47,7 +47,15 @@ _FILTER_CHECKBOXES: tuple[tuple[str, str, str], ...] = (
     ("filter_fomod_only",           "FOMOD mods",                     "_filter_fomod_only"),
     ("filter_bain_only",            "BAIN mods",                      "_filter_bain_only"),
     ("filter_has_bsa",              "Mods with BSA archives",         "_filter_has_bsa"),
+    ("filter_has_pbr",              "Contains PBR textures",          "_filter_has_pbr"),
 )
+
+# Filters that only apply to a specific game. Maps var_key → predicate on the
+# active game; the checkbox is hidden (and its state cleared) when the active
+# game doesn't match. PBR textures (textures/pbr) are only relevant to Skyrim SE.
+_GAME_SPECIFIC_FILTERS = {
+    "filter_has_pbr": lambda game: getattr(game, "nexus_game_domain", "") == "skyrimspecialedition",
+}
 
 
 class ModListFilterPanelMixin:
@@ -133,10 +141,11 @@ class ModListFilterPanelMixin:
             cb.pack(anchor="w", fill="x", pady=3)
             self._fsp_checkboxes[key] = cb
 
-        tk.Label(
+        self._fsp_category_label = tk.Label(
             scroll_frame, text="By category",
             font=_theme.FONT_BOLD, fg=TEXT_MAIN, bg=BG_PANEL, anchor="w",
-        ).pack(anchor="w", pady=(10, 4))
+        )
+        self._fsp_category_label.pack(anchor="w", pady=(10, 4))
         self._fsp_category_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         self._fsp_category_frame.pack(anchor="w", fill="x", pady=(2, 0))
         self._fsp_category_vars: dict[str, tk.IntVar] = {}
@@ -361,6 +370,7 @@ class ModListFilterPanelMixin:
             else:
                 self._fsp_vars[key].set(1 if val else 0)
         self._refresh_archive_filter_label()
+        self._refresh_game_specific_filters()
         self._refresh_filter_category_list()
         self._refresh_filter_filetype_list()
         self._update_filter_btn_color()
@@ -368,6 +378,35 @@ class ModListFilterPanelMixin:
         # modlist reflow that follows is the slow part.
         if self._filter_plugin_panel_was_visible and hasattr(app, "_toggle_plugin_panel"):
             self.after_idle(app._toggle_plugin_panel)
+
+    def _refresh_game_specific_filters(self) -> None:
+        """Show/hide game-specific filter checkboxes based on the active game.
+        Hidden checkboxes also have their state cleared so a stale filter from
+        a previous game can't keep hiding rows."""
+        game = getattr(self, "_game", None)
+        for key, predicate in _GAME_SPECIFIC_FILTERS.items():
+            cb = getattr(self, "_fsp_checkboxes", {}).get(key)
+            if cb is None:
+                continue
+            show = bool(game is not None and predicate(game))
+            if show:
+                if not cb.winfo_ismapped():
+                    # Keep it within the "By status" group, above the category list.
+                    before = getattr(self, "_fsp_category_label", None)
+                    if before is not None and before.winfo_exists():
+                        cb.pack(anchor="w", fill="x", pady=3, before=before)
+                    else:
+                        cb.pack(anchor="w", fill="x", pady=3)
+            else:
+                # Clear any active state, then hide the widget.
+                attr = next((a for k, _l, a in _FILTER_CHECKBOXES if k == key), None)
+                if attr is not None and int(getattr(self, attr, 0) or 0):
+                    if isinstance(cb, TriStateCheckBox):
+                        cb.set_state(STATE_OFF)
+                    else:
+                        self._fsp_vars[key].set(0)
+                    self._on_filter_panel_change()
+                cb.pack_forget()
 
     def _refresh_archive_filter_label(self) -> None:
         """Relabel the 'has archives' checkbox to match the active game's

@@ -18,11 +18,12 @@ from Utils.app_log import safe_log as _safe_log
 from Utils.deploy_shared import (
     LinkMode,
     _deploy_workers,
+    _do_link_ex,
+    _mkdir_leaves,
     _path_under_root,
     _prune_empty_dirs,
     _resolve_root_path,
     _restore_backup_dir,
-    _transfer,
 )
 
 
@@ -60,55 +61,91 @@ def deploy_root_folder(
     if not root_folder_dir.is_dir():
         return 0
 
-    # Collect all source files first; bail early if none.
+    # Collect all source files first; bail early if none.  os.walk gets the
+    # file/dir split from readdir d_type — no stat per entry like rglob+is_file.
     sources: list[tuple[Path, Path]] = []   # (src, rel)
-    for src in root_folder_dir.rglob("*"):
-        if src.is_file():
-            sources.append((src, src.relative_to(root_folder_dir)))
+    _root_str = str(root_folder_dir)
+    _root_plen = len(_root_str) + 1
+    for dirpath, _dirnames, filenames in os.walk(_root_str):
+        for fname in filenames:
+            full = dirpath + "/" + fname
+            sources.append((Path(full), Path(full[_root_plen:])))
 
     if not sources:
         return 0
 
     backup_dir = root_folder_dir.parent / _ROOT_BACKUP_NAME
     log_path   = root_folder_dir.parent / _ROOT_LOG_NAME
-    placed: list[str] = []
 
-    # Track which top-level directories we are creating so restore can wipe
+    # Resolve destinations case-insensitively against the game tree (shared
+    # dir cache — one iterdir per directory instead of one per file) and
+    # track which top-level directories we are creating so restore can wipe
     # them entirely — including any game-generated files written into them
     # after deploy (e.g. BepInEx cache/config/log files).
+    _dir_cache: dict = {}
+    _top_preexisted: dict[str, bool] = {}
     created_dirs: set[str] = set()
-
+    tasks: list[tuple[Path, Path, Path, str]] = []  # (src, dst, rel, rel_posix)
     for src, rel in sources:
-        dst = _resolve_root_path(game_root, rel)
-        # Record the top-level directory we're about to create (if new).
-        # Use the resolved (possibly case-corrected) top-level name.
-        top = dst.relative_to(game_root).parts[0] if len(rel.parts) > 1 else None
-        if top and not (game_root / top).exists():
-            created_dirs.add(top)
+        dst = _resolve_root_path(game_root, rel, _dir_cache)
+        if len(rel.parts) > 1:
+            # Use the resolved (possibly case-corrected) top-level name.
+            top = dst.relative_to(game_root).parts[0]
+            pre = _top_preexisted.get(top)
+            if pre is None:
+                pre = (game_root / top).exists()
+                _top_preexisted[top] = pre
+            if not pre:
+                created_dirs.add(top)
+        tasks.append((src, dst, rel, str(rel).replace("\\", "/")))
 
-        # Back up any pre-existing file so restore can put it back.
-        if dst.exists() and not dst.is_symlink():
+    def _write_log(rels: "list[str]") -> None:
+        # Files on the first line block, then a separator, then directories
+        # we created that should be fully removed on restore.
+        with log_path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(rels))
+            if created_dirs:
+                f.write("\n---dirs---\n")
+                f.write("\n".join(sorted(created_dirs)))
+
+    # Write the log BEFORE touching the game dir: if the deploy is interrupted
+    # mid-transfer, restore still knows everything we may have placed (a
+    # listed file that never landed is a harmless no-op on restore).
+    _write_log([rel_posix for _s, _d, _r, rel_posix in tasks])
+
+    # Back up any pre-existing files so restore can put them back; drop stale
+    # symlinks from a previous deploy.  One lstat per destination.
+    for _src, dst, rel, _rel_posix in tasks:
+        try:
+            st = os.lstat(dst)
+        except OSError:
+            continue
+        if _stat.S_ISLNK(st.st_mode):
+            dst.unlink()
+        elif _stat.S_ISREG(st.st_mode):
             bak = backup_dir / rel
             bak.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(dst), str(bak))
             _log(f"  Backed up existing {rel} → Root_Backup/")
-        elif dst.is_symlink():
-            dst.unlink()
 
-        try:
-            _transfer(src, dst, mode)
-            placed.append(str(rel).replace("\\", "/"))
-        except OSError as e:
-            _log(f"  WARN: could not transfer root file {rel}: {e}")
+    # Pre-create destination directories, then transfer in parallel.
+    _mkdir_leaves({os.path.dirname(str(dst)) for _s, dst, _r, _p in tasks})
+    placed: list[str] = []
 
-    # Write the deployment log: files on the first line block, then a
-    # separator, then directories we created that should be fully removed on
-    # restore (deepest first so rmtree on each is safe).
-    with log_path.open("w", encoding="utf-8") as f:
-        f.write("\n".join(placed))
-        if created_dirs:
-            f.write("\n---dirs---\n")
-            f.write("\n".join(sorted(created_dirs)))
+    def _do_root(item: "tuple[Path, Path, Path, str]"):
+        src, dst, _rel, rel_posix = item
+        _actual, err = _do_link_ex(str(src), str(dst), mode)
+        return rel_posix, err
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_deploy_workers()) as pool:
+        for rel_posix, err in pool.map(_do_root, tasks):
+            if err is None:
+                placed.append(rel_posix)
+            else:
+                _log(f"  WARN: could not transfer root file {rel_posix}: {err}")
+
+    # Re-write the log with what actually landed.
+    _write_log(placed)
 
     print(f"  [TIMER] deploy_root_folder: transferred {len(placed)} files")
     _log(f"  Root Folder: {len(placed)} file(s) transferred to game root.")
@@ -172,11 +209,12 @@ def deploy_root_flagged_mods(
             existing_placed = [p for p in content.splitlines() if p]
 
     existing_placed_set = set(existing_placed)
-    placed: list[str] = []
     created_dirs: set[str] = set(existing_dirs)
 
     # Build a quick dir-resolution cache for game_root lookups
     _dir_cache: dict = {}
+    _top_seen: dict[str, bool] = {}
+    tasks: list[tuple[Path, Path, str]] = []  # (src, dst, rel_posix)
 
     for rel_str, mod_name in entries:
         # Locate source in staging, trying per-mod then shared strip prefixes.
@@ -202,46 +240,69 @@ def deploy_root_flagged_mods(
         if rel_posix in existing_placed_set:
             continue
 
-        # Record whether the top-level dir existed *before* we transferred,
+        # Record whether the top-level dir existed *before* we transfer,
         # so restore knows whether to remove it. Only meaningful for nested paths.
-        _top_preexisted = True
-        _top_name: str | None = None
-        _rel_parts = Path(rel_str).parts
-        if len(_rel_parts) > 1:
+        if len(Path(rel_str).parts) > 1:
             try:
                 _top_name = dst.relative_to(game_root).parts[0]
             except ValueError:
                 _top_name = None
             if _top_name:
-                _top_preexisted = (game_root / _top_name).exists()
+                pre = _top_seen.get(_top_name)
+                if pre is None:
+                    pre = (game_root / _top_name).exists()
+                    _top_seen[_top_name] = pre
+                if not pre:
+                    created_dirs.add(_top_name)
 
-        # Back up any pre-existing file
-        if dst.exists() and not dst.is_symlink():
-            bak = backup_dir / Path(rel_str)
-            bak.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dst), str(bak))
-            _log(f"  Backed up existing {rel_str} → Root_Backup/")
-        elif dst.is_symlink():
-            dst.unlink()
+        tasks.append((src, dst, rel_posix))
 
-        try:
-            _transfer(src, dst, mode)
-            placed.append(rel_posix)
-            if _top_name and not _top_preexisted:
-                created_dirs.add(_top_name)
-        except OSError as e:
-            _log(f"  WARN: could not transfer root-flagged file {rel_str}: {e}")
-
-    if not placed:
+    if not tasks:
         return 0
 
-    # Re-write the log, merging with any existing entries from deploy_root_folder
-    all_placed = existing_placed + placed
-    with log_path.open("w", encoding="utf-8") as f:
-        f.write("\n".join(all_placed))
-        if created_dirs:
-            f.write("\n---dirs---\n")
-            f.write("\n".join(sorted(created_dirs)))
+    def _write_log(rels: "list[str]") -> None:
+        # Merge with any existing entries from deploy_root_folder.
+        with log_path.open("w", encoding="utf-8") as f:
+            f.write("\n".join(existing_placed + rels))
+            if created_dirs:
+                f.write("\n---dirs---\n")
+                f.write("\n".join(sorted(created_dirs)))
+
+    # Write the log BEFORE touching the game dir (see deploy_root_folder).
+    _write_log([rel_posix for _s, _d, rel_posix in tasks])
+
+    # Back up pre-existing files / drop stale symlinks.  One lstat each.
+    for _src, dst, rel_posix in tasks:
+        try:
+            st = os.lstat(dst)
+        except OSError:
+            continue
+        if _stat.S_ISLNK(st.st_mode):
+            dst.unlink()
+        elif _stat.S_ISREG(st.st_mode):
+            bak = backup_dir / rel_posix
+            bak.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dst), str(bak))
+            _log(f"  Backed up existing {rel_posix} → Root_Backup/")
+
+    # Pre-create destination directories, then transfer in parallel.
+    _mkdir_leaves({os.path.dirname(str(dst)) for _s, dst, _p in tasks})
+    placed: list[str] = []
+
+    def _do_flagged(item: "tuple[Path, Path, str]"):
+        src, dst, rel_posix = item
+        _actual, err = _do_link_ex(str(src), str(dst), mode)
+        return rel_posix, err
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_deploy_workers()) as pool:
+        for rel_posix, err in pool.map(_do_flagged, tasks):
+            if err is None:
+                placed.append(rel_posix)
+            else:
+                _log(f"  WARN: could not transfer root-flagged file {rel_posix}: {err}")
+
+    # Re-write the log with what actually landed.
+    _write_log(placed)
 
     _log(f"  Root-flagged mods: {len(placed)} file(s) transferred to game root.")
     return len(placed)

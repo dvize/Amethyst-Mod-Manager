@@ -312,8 +312,8 @@ class OpenMW(BaseGame):
             )
 
         _log("Step 1: Moving 'Data Files/' → 'Data Files_Core/' ...")
-        moved = move_to_core(data_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to 'Data Files_Core/'.")
+        move_to_core(data_dir, log_fn=_log)
+        _log("  Backed up existing files → 'Data Files_Core/'.")
 
         _log(f"Step 2: Transferring mod files into 'Data Files/' ({mode.name}) ...")
         profile_dir    = self.get_profile_root() / "profiles" / profile

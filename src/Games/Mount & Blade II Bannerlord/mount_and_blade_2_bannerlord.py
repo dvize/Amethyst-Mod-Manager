@@ -139,8 +139,8 @@ class MountAndBlade2Bannerlord(BaseGame):
             )
 
         _log(f"Step 1: Moving {modules_dir.name}/ → {core}/ ...")
-        moved = move_to_core(modules_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {core}/.")
+        move_to_core(modules_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {core}/.")
         modules_dir.mkdir(parents=True, exist_ok=True)
 
         _log(f"Step 2: Transferring mod files into {modules_dir} ({mode.name}) ...")

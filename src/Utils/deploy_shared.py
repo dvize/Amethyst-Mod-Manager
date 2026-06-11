@@ -272,6 +272,7 @@ def cleanup_custom_deploy_dirs(
     except Exception:
         pass
 
+    import stat as _stat
     for abs_str, src_str in file_list:
         # Entries are absolute filesystem paths by design — only reject ``..``
         # segments, not the leading ``/``.
@@ -284,7 +285,6 @@ def cleanup_custom_deploy_dirs(
             tgt_stat = os.lstat(abs_str)
         except OSError:
             continue
-        import stat as _stat
         is_symlink = _stat.S_ISLNK(tgt_stat.st_mode)
         is_regular = _stat.S_ISREG(tgt_stat.st_mode)
         if not (is_symlink or is_regular):
@@ -482,9 +482,11 @@ def _restore_backup_dir(
 
     tag = label if label is not None else f"{backup_dir.name}/"
     restored = 0
-    for bak_src in backup_dir.rglob("*"):
-        if not bak_src.is_file():
-            continue
+    _bak_files: list[Path] = []
+    for _dp, _dns, _fns in os.walk(str(backup_dir)):
+        for _fn in _fns:
+            _bak_files.append(Path(_dp) / _fn)
+    for bak_src in _bak_files:
         rel = bak_src.relative_to(backup_dir)
         orig = target_root / rel
         if check_traversal and not _path_under_root(orig, target_root):
@@ -538,7 +540,8 @@ def expand_separator_link_modes(
     """Return {mod_name: LinkMode} for mods whose separator overrides the link mode.
 
     Mods whose separator has no `mode` key (or "default") are omitted, signalling
-    "inherit the global deploy mode". Recognised values: "hardlink", "symlink", "copy".
+    "inherit the global deploy mode". Recognised values: "hardlink", "symlink";
+    anything else inherits the global mode.
     """
     result: dict[str, LinkMode] = {}
     current_mode: LinkMode | None = None
@@ -703,8 +706,9 @@ def _clear_dir(directory: Path) -> int:
     """
     if not directory.is_dir():
         return 0
-    files = [p for p in directory.rglob("*") if p.is_file()]
-    count = len(files)
+    # os.walk classifies entries via readdir d_type — no stat per entry like
+    # rglob + is_file.
+    count = sum(len(fns) for _dp, _dns, fns in os.walk(str(directory)))
     if count == 0:
         return 0
     shutil.rmtree(directory)
@@ -911,6 +915,45 @@ def _restore_from_log(
     return removed
 
 
+def _wrapper_chains(
+    mod_root_str: str,
+    strip_set: "set[str]",
+    max_depth: int = 3,
+) -> "list[tuple[str, set[str]]]":
+    """Discover wrapper-folder chains that filemap's scan would have stripped.
+
+    Returns [(chain_rel, names_lower), ...] where the first entry is always
+    ("", <entry names at mod root>) and each further entry is a wrapper chain
+    like "Data" or "Data/oblivion" (actual on-disk casing) with the lowercase
+    entry names directly inside it.  A couple of scandir calls per mod — no
+    tree walk.
+    """
+    out: list[tuple[str, set[str]]] = []
+    stack: list[tuple[str, str, int]] = [(mod_root_str, "", 0)]
+    while stack:
+        dir_str, chain, depth = stack.pop()
+        names: set[str] = set()
+        try:
+            with os.scandir(dir_str) as it:
+                for e in it:
+                    nl = e.name.lower()
+                    names.add(nl)
+                    if depth < max_depth and nl in strip_set:
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append((
+                                    e.path,
+                                    (chain + "/" + e.name) if chain else e.name,
+                                    depth + 1,
+                                ))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        out.append((chain, names))
+    return out
+
+
 def _prebuild_mod_indexes(
     tab_lines: list[str],
     overwrite_dir: Path,
@@ -923,12 +966,18 @@ def _prebuild_mod_indexes(
 ) -> None:
     """Pre-build per-mod file indexes for all mods referenced in the filemap.
 
-    Fast path: load on-disk paths from Profiles/<game>/modindex.bin (already
-    built by filemap.py) for mods whose files aren't behind a strip prefix —
-    no filesystem walk needed.
+    Fast path: synthesize on-disk paths from Profiles/<game>/modindex.bin
+    (already built by filemap.py) — no filesystem walk.  The index stores
+    *stripped* rel paths, so when strip prefixes are in play the actual file
+    may sit behind a wrapper folder (e.g. Data/); those wrapper chains are
+    rediscovered with a couple of scandir calls per mod and each entry is
+    mapped back to its physical location by checking its first path segment
+    against the cached directory listings.
 
-    Slow path: os.walk each mod folder (for mods with strip prefixes, or
-    when the index is missing/stale).
+    Slow path: os.walk each mod folder (index missing/stale, or per-mod
+    *path*-style strip prefixes whose semantics we don't mirror here).
+    Misses in a synthesized index fall back to _resolve_source per file, so
+    the fast path is always safe.
     """
     mod_names: set[str] = set()
     for ln in tab_lines:
@@ -936,11 +985,6 @@ def _prebuild_mod_indexes(
         if tab_pos > 0:
             mod_names.add(ln[tab_pos + 1:])
 
-    # Try to reuse the on-disk mod index written by filemap.py. It stores
-    # stripped rel_str values — fine for mods with no strip prefixes, since
-    # the on-disk path is just mod_root/rel_str. For mods that do have strip
-    # prefixes, fall through to the os.walk path so _resolve_source can find
-    # files under their actual folders.
     index_from_disk: dict | None = None
     if profile_dir is not None:
         try:
@@ -949,8 +993,10 @@ def _prebuild_mod_indexes(
         except Exception:
             index_from_disk = None
 
-    _global_strip = bool(strip_prefixes)
+    _global_strip = {s.lower() for s in strip_prefixes} if strip_prefixes else set()
     _per_mod = per_mod_strip_prefixes or {}
+    _isfile = os.path.isfile
+    walk_targets: list[Path] = []
 
     for mn in mod_names:
         if _has_traversal(mn):
@@ -959,21 +1005,65 @@ def _prebuild_mod_indexes(
         if mr in mod_index_cache:
             continue
 
-        has_strip = _global_strip or bool(_per_mod.get(mn))
         entry = index_from_disk.get(mn) if index_from_disk is not None else None
+        per_mod_list = _per_mod.get(mn) or []
 
-        if entry is not None and not has_strip:
-            # Fast path: synthesize on-disk paths directly from the index.
-            normal, root = entry
-            mr_str = str(mr)
-            built: dict[str, str] = {}
+        if entry is None or any("/" in p for p in per_mod_list):
+            walk_targets.append(mr)
+            continue
+
+        normal, root = entry
+        mr_str = str(mr)
+        strip_set = _global_strip | {s.lower() for s in per_mod_list}
+        built: dict[str, str] = {}
+
+        chains = _wrapper_chains(mr_str, strip_set) if strip_set else []
+        if len(chains) <= 1:
+            # No wrapper folders on disk — nothing was stripped for this mod,
+            # so the index rel paths are the on-disk paths.
             for rel_lower, rel_str in normal.items():
                 built[rel_lower] = mr_str + "/" + rel_str
             for rel_lower, rel_str in root.items():
                 built[rel_lower] = mr_str + "/" + rel_str
             mod_index_cache[mr] = built
-        else:
-            mod_index_cache[mr] = _build_mod_index(mr)
+            continue
+
+        for src_map in (normal, root):
+            for rel_lower, rel_str in src_map.items():
+                slash = rel_str.find("/")
+                seg = (rel_str[:slash] if slash > 0 else rel_str).lower()
+                hits = [chain for chain, names in chains if seg in names]
+                if not hits:
+                    continue  # stale entry — per-file fallback handles it
+                if len(hits) == 1:
+                    chain = hits[0]
+                    built[rel_lower] = (
+                        mr_str + "/" + chain + "/" + rel_str if chain
+                        else mr_str + "/" + rel_str
+                    )
+                    continue
+                # Same first segment exists at multiple wrapper levels —
+                # verify which physical file is real.
+                for chain in hits:
+                    cand = (
+                        mr_str + "/" + chain + "/" + rel_str if chain
+                        else mr_str + "/" + rel_str
+                    )
+                    if _isfile(cand):
+                        built[rel_lower] = cand
+                        break
+        mod_index_cache[mr] = built
+
+    if not walk_targets:
+        return
+    if len(walk_targets) == 1:
+        mod_index_cache[walk_targets[0]] = _build_mod_index(walk_targets[0])
+        return
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(_deploy_workers(), len(walk_targets))
+    ) as pool:
+        for mr, built_idx in zip(walk_targets, pool.map(_build_mod_index, walk_targets)):
+            mod_index_cache[mr] = built_idx
 
 
 def _resolve_root_path(base: Path, rel: Path,
@@ -1064,7 +1154,9 @@ def _resolve_root_path_str(base_str: str, rel_str: str,
     parent directory skip all resolution after the first.
 
     dir_listing_cache — maps dir_path_str → {lower_name: actual_name}
-    resolved_dir_cache — maps (base_str + "!" + dir_parts_lower) → resolved_dir_str
+    resolved_dir_cache — maps (base_str + "\\0" + dir_parts_lower) → resolved_dir_str.
+    The base is part of the key so one cache can safely serve resolutions
+    under several roots (deploy dir, per-separator custom dirs, game root).
     """
     # Split rel_str into directory part and filename
     slash_pos = rel_str.rfind("/")
@@ -1078,8 +1170,8 @@ def _resolve_root_path_str(base_str: str, rel_str: str,
 
     # Check resolved dir cache first — covers the common case where many
     # files share the same directory.
+    cache_key = base_str + "\x00" + dir_lower
     if resolved_dir_cache is not None:
-        cache_key = dir_lower
         cached = resolved_dir_cache.get(cache_key)
         if cached is not None:
             return cached + "/" + filename
@@ -1129,7 +1221,7 @@ def _resolve_root_path_str(base_str: str, rel_str: str,
         core_current = (core_current + "/" + chosen) if core_current is not None else None
 
     if resolved_dir_cache is not None:
-        resolved_dir_cache[dir_lower] = current
+        resolved_dir_cache[cache_key] = current
 
     return current + "/" + filename
 
@@ -1290,16 +1382,29 @@ def _path_under_root(path: Path, root: Path) -> bool:
         return False
 
 
-def _get_staging_source_path(mod_root: Path, rel_str: str, strip_prefixes: set[str]) -> Path | None:
+def _get_staging_source_path(
+    mod_root: Path,
+    rel_str: str,
+    strip_prefixes: set[str],
+    index_cache: "dict[Path, dict] | None" = None,
+) -> Path | None:
     """Return the path of the given file in the mod staging folder, or None if absent.
 
     Tries rel_str directly, then strip_prefix/rel_str for each prefix (e.g.
     mods/ModName/Data/Plugin.esp when rel_str is Plugin.esp and strip has "data").
+    index_cache, when given, memoizes the per-mod file index across calls —
+    building it walks the whole mod folder, far too expensive to repeat per file.
     """
     if not mod_root.is_dir():
         return None
     rel_lower = rel_str.lower()
-    idx = _build_mod_index(mod_root)
+    if index_cache is not None:
+        idx = index_cache.get(mod_root)
+        if idx is None:
+            idx = _build_mod_index(mod_root)
+            index_cache[mod_root] = idx
+    else:
+        idx = _build_mod_index(mod_root)
     hit = idx.get(rel_lower)
     if hit is None:
         for prefix in sorted(strip_prefixes):

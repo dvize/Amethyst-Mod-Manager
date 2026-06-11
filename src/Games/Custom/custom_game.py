@@ -474,8 +474,8 @@ class StandardCustomGame(BaseGame):
             _log(f"Step 2: Moving {data_dir.name}/ → {data_dir.name}_Core/ ...")
         else:
             _log(f"Step 1: Moving {data_dir.name}/ → {data_dir.name}_Core/ ...")
-        moved = move_to_core(data_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {data_dir.name}_Core/.")
+        move_to_core(data_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {data_dir.name}_Core/.")
 
         _log(f"{'Step 3' if custom_rules else 'Step 2'}: Transferring mod files into {data_dir.name}/ ({mode.name}) ...")
         _sep_deploy = load_separator_deploy_paths(profile_dir)

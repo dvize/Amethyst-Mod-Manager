@@ -202,8 +202,8 @@ class Subnautica(BaseGame):
             )
 
         _log(f"Step 1: Moving {plugins_dir.name}/ → {core}/ ...")
-        moved = move_to_core(plugins_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {core}/.")
+        move_to_core(plugins_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {core}/.")
 
         profile_dir = self.get_profile_root() / "profiles" / profile
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)

@@ -298,8 +298,11 @@ def run_deploy_pipeline(
                     game.restore(log_fn=log_fn, progress_fn=progress_fn)
                 else:
                     game.restore(log_fn=log_fn)
-            except RuntimeError:
-                pass
+            except RuntimeError as restore_err:
+                # Expected on first deploy / unconfigured paths; the deploy
+                # steps have their own leftover-deploy guards, so continue —
+                # but never hide the failure from the log.
+                log_fn(f"Restore before deploy failed: {restore_err} — continuing.")
         last_root_folder_dir = game.get_effective_root_folder_path()
         if last_root_folder_dir.is_dir() and game_root:
             restore_root_folder(last_root_folder_dir, game_root, log_fn=log_fn)

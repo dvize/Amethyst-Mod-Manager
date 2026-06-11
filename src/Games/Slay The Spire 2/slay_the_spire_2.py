@@ -139,8 +139,8 @@ class SlayTheSpire2(BaseGame):
             )
 
         _log(f"Step 1: Moving {plugins_dir.name}/ → {core}/ ...")
-        moved = move_to_core(plugins_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {core}/.")
+        move_to_core(plugins_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {core}/.")
         plugins_dir.mkdir(parents=True, exist_ok=True)
 
         _log(f"Step 2: Transferring mod files into {plugins_dir} ({mode.name}) ...")

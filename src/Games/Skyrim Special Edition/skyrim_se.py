@@ -18,6 +18,9 @@ from Utils.modlist import read_modlist
 
 class SkyrimSE(Fallout_3):
 
+    # SSE auto-loads plugin-matched BSAs — it is NOT a FO3/FNV-style engine that
+    # only reads archives listed in the INI. Override the Fallout_3 default.
+    _archive_list_needs_mod_bsas = False
     plugins_use_star_prefix = True
     plugins_include_vanilla = False
     supports_esl_flag = True
@@ -391,8 +394,8 @@ class SkyrimSE(Fallout_3):
             )
 
         _log("Step 1: Moving Data/ → Data_Core/ ...")
-        moved = move_to_core(data_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to Data_Core/.")
+        move_to_core(data_dir, log_fn=_log)
+        _log("  Backed up existing files → Data_Core/.")
 
         profile_dir = self.get_profile_root() / "profiles" / profile
         per_mod_strip = load_per_mod_strip_prefixes(profile_dir)

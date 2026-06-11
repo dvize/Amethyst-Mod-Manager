@@ -51,11 +51,13 @@ class BainDialog(ctk.CTkFrame):
                  readme_text: Optional[str] = None,
                  saved_selections: Optional[dict] = None,
                  selections_path=None,
-                 on_done=None):
+                 on_done=None,
+                 mod_name: Optional[str] = None):
         super().__init__(parent, fg_color=BG_DEEP, corner_radius=0)
         self._on_done = on_done or (lambda r: None)
         self._subpackages = subpackages
         self._mod_root = mod_root
+        self._mod_name = (mod_name or "").strip()
         self._readme_text = readme_text
         self._selections_path = selections_path
         self.result: Optional[dict] = None
@@ -117,8 +119,12 @@ class BainDialog(ctk.CTkFrame):
         bar.grid_propagate(False)
         bar.grid_columnconfigure(0, weight=1)
 
+        mod_name = self._mod_name
+        title = "BAIN package — choose sub-packages to install"
+        if mod_name:
+            title = f"{mod_name} — BAIN package — choose sub-packages to install"
         ctk.CTkLabel(
-            bar, text="BAIN package — choose sub-packages to install",
+            bar, text=title,
             font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w"
         ).grid(row=0, column=0, sticky="w", padx=12, pady=8)
 

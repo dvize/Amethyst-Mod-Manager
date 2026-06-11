@@ -229,8 +229,8 @@ class Darktide(BaseGame):
             )
 
         _log(f"Step 1: Moving {mods_dir.name}/ → {core}/ ...")
-        moved = move_to_core(mods_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {core}/.")
+        move_to_core(mods_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {core}/.")
         mods_dir.mkdir(parents=True, exist_ok=True)
 
         _log(f"Step 2: Transferring mod files into {mods_dir} ({mode.name}) ...")

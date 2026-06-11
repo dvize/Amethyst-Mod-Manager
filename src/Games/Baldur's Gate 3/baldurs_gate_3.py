@@ -345,8 +345,8 @@ class BaldursGate3(BaseGame):
             _log(f"  Routed {len(custom_exclude)} file(s) to Data/.")
 
         _log("Step 1: Moving Mods/ → Mods_Core/ ...")
-        moved = move_to_core(mods_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to Mods_Core/.")
+        move_to_core(mods_dir, log_fn=_log)
+        _log("  Backed up existing files → Mods_Core/.")
 
         _log(f"Step 2: Transferring mod .pak files into Mods/ ({mode.name}) ...")
         _sep_deploy = load_separator_deploy_paths(profile_dir)

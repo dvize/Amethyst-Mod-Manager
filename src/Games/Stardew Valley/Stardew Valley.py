@@ -159,8 +159,8 @@ class StardewValley(BaseGame):
             )
 
         _log(f"Step 1: Moving {plugins_dir.name}/ → {core}/ ...")
-        moved = move_to_core(plugins_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {core}/.")
+        move_to_core(plugins_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {core}/.")
         plugins_dir.mkdir(parents=True, exist_ok=True)
 
         _log(f"Step 2: Transferring mod files into {plugins_dir} ({mode.name}) ...")
@@ -169,11 +169,16 @@ class StardewValley(BaseGame):
         _sep_deploy = load_separator_deploy_paths(profile_dir)
         _sep_entries = read_modlist(profile_dir / "modlist.txt") if _sep_deploy else []
         per_mod_deploy = expand_separator_deploy_paths(_sep_deploy, _sep_entries) or None
+        _orphan_configs = self._orphaned_overwrite_configs(filemap)
+        if _orphan_configs:
+            _log(f"  Skipping {len(_orphan_configs)} orphaned overwrite file(s) "
+                 "(no matching manifest.json deployed).")
         linked_mod, placed = deploy_filemap(filemap, plugins_dir, staging,
                                             mode=mode,
                                             strip_prefixes=self.mod_folder_strip_prefixes,
                                             per_mod_strip_prefixes=per_mod_strip,
                                             per_mod_deploy_dirs=per_mod_deploy,
+                                            exclude=_orphan_configs or None,
                                             log_fn=_log,
                                             progress_fn=progress_fn,
                                             core_dir=plugins_dir.parent / (plugins_dir.name + "_Core"))
@@ -188,6 +193,46 @@ class StardewValley(BaseGame):
             f"{linked_mod} mod + {linked_core} vanilla "
             f"= {linked_mod + linked_core} total file(s) in {plugins_dir.name}/."
         )
+
+    def _orphaned_overwrite_configs(self, filemap: Path) -> set[str]:
+        """Lowercased rel paths of [Overwrite] files to skip on deploy.
+
+        SMAPI errors when a Mods/<Name>/ folder holds files but no manifest.json.
+        The [Overwrite] folder keeps each mod's runtime files (config.json and
+        more), which would otherwise deploy even after the owning mod is
+        disabled/removed — leaving a <Name>/ folder with no manifest. Skip any
+        [Overwrite] file under a <Name>/ whose <Name>/manifest.json is not in the
+        filemap (i.e. no enabled mod provides it). Overwrite files at the root
+        (no <Name>/ subfolder) and the manifest.json itself are never skipped.
+        """
+        from Utils.filemap import OVERWRITE_NAME
+
+        if not filemap.is_file():
+            return set()
+
+        manifest_dirs: set[str] = set()              # top dirs (lower) with a manifest.json
+        overwrite_files: list[tuple[str, str]] = []  # (rel_lower, top_dir_lower)
+        try:
+            with filemap.open(encoding="utf-8") as f:
+                for line in f:
+                    if "\t" not in line:
+                        continue
+                    rel_str, mod_name = line.rstrip("\n").split("\t", 1)
+                    rel_lower = rel_str.lower()
+                    slash = rel_lower.find("/")
+                    top_dir = rel_lower[:slash] if slash != -1 else ""
+                    base = rel_lower.rsplit("/", 1)[-1]
+                    if base == "manifest.json" and top_dir:
+                        manifest_dirs.add(top_dir)
+                    if mod_name == OVERWRITE_NAME and top_dir and base != "manifest.json":
+                        overwrite_files.append((rel_lower, top_dir))
+        except OSError:
+            return set()
+
+        return {
+            rel for rel, top_dir in overwrite_files
+            if top_dir not in manifest_dirs
+        }
 
     def restore(self, log_fn=None, progress_fn=None) -> None:
         """Restore Mods/ to its vanilla state."""

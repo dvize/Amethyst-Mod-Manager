@@ -94,6 +94,13 @@ def deploy_filemap_to_root(
     backup_dir    = filemap_path.parent / _FILEMAP_BACKUP_DIR
     log_path      = filemap_path.parent / _FILEMAP_LOG_NAME
 
+    # Self-heal: a leftover deploy log means the previous deploy was never
+    # restored (crashed or failed restore).  Restore it now — otherwise the
+    # rmtree below would destroy the backed-up vanilla originals.
+    if log_path.is_file():
+        _log("  Previous deploy log still present — restoring it before redeploying.")
+        _restore_from_log(log_path, game_root, backup_dir, log_fn)
+
     # Clear any stale backup from a previous deploy.
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
@@ -211,6 +218,15 @@ def deploy_filemap_to_root(
         except Exception as exc:
             _log(f"  WARN: could not write deploy snapshot: {exc}")
         return 0, placed_lower
+
+    # Write the deployment log BEFORE touching the game dir: if the deploy is
+    # interrupted mid-transfer, restore still knows everything we may have
+    # placed (a listed file that never landed is a harmless no-op on restore).
+    # It is re-written with the actually-placed list after the transfers.
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        "\n".join(t[3].replace("\\", "/") for t in tasks), encoding="utf-8"
+    )
 
     # Pre-create all destination directories up front (single-threaded).
     needed_dirs: set[str] = {os.path.dirname(dst) for _, dst, _, _ in tasks}

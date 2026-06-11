@@ -19,6 +19,7 @@ from Utils.deploy_shared import (
     LinkMode,
     _deploy_workers,
     _do_link,
+    _mkdir_leaves,
     _path_under_root,
     _prune_empty_dirs,
     _resolve_source,
@@ -311,6 +312,49 @@ def deploy_custom_rules(
             )
             all_entries.append((rel_str, mod_name, rel_lower))
 
+    # Global pre-filter: a file cannot be a *primary* match for any rule
+    # unless its path contains one of the rules' folders, extensions, or
+    # filenames.  This lets the per-rule loops below skip the overwhelming
+    # majority of files (textures, meshes, ...) in a large modlist.  Sibling
+    # drags still consider every entry, so nothing claimable is lost.
+    _pf_folders_simple: set[str] = set()
+    _pf_folders_path: list[str] = []
+    _pf_exts: list[str] = []
+    _pf_filenames: set[str] = set()
+    for _r, _fo, _ex, _fn in _rules:
+        for _f in _fo:
+            if "/" in _f:
+                _pf_folders_path.append(_f)
+            else:
+                _pf_folders_simple.add(_f)
+        _pf_exts.extend(_ex)
+        _pf_filenames.update(_fn)
+    match_candidates: list[tuple[str, str, str]] = []
+    for rel_str, mod_name, rel_lower in all_entries:
+        parts = rel_lower.split("/")
+        filename = parts[-1]
+        could_match = False
+        if _pf_folders_simple:
+            for seg in parts[:-1]:
+                if seg in _pf_folders_simple:
+                    could_match = True
+                    break
+        if not could_match and _pf_folders_path:
+            for _f in _pf_folders_path:
+                if (_f + "/") in rel_lower or rel_lower.endswith(_f):
+                    could_match = True
+                    break
+        if not could_match and _pf_exts:
+            # Over-accepts (no length guard) — the real rule check confirms.
+            for _e in _pf_exts:
+                if filename.endswith(_e):
+                    could_match = True
+                    break
+        if not could_match and _pf_filenames and _name_match(filename, _pf_filenames):
+            could_match = True
+        if could_match:
+            match_candidates.append((rel_str, mod_name, rel_lower))
+
     def _place_primary(rel_str: str, mod_name: str, rule: CustomRule,
                        strip_len: int, matched_ext: str) -> None:
         """Resolve source, compute destination, and append a copy task for a
@@ -392,7 +436,7 @@ def deploy_custom_rules(
     for rule, folders, exts, filenames in _rules:
         # Step 1: claim primaries for this rule among unclaimed files.
         new_primaries: list[tuple[str, str, int, str]] = []
-        for rel_str, mod_name, rel_lower in all_entries:
+        for rel_str, mod_name, rel_lower in match_candidates:
             if rel_lower in handled_lower:
                 continue
             hit = _match_single_rule(rel_lower, rule, folders, exts, filenames)
@@ -485,15 +529,22 @@ def deploy_custom_rules(
     # reconstruct each backup under.
     backup_dir = filemap_path.parent / _CUSTOM_RULES_BACKUP_DIR
     prefix_backup_dir = filemap_path.parent / _CUSTOM_RULES_PREFIX_BACKUP_DIR
+
+    # Self-heal: a leftover deploy log means the previous deploy was never
+    # restored (crashed or failed restore).  Restore it now — otherwise the
+    # rmtree below would destroy the backed-up vanilla originals.
+    if (filemap_path.parent / _CUSTOM_RULES_LOG_NAME).is_file():
+        _log("  Previous custom-rules deploy log still present — restoring it before redeploying.")
+        restore_custom_rules(filemap_path, game_root, rules=[],
+                             log_fn=log_fn, prefix_root=prefix_root)
+
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
     if prefix_backup_dir.exists():
         shutil.rmtree(prefix_backup_dir)
 
-    # Create destination directories
-    needed_dirs: set[Path] = {dst.parent for _, dst in tasks}
-    for d in needed_dirs:
-        d.mkdir(parents=True, exist_ok=True)
+    # Create destination directories (skip parents implied by deeper leaves)
+    _mkdir_leaves({str(dst.parent) for _, dst in tasks})
 
     placed_abs: list[str] = []
     total = len(tasks)
@@ -515,8 +566,16 @@ def deploy_custom_rules(
         return None
 
     # Back up any vanilla files we are about to overwrite (must be serial).
+    # One lstat per destination instead of exists()+is_symlink().
+    import stat as _stat
     for src, dst in tasks:
-        if dst.exists() and not dst.is_symlink():
+        try:
+            _st = os.lstat(dst)
+        except OSError:
+            continue
+        if _stat.S_ISLNK(_st.st_mode):
+            dst.unlink()
+        elif _stat.S_ISREG(_st.st_mode):
             picked = _pick_backup(dst)
             if picked is None:
                 _log(f"  WARN: could not back up {dst}: outside known roots")
@@ -528,8 +587,6 @@ def deploy_custom_rules(
                     shutil.move(str(dst), str(bak))
                 except OSError as e:
                     _log(f"  WARN: could not back up {dst}: {e}")
-        elif dst.is_symlink():
-            dst.unlink()
 
     # Transfer files in parallel.
     transfer_tasks: list[tuple[str, str]] = [(str(s), str(d)) for s, d in tasks]
@@ -597,6 +654,9 @@ def restore_custom_rules(
     dirs_to_prune: set[Path] = set()
     _game_root_resolved = game_root.resolve()
     _prefix_root_resolved = prefix_root.resolve() if prefix_root else None
+    # Pre-filter for path traversal (cheap, serial) so the worker pool only
+    # does syscalls — one lstat + (maybe) one unlink per file.
+    safe_targets: list[Path] = []
     for abs_str in placed:
         p = Path(abs_str)
         # Allow paths under either game_root or prefix_root. Try the
@@ -623,9 +683,7 @@ def restore_custom_rules(
         if under_root is None:
             _log(f"  SKIP: path traversal blocked — {abs_str}")
             continue
-        if p.is_file() or p.is_symlink():
-            p.unlink()
-            removed += 1
+        safe_targets.append(p)
         # Collect parent dirs for pruning (stop at the matched root)
         parent = p.parent
         while parent != under_root:
@@ -635,6 +693,26 @@ def restore_custom_rules(
                 break
             dirs_to_prune.add(parent)
             parent = parent.parent
+
+    import stat as _stat
+
+    def _unlink_one(p: Path) -> int:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return 0
+        if _stat.S_ISLNK(st.st_mode) or _stat.S_ISREG(st.st_mode):
+            try:
+                os.unlink(p)
+                return 1
+            except OSError:
+                return 0
+        return 0
+
+    if safe_targets:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_deploy_workers()) as pool:
+            for n in pool.map(_unlink_one, safe_targets):
+                removed += n
 
     # Restore backed-up vanilla files
     _restore_backup_dir(backup_dir, game_root, _log)
@@ -725,7 +803,7 @@ def mods_matching_root_rules(
                     if filename.endswith(ext):
                         could_match = True
                         break
-            if not could_match and any_filenames and filename in any_filenames:
+            if not could_match and any_filenames and _name_match(filename, any_filenames):
                 could_match = True
             if not could_match:
                 continue

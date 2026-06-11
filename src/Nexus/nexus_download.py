@@ -39,6 +39,7 @@ import requests
 from .nexus_api import NexusAPI, NexusDownloadLink, NexusAPIError
 from .nxm_handler import NxmLink
 from Utils.app_log import app_log
+from Utils.ca_bundle import resolve_ca_bundle
 
 # Default chunk size for streaming downloads (256 KB)
 _CHUNK_SIZE = 256 * 1024
@@ -83,7 +84,7 @@ def delete_archive_and_sidecar(archive_path: Path) -> None:
 def _read_sidecar_file_id(archive: Path) -> int:
     """Return the file_id stored in the sidecar, or 0 if absent/unreadable."""
     try:
-        return int(_fileid_sidecar(archive).read_text().strip())
+        return int(_fileid_sidecar(archive).read_text(encoding="utf-8").strip())
     except Exception:
         return 0
 
@@ -673,7 +674,7 @@ class NexusDownloader:
     ) -> DownloadResult:
         """Stream-download a single URL to disk."""
 
-        with requests.get(url, stream=True, timeout=60) as resp:
+        with requests.get(url, stream=True, timeout=60, verify=resolve_ca_bundle() or True) as resp:
             resp.raise_for_status()
 
             # Determine filename with the correct extension.

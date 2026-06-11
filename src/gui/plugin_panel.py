@@ -2288,113 +2288,124 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
 
     def _create_pool(self) -> None:
         """Pre-allocate a fixed set of canvas items and checkbutton widgets."""
-        c = self._pcanvas
         for s in range(self._pool_size):
-            self._pool_data_idx.append(-1)
-            self._pool_last_state.append(None)
+            self._create_pool_slot(s)
 
-            bg_id = c.create_rectangle(0, -200, 0, -200, fill="", outline="", state="hidden")
-            missing_strip_id = c.create_rectangle(0, -200, 3, -200,
-                                                   fill=BTN_CANCEL, outline="", state="hidden")
-            name_id = c.create_text(0, -200, text="", anchor="w", fill="",
-                                    font=(_theme.FONT_FAMILY, _theme.FS11), state="hidden")
-            idx_id = c.create_text(0, -200, text="", anchor="center", fill="",
-                                   font=(_theme.FONT_FAMILY, _theme.FS10), state="hidden")
-            warn_id: int | None = None
-            if self._warning_icon:
-                warn_id = c.create_image(0, -200, image=self._warning_icon,
+    def _ensure_pool_capacity(self, needed: int) -> None:
+        """Grow the slot pool when the viewport holds more rows than slots."""
+        if needed <= self._pool_size:
+            return
+        for s in range(self._pool_size, needed):
+            self._create_pool_slot(s)
+        self._pool_size = needed
+
+    def _create_pool_slot(self, s: int) -> None:
+        c = self._pcanvas
+        self._pool_data_idx.append(-1)
+        self._pool_last_state.append(None)
+
+        bg_id = c.create_rectangle(0, -200, 0, -200, fill="", outline="", state="hidden")
+        missing_strip_id = c.create_rectangle(0, -200, 3, -200,
+                                               fill=BTN_CANCEL, outline="", state="hidden")
+        name_id = c.create_text(0, -200, text="", anchor="w", fill="",
+                                font=(_theme.FONT_FAMILY, _theme.FS11), state="hidden")
+        idx_id = c.create_text(0, -200, text="", anchor="center", fill="",
+                               font=(_theme.FONT_FAMILY, _theme.FS10), state="hidden")
+        warn_id: int | None = None
+        if self._warning_icon:
+            warn_id = c.create_image(0, -200, image=self._warning_icon,
+                                     anchor="center", state="hidden")
+
+        late_warn_id: int | None = None
+        if self._late_warn_icon:
+            late_warn_id = c.create_image(0, -200, image=self._late_warn_icon,
+                                          anchor="center", state="hidden")
+
+        self._pool_bg.append(bg_id)
+        self._pool_missing_strip.append(missing_strip_id)
+        self._pool_name.append(name_id)
+        self._pool_idx_text.append(idx_id)
+        vmm_warn_id: int | None = None
+        if self._version_mismatch_icon:
+            vmm_warn_id = c.create_image(0, -200, image=self._version_mismatch_icon,
                                          anchor="center", state="hidden")
 
-            late_warn_id: int | None = None
-            if self._late_warn_icon:
-                late_warn_id = c.create_image(0, -200, image=self._late_warn_icon,
-                                              anchor="center", state="hidden")
+        self._pool_warn.append(warn_id)
+        self._pool_late_warn.append(late_warn_id)
+        self._pool_vmm_warn.append(vmm_warn_id)
 
-            self._pool_bg.append(bg_id)
-            self._pool_missing_strip.append(missing_strip_id)
-            self._pool_name.append(name_id)
-            self._pool_idx_text.append(idx_id)
-            vmm_warn_id: int | None = None
-            if self._version_mismatch_icon:
-                vmm_warn_id = c.create_image(0, -200, image=self._version_mismatch_icon,
-                                             anchor="center", state="hidden")
+        cb_tag = f"pcb_{s}"
+        cb_rect = c.create_rectangle(
+            0, -200, 0, -200, outline=BORDER, width=1, state="hidden",
+            tags=(cb_tag, "pcb"),
+        )
+        cb_mark = c.create_text(
+            0, -200, text="✓", anchor="center", fill=ACCENT,
+            font=(_theme.FONT_FAMILY, int(_theme.FS13 * 1.25), "bold"), state="hidden",
+            tags=(cb_tag, "pcb"),
+        )
+        self._pool_check_rects.append(cb_rect)
+        self._pool_check_marks.append(cb_mark)
+        def _cb_release(e, slot=s):
+            self._on_pool_check_toggle(slot)
+            return "break"
+        def _cb_enter(e):
+            c.config(cursor="hand2")
+        def _cb_leave(e):
+            c.config(cursor="")
+        c.tag_bind(cb_tag, "<ButtonRelease-1>", _cb_release)
+        c.tag_bind(cb_tag, "<Enter>", _cb_enter)
+        c.tag_bind(cb_tag, "<Leave>", _cb_leave)
 
-            self._pool_warn.append(warn_id)
-            self._pool_late_warn.append(late_warn_id)
-            self._pool_vmm_warn.append(vmm_warn_id)
-
-            cb_tag = f"pcb_{s}"
-            cb_rect = c.create_rectangle(
-                0, -200, 0, -200, outline=BORDER, width=1, state="hidden",
-                tags=(cb_tag, "pcb"),
-            )
-            cb_mark = c.create_text(
-                0, -200, text="✓", anchor="center", fill=ACCENT,
-                font=(_theme.FONT_FAMILY, int(_theme.FS13 * 1.25), "bold"), state="hidden",
-                tags=(cb_tag, "pcb"),
-            )
-            self._pool_check_rects.append(cb_rect)
-            self._pool_check_marks.append(cb_mark)
-            def _cb_release(e, slot=s):
-                self._on_pool_check_toggle(slot)
-                return "break"
-            def _cb_enter(e):
-                c.config(cursor="hand2")
-            def _cb_leave(e):
-                c.config(cursor="")
-            c.tag_bind(cb_tag, "<ButtonRelease-1>", _cb_release)
-            c.tag_bind(cb_tag, "<Enter>", _cb_enter)
-            c.tag_bind(cb_tag, "<Leave>", _cb_leave)
-
-            lk_tag = f"plk_{s}"
-            lk_rect = c.create_rectangle(
-                0, -200, 0, -200, outline=BORDER, width=1, state="hidden",
+        lk_tag = f"plk_{s}"
+        lk_rect = c.create_rectangle(
+            0, -200, 0, -200, outline=BORDER, width=1, state="hidden",
+            tags=(lk_tag, "plk"),
+        )
+        if self._icon_lock:
+            lk_mark = c.create_image(
+                0, -200, anchor="center",
+                image=self._icon_lock,
+                state="hidden",
                 tags=(lk_tag, "plk"),
             )
-            if self._icon_lock:
-                lk_mark = c.create_image(
-                    0, -200, anchor="center",
-                    image=self._icon_lock,
-                    state="hidden",
-                    tags=(lk_tag, "plk"),
-                )
-            else:
-                lk_mark = c.create_text(
-                    0, -200, text="🔒", anchor="center", fill=TEXT_MAIN,
-                    font=(_theme.FONT_FAMILY, _theme.FS9), state="hidden",
-                    tags=(lk_tag, "plk"),
-                )
-            self._pool_lock_rects.append(lk_rect)
-            self._pool_lock_marks.append(lk_mark)
+        else:
+            lk_mark = c.create_text(
+                0, -200, text="🔒", anchor="center", fill=TEXT_MAIN,
+                font=(_theme.FONT_FAMILY, _theme.FS9), state="hidden",
+                tags=(lk_tag, "plk"),
+            )
+        self._pool_lock_rects.append(lk_rect)
+        self._pool_lock_marks.append(lk_mark)
 
-            ul_dot = c.create_oval(0, -200, 0, -200,
-                                   fill="white", outline="", state="hidden")
-            self._pool_ul_dot.append(ul_dot)
+        ul_dot = c.create_oval(0, -200, 0, -200,
+                               fill="white", outline="", state="hidden")
+        self._pool_ul_dot.append(ul_dot)
 
-            esl_badge = c.create_text(0, -200, text="L", anchor="center",
-                                      fill=TONE_CYAN,
-                                      font=(_theme.FONT_FAMILY, _theme.FS11, "bold"),
-                                      state="hidden")
-            self._pool_esl_badge.append(esl_badge)
+        esl_badge = c.create_text(0, -200, text="L", anchor="center",
+                                  fill=TONE_CYAN,
+                                  font=(_theme.FONT_FAMILY, _theme.FS11, "bold"),
+                                  state="hidden")
+        self._pool_esl_badge.append(esl_badge)
 
-            loot_info_id: int | None = None
-            if self._loot_info_icon:
-                loot_info_id = c.create_image(0, -200, image=self._loot_info_icon,
-                                              anchor="center", state="hidden")
-            self._pool_loot_info.append(loot_info_id)
+        loot_info_id: int | None = None
+        if self._loot_info_icon:
+            loot_info_id = c.create_image(0, -200, image=self._loot_info_icon,
+                                          anchor="center", state="hidden")
+        self._pool_loot_info.append(loot_info_id)
 
-            bos_sp_badge = c.create_text(0, -200, text="", anchor="center",
-                                         fill="#c084fc",
-                                         font=(_theme.FONT_FAMILY, _theme.FS11, "bold"),
-                                         state="hidden")
-            self._pool_bos_sp_badge.append(bos_sp_badge)
+        bos_sp_badge = c.create_text(0, -200, text="", anchor="center",
+                                     fill="#c084fc",
+                                     font=(_theme.FONT_FAMILY, _theme.FS11, "bold"),
+                                     state="hidden")
+        self._pool_bos_sp_badge.append(bos_sp_badge)
 
-            def _lk_release(e, slot=s):
-                self._on_pool_lock_toggle(slot)
-                return "break"
-            c.tag_bind(lk_tag, "<ButtonRelease-1>", _lk_release)
-            c.tag_bind(lk_tag, "<Enter>", _cb_enter)
-            c.tag_bind(lk_tag, "<Leave>", _cb_leave)
+        def _lk_release(e, slot=s):
+            self._on_pool_lock_toggle(slot)
+            return "break"
+        c.tag_bind(lk_tag, "<ButtonRelease-1>", _lk_release)
+        c.tag_bind(lk_tag, "<Enter>", _cb_enter)
+        c.tag_bind(lk_tag, "<Leave>", _cb_leave)
 
     def _on_pool_check_toggle(self, slot: int) -> None:
         """A pooled enable-checkbox was clicked — map back to data row."""
@@ -2979,10 +2990,17 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
         # otherwise disabling a mod still leaves its plugin in the panel,
         # because the hardlink in Data/ outlives its plugins.txt entry until
         # the next deploy.
+        # Plugin filenames that actually exist in Data/ this refresh. Used both
+        # to surface orphans and to prune loadorder.txt entries whose source
+        # plugin has since disappeared (e.g. a mod packed into a BSA so its
+        # loose .esp no longer deploys, or the mod was removed). Left as None
+        # when Data/ can't be scanned, so we don't prune on missing info.
+        present_lower: set[str] | None = None
         data_dir = self._game.get_vanilla_plugins_path() if self._game and hasattr(self._game, "get_vanilla_plugins_path") else None
         if data_dir and data_dir.is_dir() and self._plugin_extensions:
             exts_lower = {e.lower() for e in self._plugin_extensions}
             saved_lower = {n.lower() for n in saved_order}
+            present_lower = set()
             foreign = foreign_deployed_plugin_basenames(self._game)
             core_dir = data_dir.parent / (data_dir.name + "_Core")
             core_names: set[str] | None = None
@@ -2999,6 +3017,7 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                     if not entry.is_file() or entry.suffix.lower() not in exts_lower:
                         continue
                     low = entry.name.lower()
+                    present_lower.add(low)
                     if low in mod_map or low in self._vanilla_plugins or low in saved_lower:
                         continue
                     if low in foreign:
@@ -3024,6 +3043,13 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 if low in mod_map:
                     continue
                 if low in self._vanilla_plugins:
+                    continue
+                # Prune stale loadorder.txt entries: a disabled plugin only
+                # survives if its file still exists in Data/. If it's gone
+                # (mod removed, or packed into a BSA so the loose .esp no longer
+                # deploys), skip it — it then drops out of loadorder.txt via the
+                # sync below instead of lingering as a phantom panel row.
+                if present_lower is not None and low not in present_lower:
                     continue
                 disabled_entry = PluginEntry(name=name, enabled=False)
                 mod_map[low] = disabled_entry
@@ -3230,6 +3256,9 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
 
         canvas_top = int(c.canvasy(0))
         canvas_h = c.winfo_height()
+        # Tall viewports (4K monitors, low UI scale) can hold more rows than
+        # the default pool — grow it so rows past the last slot still render.
+        self._ensure_pool_capacity(canvas_h // self.ROW_H + 3)
         first_row = max(0, canvas_top // self.ROW_H)
         last_row = min(n, (canvas_top + canvas_h) // self.ROW_H + 2)
         vis_count = last_row - first_row

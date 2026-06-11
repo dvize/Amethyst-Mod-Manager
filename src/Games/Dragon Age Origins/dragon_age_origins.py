@@ -350,8 +350,8 @@ class DragonAgeOrigins(BaseGame):
         for sub in _MANAGED_SUBDIRS:
             sub_path = data_root / sub
             core_path = data_root / self._core_dir_for(sub)
-            moved = move_to_core(sub_path, core_dir=core_path, log_fn=_log)
-            _log(f"  {sub}: backed up {moved} file(s) → {core_path.name}/.")
+            move_to_core(sub_path, core_dir=core_path, log_fn=_log)
+            _log(f"  {sub}: backed up existing files → {core_path.name}/.")
 
         _log(f"Step 2: Transferring mod files into data folder ({mode.name}) ...")
         _sep_deploy = load_separator_deploy_paths(profile_dir)

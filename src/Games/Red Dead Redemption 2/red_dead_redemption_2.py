@@ -211,8 +211,8 @@ class RedDeadRedemption2(BaseGame):
             _log(f"Step 2: Moving {data_dir.name}/ → {core}/ ...")
         else:
             _log(f"Step 1: Moving {data_dir.name}/ → {core}/ ...")
-        moved = move_to_core(data_dir, log_fn=_log)
-        _log(f"  Moved {moved} file(s) to {core}/.")
+        move_to_core(data_dir, log_fn=_log)
+        _log(f"  Backed up existing files → {core}/.")
         data_dir.mkdir(parents=True, exist_ok=True)
 
         _log(f"{'Step 3' if custom_rules else 'Step 2'}: Transferring mod files into {data_dir} ({mode.name}) ...")

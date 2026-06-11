@@ -12,7 +12,12 @@ folder so it can locate game assets correctly.
 Workflow
 --------
 1. Deploy the modlist.
-2. Run the exe from <game_path>/Data via Proton.
+2. User picks the Proton version. The tool gets its own isolated prefix
+   (prefix_<ProtonName>/ next to the *staged* exe — never inside the game's
+   Data folder), independent of the game's Proton version. BodySlide and
+   Outfit Studio share one prefix when set to the same version.
+3. Run the deployed exe from <game_path>/Data via Proton, after seeding the
+   game's Installed Path into the prefix registry.
 """
 
 from __future__ import annotations
@@ -72,11 +77,20 @@ def find_deployed_exe(game: "BaseGame", exe_name) -> Path | None:
 # Base wizard
 # ---------------------------------------------------------------------------
 
-class _BodySlideBaseWizard(ctk.CTkFrame):
+from wizards._proton_prefix import ProtonPrefixStepMixin, shutdown_prefix_wineserver
+
+
+class _BodySlideBaseWizard(ProtonPrefixStepMixin, ctk.CTkFrame):
 
     _wizard_title    = ""   # overridden by subclasses
     _exe_name        = ""   # overridden by subclasses
     _output_mod_name = ""   # overridden by subclasses — empty mod created to capture output
+
+    _proton_step_title = "Step 2: Choose Proton Version"
+    _proton_deps_note  = "Each version gets its own prefix."
+
+    def _proton_next_step(self):
+        self._show_step_run()
 
     def __init__(
         self,
@@ -91,6 +105,17 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
         self._on_close_cb = on_close or (lambda: None)
         self._game        = game
         self._log         = log_fn or (lambda msg: None)
+
+        # The prefix is anchored to the staged exe (prefix_* dirs in staging
+        # are excluded from filemap scans); the deployed copy is what runs.
+        self._exe         = find_mod_exe(game, self._exe_name)
+        self._proton_name = ""
+        self._tool_exe_name     = self._exe.name if self._exe is not None else _as_names(self._exe_name)[0]
+        self._tool_display_name = self._wizard_title
+        self._exe_missing_text  = (
+            f"{self._wizard_title} was not found in your mod staging folder.\n\n"
+            f"Install {self._wizard_title} as a mod, then reopen this wizard."
+        )
 
         title_bar = ctk.CTkFrame(self, fg_color=BG_HEADER, corner_radius=0, height=40)
         title_bar.pack(fill="x")
@@ -129,50 +154,6 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
                 pass
         self.after(0, _apply)
 
-    def _get_proton_env(self):
-        from Utils.steam_finder import (
-            find_any_installed_proton,
-            find_proton_for_game,
-            find_steam_root_for_proton_script,
-        )
-
-        prefix_path = self._game.get_prefix_path()
-        if prefix_path is None or not prefix_path.is_dir():
-            return None, None, None
-
-        steam_id    = getattr(self._game, "steam_id", "")
-        from gui.plugin_panel import _resolve_compat_data, _read_prefix_runner
-        compat_data = _resolve_compat_data(prefix_path)
-        proton_script = find_proton_for_game(steam_id) if steam_id else None
-
-        if proton_script is None:
-            preferred_runner = _read_prefix_runner(compat_data)
-            proton_script = find_any_installed_proton(preferred_runner)
-            if proton_script is None:
-                return None, None, prefix_path
-
-        steam_root = find_steam_root_for_proton_script(proton_script)
-        if steam_root is None:
-            return None, None, prefix_path
-
-        env = os.environ.copy()
-        env["STEAM_COMPAT_DATA_PATH"]           = str(compat_data)
-        env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(steam_root)
-        game_path = self._game.get_game_path()
-        if game_path:
-            env["STEAM_COMPAT_INSTALL_PATH"] = str(game_path)
-        if steam_id:
-            env.setdefault("SteamAppId",  steam_id)
-            env.setdefault("SteamGameId", steam_id)
-
-        # Proton's Xalia UI-automation helper destabilises BodySlide / Outfit
-        # Studio (wxWidgets): it floods the app with window-handle queries and
-        # crashes with "Invalid window handle" when the Preview child window
-        # opens ("Fatal exception has occurred"). Disabling it fixes the crash.
-        env["PROTON_DISABLE_XALIA"] = "1"
-
-        return proton_script, env, prefix_path
-
     @staticmethod
     def _to_wine_path(p: Path) -> str:
         s = str(p).replace("/", "\\")
@@ -209,23 +190,91 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
                 return cand
         return None
 
+    def _slider_data_root(self, base: Path) -> Path | None:
+        """Find the folder that holds SliderSets/SliderGroups/ShapeData.
+
+        BodySlide 5.8+ resolves these relative to <ProjectPath> (the exe dir
+        when empty). When the exe and the slider data live in different folders
+        (exe under Tools/BodySlide, data under <mod>/BodySlide), the lists come
+        up empty. We locate the data folder so the caller can pin ProjectPath.
+        """
+        direct = base / "CalienteTools" / "BodySlide"
+        if (direct / "SliderSets").is_dir():
+            return direct
+        for cand in base.rglob("SliderSets"):
+            if cand.is_dir():
+                return cand.parent
+        return None
+
+    # Maps a game's synthesis_registry_name to its BodySlide GameDataPaths child
+    # tag and TargetGame index (see the comment at the top of Config.xml).
+    _BODYSLIDE_GAMES = {
+        "Fallout3":                ("Fallout3", 0),
+        "FalloutNewVegas":         ("FalloutNewVegas", 1),
+        "Skyrim":                  ("Skyrim", 2),
+        "Fallout4":                ("Fallout4", 3),
+        "Skyrim Special Edition":  ("SkyrimSpecialEdition", 4),
+        "Fallout 4 VR":            ("Fallout4VR", 5),
+        "Skyrim VR":               ("SkyrimVR", 6),
+    }
+
+    def _bodyslide_game(self) -> "tuple[str, int] | None":
+        return self._BODYSLIDE_GAMES.get(
+            getattr(self._game, "synthesis_registry_name", None)
+        )
+
+    def _set_gamedatapaths_child(self, text: str, tag: str, value: str) -> str:
+        """Set <tag> inside the <GameDataPaths> block (creating it if absent)."""
+        block = re.search(r"<GameDataPaths>(.*?)</GameDataPaths>", text, flags=re.DOTALL)
+        if not block:
+            return text
+        inner = block.group(1)
+        new_child = f"<{tag}>{value}</{tag}>"
+        child_pat = rf"<{tag}>.*?</{tag}>"
+        if re.search(child_pat, inner, flags=re.DOTALL):
+            new_inner = re.sub(child_pat, lambda _m: new_child, inner, count=1, flags=re.DOTALL)
+        else:
+            new_inner = inner + f"        {new_child}\n    "
+        return text[: block.start(1)] + new_inner + text[block.end(1) :]
+
+    def _set_config_tag(self, text: str, tag: str, value: str) -> str:
+        new_tag = f"<{tag}>{value}</{tag}>"
+        pattern = rf"<{tag}>.*?</{tag}>"
+        if re.search(pattern, text, flags=re.DOTALL):
+            return re.sub(pattern, lambda _m: new_tag, text, count=1, flags=re.DOTALL)
+        return text.replace("</Config>", f"    {new_tag}\n</Config>", 1)
+
     def _update_output_path_in_config(self, config_path: Path, output_dir: Path) -> bool:
         try:
             text = config_path.read_text(encoding="utf-8")
         except OSError:
             return False
-        wine = self._to_wine_path(output_dir)
-        new_tag = f"<OutputDataPath>{wine}</OutputDataPath>"
-        if re.search(r"<OutputDataPath>.*?</OutputDataPath>", text, flags=re.DOTALL):
-            updated = re.sub(
-                r"<OutputDataPath>.*?</OutputDataPath>",
-                lambda _m: new_tag,
-                text,
-                count=1,
-                flags=re.DOTALL,
-            )
-        else:
-            updated = text.replace("</Config>", f"    {new_tag}\n</Config>", 1)
+
+        updated = self._set_config_tag(
+            text, "OutputDataPath", self._to_wine_path(output_dir)
+        )
+
+        data_path = self._game.get_mod_data_path()
+        if data_path is not None:
+            wine_data = self._to_wine_path(data_path)
+            updated = self._set_config_tag(updated, "GameDataPath", wine_data)
+
+            mapping = self._bodyslide_game()
+            if mapping is not None:
+                tag, target = mapping
+                updated = self._set_gamedatapaths_child(updated, tag, wine_data)
+                updated = self._set_config_tag(updated, "TargetGame", str(target))
+
+            # BodySlide 5.8+ scans <ProjectPath>/SliderSets (falling back to the
+            # exe dir when empty). The exe and the slider data are usually in
+            # different folders here, so pin ProjectPath at the data folder or
+            # every list shows up empty.
+            slider_root = self._slider_data_root(data_path)
+            if slider_root is not None:
+                updated = self._set_config_tag(
+                    updated, "ProjectPath", self._to_wine_path(slider_root).rstrip("\\")
+                )
+
         if updated == text:
             return True
         try:
@@ -313,7 +362,7 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
             btn_frame, text="Skip", width=100, height=36,
             font=FONT_BOLD,
             fg_color=BG_HEADER, hover_color="#3d3d3d", text_color=TEXT_DIM,
-            command=self._show_step_run,
+            command=self._show_step_proton,
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
@@ -359,7 +408,7 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
 
             if success:
                 self._set_label("_deploy_status", "Deploy complete.", color="#6bc76b")
-                self.after(0, self._show_step_run)
+                self.after(0, self._show_step_proton)
             else:
                 self._set_label("_deploy_status", "Deploy failed — see log.", color="#e06c6c")
 
@@ -368,14 +417,14 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
             self._log(f"{self._wizard_title} Wizard: deploy error: {exc}")
 
     # ------------------------------------------------------------------
-    # Step 2 — Run
+    # Step 3 — Run
     # ------------------------------------------------------------------
 
     def _show_step_run(self):
         self._clear_body()
 
         ctk.CTkLabel(
-            self._body, text=f"Step 2: Run {self._wizard_title}",
+            self._body, text=f"Step 3: Run {self._wizard_title}",
             font=FONT_BOLD, text_color=TEXT_MAIN,
         ).pack(pady=(0, 12))
 
@@ -384,7 +433,7 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
             ctk.CTkLabel(
                 self._body,
                 text=(
-                    f"'{self._exe_name[0]}' was not found in the deployed Data folder.\n\n"
+                    f"{self._wizard_title} was not found in the deployed Data folder.\n\n"
                     f"Deploy your modlist first, then reopen this wizard."
                 ),
                 font=FONT_NORMAL, text_color="#e06c6c", justify="center", wraplength=460,
@@ -421,22 +470,30 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
         except Exception as exc:
             self._log(f"{self._wizard_title} Wizard: output redirect failed: {exc}")
 
-        proton_script, env, prefix = self._get_proton_env()
+        proton_script, env, compat_data = self._get_tool_env()
         if proton_script is None:
             self._set_label(
                 "_run_status",
-                "Could not find Proton — check that the prefix is configured.",
+                f"Could not find Proton '{self._proton_name}' — "
+                "check that it is installed in Steam.",
                 color="#e06c6c",
             )
             return
 
+        # Proton's Xalia UI-automation helper destabilises BodySlide / Outfit
+        # Studio (wxWidgets): it floods the app with window-handle queries and
+        # crashes with "Invalid window handle" when the Preview child window
+        # opens ("Fatal exception has occurred"). Disabling it fixes the crash.
+        # Proton 10 renamed the knob: the old PROTON_DISABLE_XALIA is ignored,
+        # the live one is PROTON_USE_XALIA=0. Set both for cross-version cover.
+        env["PROTON_DISABLE_XALIA"] = "1"
+        env["PROTON_USE_XALIA"] = "0"
+
         # BodySlide x64 / Outfit Studio x64 autofill the Data folder from
-        # the Bethesda Softworks registry key. Steam writes that key only
-        # when the user launches the game natively through Steam — users
-        # who install the game and go straight to a wizard won't have it.
+        # the Bethesda Softworks registry key — a fresh tool prefix never
+        # has it, so seed it before launch (idempotent, marker-guarded).
         try:
             from Utils.bethesda_registry import maybe_register_for_game
-            compat_data = Path(env.get("STEAM_COMPAT_DATA_PATH", str(prefix.parent)))
             maybe_register_for_game(
                 prefix_dir=compat_data,
                 proton_script=Path(proton_script),
@@ -447,14 +504,33 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
         except Exception as exc:
             self._log(f"{self._wizard_title} Wizard: registry write skipped: {exc}")
 
+        # Optional GL diagnostics: set MM_BODYSLIDE_GLLOG=1 to capture Wine's
+        # WGL/OpenGL backend decisions (context creation, SwapBuffers, drawable
+        # mode) to a log next to the prefix. Used to debug the black-preview
+        # issue where the multisampled GL canvas renders but never presents.
+        gl_log = None
+        if os.environ.get("MM_BODYSLIDE_GLLOG"):
+            # +wgl: WGL context/SwapBuffers; +opengl: GL backend; fixme-all off
+            # to keep the trace readable. MESA_DEBUG surfaces driver-side errors.
+            env["WINEDEBUG"] = "+wgl,+opengl,fixme-all"
+            env["MESA_DEBUG"] = "1"
+            env.setdefault("LIBGL_DEBUG", "verbose")
+            try:
+                log_path = Path(compat_data) / f"gl_trace_{self._tool_exe_name}.log"
+                gl_log = open(log_path, "w", encoding="utf-8")
+                self._log(f"{self._wizard_title} Wizard: GL trace → {log_path}")
+            except OSError as exc:
+                self._log(f"{self._wizard_title} Wizard: could not open GL trace log: {exc}")
+                gl_log = None
+
         self._log(f"{self._wizard_title} Wizard: launching {exe} via Proton (cwd={exe.parent})")
         try:
             proc = subprocess.Popen(
                 ["python3", str(proton_script), "run", str(exe)],
                 env=env,
                 cwd=str(exe.parent),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=(gl_log or subprocess.DEVNULL),
+                stderr=(gl_log or subprocess.DEVNULL),
             )
             self._set_label(
                 "_run_status",
@@ -463,25 +539,38 @@ class _BodySlideBaseWizard(ctk.CTkFrame):
             )
             self.after(0, lambda: self._done_btn.configure(state="normal"))
             proc.wait()
+            shutdown_prefix_wineserver(
+                proton_script, compat_data,
+                log_fn=lambda m: self._log(f"{self._wizard_title} Wizard: {m}"),
+            )
             self._log(f"{self._wizard_title} Wizard: {exe.name} closed.")
             self._set_label("_run_status", f"{self._wizard_title} finished.", color="#6bc76b")
             self.after(0, self._on_done)
         except Exception as exc:
             self._set_label("_run_status", f"Launch error: {exc}", color="#e06c6c")
             self._log(f"{self._wizard_title} Wizard: launch error: {exc}")
+        finally:
+            if gl_log is not None:
+                try:
+                    gl_log.close()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
 # Concrete wizards
 # ---------------------------------------------------------------------------
 
+# Prefer the "x64" exe when present: that is the 5.7.x build, whose preview
+# panel renders correctly under Proton. 5.8+ dropped the x64 suffix and its
+# preview renders black on Wine/Mesa, so it is only the fallback.
 class BodySlideWizard(_BodySlideBaseWizard):
     _wizard_title    = "BodySlide"
-    _exe_name        = ("BodySlide.exe", "BodySlide x64.exe")
+    _exe_name        = ("BodySlide x64.exe", "BodySlide.exe")
     _output_mod_name = "BodySlide_files"
 
 
 class OutfitStudioWizard(_BodySlideBaseWizard):
     _wizard_title    = "Outfit Studio"
-    _exe_name        = ("OutfitStudio.exe", "OutfitStudio x64.exe")
+    _exe_name        = ("OutfitStudio x64.exe", "OutfitStudio.exe")
     _output_mod_name = "OutfitStudio_files"
