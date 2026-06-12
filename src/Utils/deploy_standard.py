@@ -15,6 +15,7 @@ import time as _time
 from pathlib import Path
 
 from Utils.app_log import safe_log as _safe_log
+from Utils.atomic_write import atomic_writer
 from Utils.path_utils import has_path_traversal as _has_traversal
 from Utils.deploy_shared import (
     LinkMode,
@@ -115,10 +116,50 @@ def _dir_has_deployed_mod_files(deploy_dir: Path, limit: int = 4096) -> bool:
 # to detect.  Removed implicitly by restore_data_core's rmtree.
 _DEPLOY_MARKER_NAME = ".mm_deployed"
 
+# Per-file (size, mtime_ns) record of everything deploy_filemap placed in the
+# main deploy dir, written to Profiles/<game>/.  restore_data_core uses it to
+# tell "still exactly the file we deployed" (safe to discard — staging holds
+# the data, or the mod was replaced and this copy is stale) apart from files
+# the game or an external tool wrote after deploy (must be rescued).  Without
+# it, replacing a deployed mod with a new version that drops a file leaves the
+# old hardlink in Data with nlink==1 and no filemap/modindex entry, and
+# restore wrongly rescues it into overwrite/.
+_DEPLOY_STATS_NAME = "deploy_stats.txt"
+
 # Slack when comparing mtimes across filesystems: FAT stores mtimes at 2s
 # resolution, exFAT at 10ms, so a copy2-preserved timestamp read back from
 # the game drive may differ from the staging original by up to 2s.
 _MTIME_TOLERANCE_NS = 2_000_000_000
+
+
+def _write_deploy_stats(stats_path: Path, entries: "list[str]", log_fn=None) -> None:
+    """Atomically write deploy_stats.txt from pre-formatted lines."""
+    try:
+        with atomic_writer(stats_path, "w") as fh:
+            fh.write("# deploy_stats v1\n")
+            for line in entries:
+                fh.write(line)
+    except OSError as exc:
+        _safe_log(log_fn)(f"  WARN: could not write deploy stats: {exc}")
+
+
+def _load_deploy_stats(stats_path: Path) -> "dict[str, tuple[int, int]]":
+    """Read deploy_stats.txt into {rel_lower: (size, mtime_ns)}; {} if absent."""
+    stats: dict[str, tuple[int, int]] = {}
+    try:
+        with stats_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) == 3:
+                    try:
+                        stats[parts[0].lower()] = (int(parts[1]), int(parts[2]))
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return stats
 
 
 def _tree_has_files(root: Path) -> bool:
@@ -405,6 +446,9 @@ def deploy_filemap(
           f"(index={_index_hits}, slow={_slow_hits})")
     total = len(tasks)
     if total == 0:
+        # Still clear any stale stats from a previous deploy.
+        _write_deploy_stats(filemap_path.parent / _DEPLOY_STATS_NAME, [],
+                            log_fn=log_fn)
         return 0, placed_lower
 
     _custom_backup_dir = filemap_path.parent / "custom_deploy_backup"
@@ -697,6 +741,28 @@ def deploy_filemap(
 
     _report_mode_breakdown(_log, mode_counts, mode)
 
+    # Record (size, mtime_ns) of every regular file placed in the main deploy
+    # dir so restore_data_core can tell superseded deployed copies (mod
+    # replaced/removed while deployed) apart from files written after deploy.
+    _t_stats = _time.perf_counter()
+    _stats_plen = len(_deploy_dir_str) + 1
+    _stats_entries: list[str] = []
+    for _src, _dst, _rl, _ic, _us, _ov in tasks:
+        if _ic or _rl not in placed_lower:
+            continue
+        try:
+            _dst_st = os.lstat(_dst)
+        except OSError:
+            continue
+        if not _stat_module.S_ISREG(_dst_st.st_mode):
+            continue  # symlinks are recognised by d_type on restore
+        _stats_entries.append(
+            f"{_dst[_stats_plen:]}\t{_dst_st.st_size}\t{_dst_st.st_mtime_ns}\n")
+    _write_deploy_stats(filemap_path.parent / _DEPLOY_STATS_NAME,
+                        _stats_entries, log_fn=log_fn)
+    print(f"  [TIMER] deploy_filemap — deploy stats ({len(_stats_entries)} files): "
+          f"{_time.perf_counter() - _t_stats:.3f}s")
+
     # Write a log of files placed in custom locations so cleanup knows what to
     # remove.  Each line is the absolute path of a deployed file (or a
     # directory symlink we created via the dir-symlink pass).
@@ -857,6 +923,10 @@ def restore_data_core(
     # A file is runtime-created if it:
     #   - is not a symlink (symlinks are deployed mod files)
     #   - has a single hard-link count (nlink > 1 means it is a deployed hardlink)
+    #   - no longer matches the (size, mtime) recorded for it in
+    #     deploy_stats.txt at deploy time (a still-matching file is the
+    #     untouched deployed copy — discarded even when its mod was replaced
+    #     or removed while deployed, so dropped files don't pollute overwrite/)
     #   - is not present in core_dir (not a vanilla file)
     #   - is not listed in filemap.txt (copied mod files have nlink==1 when their
     #     staging copy was replaced after deploy, breaking the hardlink)
@@ -925,6 +995,14 @@ def restore_data_core(
                         modindex_rel_to_mods.setdefault(rel_key, []).append(_mod_name)
         except Exception:
             pass
+        # Deploy-time stat record — a regular file still matching its entry is
+        # exactly what we deployed, so the staging side (or nothing, if the
+        # mod was replaced/removed since) owns the data and the copy in
+        # deploy_dir is safe to discard with the rmtree below.  Checked before
+        # the filemap/modindex tests so a mod version swapped out while
+        # deployed doesn't leave its dropped files rescued into overwrite/.
+        deploy_stats = _load_deploy_stats(
+            overwrite_dir.parent / _DEPLOY_STATS_NAME)
         _strip = {p.lower() for p in (strip_prefixes or set())}
         _staging = staging_root
         # Memoizes per-mod file indexes across _get_staging_source_path calls.
@@ -974,6 +1052,10 @@ def restore_data_core(
                     if rel_str == _DEPLOY_MARKER_NAME:
                         continue  # our own deploy marker — removed with deploy_dir
                     rel_lower = rel_str.lower()
+                    _ds = deploy_stats.get(rel_lower)
+                    if (_ds is not None and st.st_size == _ds[0]
+                            and abs(st.st_mtime_ns - _ds[1]) <= _MTIME_TOLERANCE_NS):
+                        continue  # unmodified deployed file — discard, don't rescue
                     if rel_lower in core_lower:
                         # Vanilla path — but the file might have been replaced by
                         # an external tool (e.g. xEdit Quick Auto Clean deletes
