@@ -613,6 +613,10 @@ class CustomRule:
                  caller to pass ``prefix_root`` to ``deploy_custom_rules``;
                  rules with ``to_prefix=True`` are skipped when no prefix
                  is available.
+    mirror_dests — additional destination dirs (resolved under the same
+                 base as ``dest``) that every matched file is also placed
+                 into.  Used for Steam/GOG dual My Games folders where the
+                 same save must land in both variants.
 
     Placement behaviour:
     - extension-only match: file placed as game_root/dest/<filename> (flat)
@@ -630,6 +634,7 @@ class CustomRule:
     flatten: bool = False
     include_siblings: bool = False
     to_prefix: bool = False
+    mirror_dests: list[str] = field(default_factory=list)
 
 
 def _default_core(deploy_dir: Path) -> Path:

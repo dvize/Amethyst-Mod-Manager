@@ -289,7 +289,21 @@ class Fallout_3(BaseGame):
             CustomRule(dest="", filenames=["fose_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["fose*.dll"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".fos"]),
                 ]
+
+    def _saves_routing_rule(self, extensions: list[str]):
+        """Route loose save files into the prefix's My Games Saves folder, mirrored to the GOG variant if that folder exists."""
+        from Utils.deploy import CustomRule
+        gog_sub = self._MYGAMES_SUBPATH_GOG or Path(f"{self._MYGAMES_SUBPATH} GOG")
+        mirrors: list[str] = []
+        if self._prefix_path is not None and (self._prefix_path / self._MYGAMES_DOCS / gog_sub).is_dir():
+            mirrors.append(str(self._MYGAMES_DOCS / gog_sub / "Saves"))
+        return CustomRule(
+            dest=str(self._MYGAMES_DOCS / self._MYGAMES_SUBPATH / "Saves"),
+            extensions=extensions, flatten=True, to_prefix=True,
+            mirror_dests=mirrors,
+        )
 
     @property
     def wizard_tools(self) -> list[WizardTool]:
@@ -388,9 +402,10 @@ class Fallout_3(BaseGame):
     # -----------------------------------------------------------------------
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Fallout3")
-    _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Fallout3 GOG")
+    # GOG subpaths are None on subclasses without a GOG release.
+    _APPDATA_SUBPATH_GOG: "Path | None" = Path("drive_c/users/steamuser/AppData/Local/Fallout3 GOG")
     _MYGAMES_SUBPATH = Path("Fallout3")
-    _MYGAMES_SUBPATH_GOG = Path("Fallout3 GOG")
+    _MYGAMES_SUBPATH_GOG: "Path | None" = Path("Fallout3 GOG")
     _ARCHIVE_INI_FILENAME = "FALLOUT.INI"
     # Per-game Prefs INI. When set, archive invalidation writes the same keys
     # to both the primary INI and the Prefs INI so the Prefs file can't silently
@@ -425,8 +440,6 @@ class Fallout_3(BaseGame):
     @property
     def frameworks(self) -> dict[str, str]:
         return {"Script Extender": self._script_extender_exe}
-
-    _APPDATA_SUBPATH_GOG: Path | None = None
 
     _PLUGINS_TXT_FILENAME = "plugins.txt"
 
@@ -493,8 +506,6 @@ class Fallout_3(BaseGame):
     # -----------------------------------------------------------------------
 
     _MYGAMES_DOCS = Path("drive_c/users/steamuser/Documents/My Games")
-
-    _MYGAMES_SUBPATH_GOG: Path | None = None
 
     def _get_archive_ini_path(self) -> "Path | None":
         """Return the primary INI used for archive invalidation (back-compat)."""
@@ -968,6 +979,7 @@ class Fallout_3(BaseGame):
                 per_mod_strip_prefixes=per_mod_strip,
                 log_fn=_log,
                 progress_fn=progress_fn,
+                prefix_root=self.get_prefix_path(),
             )
 
         _log("Step 1: Moving Data/ → Data_Core/ ...")
@@ -1035,6 +1047,7 @@ class Fallout_3(BaseGame):
                 self._game_path,
                 rules=custom_rules,
                 log_fn=_log,
+                prefix_root=self.get_prefix_path(),
             )
 
         _log("Restore: clearing Data/ and moving Data_Core/ back ...")
@@ -1111,12 +1124,14 @@ class Fallout3_GOTY(Fallout_3):
 
 class Fallout_NV(Fallout_3):
 
+    synthesis_registry_name = "FalloutNV"
+
     vanilla_plugins = ["FalloutNV.esm"]
     vanilla_dlc_plugins = [
         "DeadMoney.esm", "HonestHearts.esm", "OldWorldBlues.esm",
         "LonesomeRoad.esm", "GunRunnersArsenal.esm",
         "CaravanPack.esm", "ClassicPack.esm",
-        "MercenaryPack.esm", "TribalPack.esm",
+        "MercenaryPack.esm", "TribalPack.esm", "FalloutNV_lang.esp",
     ]
 
     @property
@@ -1178,6 +1193,7 @@ class Fallout_NV(Fallout_3):
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["nvse_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["nvse*.pdb"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".fos"]),
                 ]
 
     @property
@@ -1287,6 +1303,7 @@ class Fallout_4(Fallout_3):
             CustomRule(dest="", filenames=["f4se*.dll"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["CustomControlMap.txt"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".fos"]),
                 ]
 
     @property
@@ -1376,6 +1393,7 @@ class Fallout_4VR(Fallout_3):
             CustomRule(dest="", filenames=["f4sevr_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["f4sevr*.dll"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".fos"]),
                 ]
 
     @property
@@ -1391,7 +1409,9 @@ class Fallout_4VR(Fallout_3):
         return "fallout4vr"
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Fallout4VR")
+    _APPDATA_SUBPATH_GOG = None
     _MYGAMES_SUBPATH = Path("Fallout4VR")
+    _MYGAMES_SUBPATH_GOG = None
     _ARCHIVE_INI_FILENAME = "Fallout4.ini"
     _ARCHIVE_PREFS_INI_FILENAME = "Fallout4Prefs.ini"
     _archive_invalidation_extra_keys = (("sResourceDataDirsFinal", ""),)
@@ -1477,10 +1497,13 @@ class Oblivion(Fallout_3):
             CustomRule(dest="", filenames=["obse_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["obse*.dll"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".ess"]),
         ]
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Oblivion")
     _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Oblivion GOG")
+    _MYGAMES_SUBPATH = Path("Oblivion")
+    _MYGAMES_SUBPATH_GOG = Path("Oblivion GOG")
     _PLUGINS_TXT_FILENAME = "Plugins.txt"
     _ARCHIVE_INI_FILENAME = "Oblivion.ini"
     _ARCHIVE_PREFS_INI_FILENAME = "OblivionPrefs.ini"
@@ -1591,6 +1614,7 @@ class Skyrim(Fallout_3):
             CustomRule(dest="", filenames=["skse_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["skse*.dll"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".ess"]),
         ]
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Skyrim")
@@ -1702,10 +1726,13 @@ class SkyrimVR(Fallout_3):
             CustomRule(dest="", filenames=["sksevr_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["sksevr*.dll"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".ess"]),
         ]
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Skyrim VR")
+    _APPDATA_SUBPATH_GOG = None
     _MYGAMES_SUBPATH = Path("Skyrim VR")
+    _MYGAMES_SUBPATH_GOG = None
     _ARCHIVE_INI_FILENAME = "Skyrim.ini"
     _ARCHIVE_PREFS_INI_FILENAME = "SkyrimPrefs.ini"
     # Runs on the SSE engine fork — same reasoning as SkyrimSE (no dummy BSA).
@@ -1807,11 +1834,14 @@ class Starfield(Fallout_3):
             CustomRule(dest="", filenames=["sfse_loader.exe"], flatten=True, loose_only=True),
             CustomRule(dest="", filenames=["sfse*.dll"], flatten=True, loose_only=True),
             CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".sfs"]),
         ]
 
     # plugins.txt lives at AppData/Local/Starfield/plugins.txt — same pattern as other Bethesda titles.
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Starfield")
+    _APPDATA_SUBPATH_GOG = None
     _MYGAMES_SUBPATH = Path("Starfield")
+    _MYGAMES_SUBPATH_GOG = None
     _ARCHIVE_INI_FILENAME = "Starfield.ini"
     _ARCHIVE_PREFS_INI_FILENAME = "StarfieldPrefs.ini"
     # BA2-based — no dummy BSA.
@@ -1955,6 +1985,16 @@ class Enderal(Fallout_3):
     def loot_masterlist_repo(self) -> str:
         return "enderal"
 
+    @property
+    def custom_routing_rules(self) -> list:
+        from Utils.deploy import CustomRule
+        return [
+            CustomRule(dest="", filenames=["skse_loader.exe"], flatten=True, loose_only=True),
+            CustomRule(dest="", filenames=["skse*.dll"], flatten=True, loose_only=True),
+            CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".ess"]),
+        ]
+
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/enderal")
     _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/enderal GOG")
     _MYGAMES_SUBPATH = Path("Enderal")
@@ -2028,6 +2068,16 @@ class EnderalSE(Fallout_3):
     @property
     def loot_masterlist_repo(self) -> str:
         return "enderal"
+
+    @property
+    def custom_routing_rules(self) -> list:
+        from Utils.deploy import CustomRule
+        return [
+            CustomRule(dest="", filenames=["skse64_loader.exe"], flatten=True, loose_only=True),
+            CustomRule(dest="", filenames=["skse64*.dll"], flatten=True, loose_only=True),
+            CustomRule(dest="", folders=["Data"], flatten=True, loose_only=True),
+            self._saves_routing_rule([".ess"]),
+        ]
 
     _APPDATA_SUBPATH = Path("drive_c/users/steamuser/AppData/Local/Enderal Special Edition")
     _APPDATA_SUBPATH_GOG = Path("drive_c/users/steamuser/AppData/Local/Enderal Special Edition GOG")

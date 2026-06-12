@@ -167,6 +167,7 @@ class SkyrimSE(Fallout_3):
                 "enbunderwaternoise.bmp",
             ], flatten=True),
             CustomRule(dest="", folders=["enbseries"], flatten=True),
+            self._saves_routing_rule([".ess"]),
         ]
 
     @property
@@ -412,6 +413,7 @@ class SkyrimSE(Fallout_3):
                 per_mod_strip_prefixes=per_mod_strip,
                 log_fn=_log,
                 progress_fn=progress_fn,
+                prefix_root=self.get_prefix_path(),
             )
 
         _log(f"Step 2: Transferring mod files into Data/ ({mode.name}) ...")
@@ -485,6 +487,7 @@ class SkyrimSE(Fallout_3):
                 self._game_path,
                 rules=custom_rules,
                 log_fn=_log,
+                prefix_root=self.get_prefix_path(),
             )
 
         _log("Restore: clearing Data/ and moving Data_Core/ back ...")

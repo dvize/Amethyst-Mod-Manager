@@ -246,6 +246,12 @@ def deploy_custom_rules(
             return prefix_root
         return game_root
 
+    def _rule_dest_bases(rule: CustomRule) -> list[Path]:
+        """Return every destination dir for this rule: ``dest`` plus any
+        ``mirror_dests``, each resolved under the rule's base root."""
+        base = _rule_base(rule)
+        return [base / d if d else base for d in (rule.dest, *rule.mirror_dests)]
+
     # Drop rules that want the prefix but have none — otherwise they'd silently
     # land at game_root, which is worse than skipping them.
     skipped = [r for r in rules if r.to_prefix and prefix_root is None]
@@ -373,7 +379,6 @@ def deploy_custom_rules(
             handled_lower.add(rel_lower)  # claim it anyway so later rules don't re-try
             return
         src = Path(src_str)
-        _base = _rule_base(rule); dest_base = _base / rule.dest if rule.dest else _base
         container_info = _sibling_container(rel_str, strip_len, mod_name) \
             if rule.include_siblings else None
         if container_info is not None:
@@ -383,16 +388,16 @@ def deploy_custom_rules(
                 rel_in_container = norm_rel[len(container_path) + 1:]
             else:
                 rel_in_container = norm_rel
-            dst = dest_base / container_name / rel_in_container
+            tail = container_name + "/" + rel_in_container
         elif rule.flatten:
             if strip_len >= 0:
-                kept = rel_str[strip_len:].lstrip("/")
-                dst = dest_base / kept if kept else dest_base
+                tail = rel_str[strip_len:].lstrip("/")
             else:
-                dst = dest_base / src.name
+                tail = src.name
         else:
-            dst = dest_base / rel_str
-        tasks.append((src, dst))
+            tail = rel_str
+        for dest_base in _rule_dest_bases(rule):
+            tasks.append((src, dest_base / tail if tail else dest_base))
         handled_lower.add(rel_lower)
 
     def _drag_container(container_lower: str, container_name: str,
@@ -401,7 +406,7 @@ def deploy_custom_rules(
         ``dest/container_name/<rel-from-container>``.
         """
         prefix_lower = container_lower + "/" if container_lower else ""
-        _base = _rule_base(rule); dest_base = _base / rule.dest if rule.dest else _base
+        dest_bases = _rule_dest_bases(rule)
         for sib_rel_str, sib_mod_name, sib_lower in all_entries:
             if sib_lower in handled_lower:
                 continue
@@ -423,8 +428,8 @@ def deploy_custom_rules(
                 handled_lower.add(sib_lower)
                 continue
             src = Path(src_str)
-            dst = dest_base / container_name / rel_in_container
-            tasks.append((src, dst))
+            for dest_base in dest_bases:
+                tasks.append((src, dest_base / container_name / rel_in_container))
             handled_lower.add(sib_lower)
 
     # Process rules in declaration order. For each rule:
@@ -509,16 +514,15 @@ def deploy_custom_rules(
                 _log(f"  WARN: source not found — {sib_rel_str} ({sib_mod_name})")
                 continue
             src = Path(src_str)
-            _base = _rule_base(rule); dest_base = _base / rule.dest if rule.dest else _base
             if rule.flatten:
                 if strip_len >= 0:
-                    kept = sib_rel_str[strip_len:].lstrip("/")
-                    dst = dest_base / kept if kept else dest_base
+                    tail = sib_rel_str[strip_len:].lstrip("/")
                 else:
-                    dst = dest_base / src.name
+                    tail = src.name
             else:
-                dst = dest_base / sib_rel_str
-            tasks.append((src, dst))
+                tail = sib_rel_str
+            for dest_base in _rule_dest_bases(rule):
+                tasks.append((src, dest_base / tail if tail else dest_base))
             handled_lower.add(sib_lower)
 
     if not tasks:
