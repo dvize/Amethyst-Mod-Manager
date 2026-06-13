@@ -412,6 +412,15 @@ class Fallout_3(BaseGame):
     # override what we wrote — the engine reads both and the Prefs value wins
     # when present in both. Set to None on subclasses without a Prefs INI.
     _ARCHIVE_PREFS_INI_FILENAME: "str | None" = "FalloutPrefs.ini"
+
+    # Whether the SArchiveList / SInvalidationFile edits go to the Prefs INI too.
+    # FO3/FNV: yes — FalloutPrefs.ini legitimately carries Archive keys that
+    # override Fallout.ini. Oblivion: NO — OblivionPrefs.ini does not manage
+    # SArchiveList, and writing a partial list there (dummy + mod BSAs but no
+    # vanilla archives, since the vanilla list only lives in Oblivion.ini)
+    # shadows the good list and breaks BSA loading for ALL mods. bInvalidate-
+    # OlderFiles still goes to both regardless.
+    _archive_list_in_prefs_ini: bool = True
     archive_invalidation_enabled = True
     _archive_invalidation_extra_keys: tuple[tuple[str, str], ...] = ()
 
@@ -426,11 +435,13 @@ class Fallout_3(BaseGame):
 
     # FO3/FNV only: these engines read files only from BSAs listed in
     # SArchiveList — a mod BSA named to match its plugin is NOT reliably
-    # auto-loaded (unlike Oblivion/Skyrim/FO4). When True, the invalidation step
-    # also appends every deployed mod-provided BSA to SArchiveList so its assets
-    # actually load. This Fallout_3 game class (and Fallout3_GOTY/Fallout_NV)
-    # need it True; the later-engine subclasses override it back to False.
-    # See geckwiki.com/index.php/BSA_Files.
+    # auto-loaded. When True, the invalidation step appends every deployed
+    # mod-provided BSA to SArchiveList so its assets load. Fallout_3/
+    # Fallout3_GOTY/Fallout_NV set it True; later engines override it False.
+    # Oblivion does NOT use this — it auto-loads a mod's BSA via plugin-name
+    # association, and forcing entries here both fights SkyBSA's load-order
+    # reversal and blows the 256-char SArchiveList limit. See
+    # geckwiki.com/index.php/BSA_Files.
     _archive_list_needs_mod_bsas: bool = True
 
     # Engine-fix plugin whose FalloutCustom.ini support bypasses the vanilla
@@ -699,6 +710,7 @@ class Fallout_3(BaseGame):
             new_mod_bsas = self._deployed_mod_bsas()
 
         self._write_dummy_bsa_file(_log)
+        primary_ini = ini_paths[0]
         longest_list = ""
         for ini_path in ini_paths:
             ini_path.parent.mkdir(parents=True, exist_ok=True)
@@ -707,6 +719,14 @@ class Fallout_3(BaseGame):
                 if _read_ini_key(ini_path, "Archive", key) is not None:
                     continue
                 _set_ini_key(ini_path, "Archive", key, value)
+            # SArchiveList / SInvalidationFile only go to the Prefs INI when the
+            # engine treats it as an Archive-key override (FO3/FNV). On Oblivion
+            # they must stay in Oblivion.ini only — see _archive_list_in_prefs_ini.
+            # Also strip any partial SArchiveList a prior version wrote to Prefs,
+            # since it shadows the good list and breaks BSA loading.
+            if ini_path != primary_ini and not self._archive_list_in_prefs_ini:
+                self._strip_archive_list_keys(ini_path)
+                continue
             written = self._apply_dummy_bsa_invalidation_ini(
                 ini_path, prev_mod_bsas, new_mod_bsas)
             if len(written) > len(longest_list):
@@ -857,6 +877,16 @@ class Fallout_3(BaseGame):
             _set_ini_key(ini_path, "Archive", key, updated)
         _set_ini_key(ini_path, "Archive", "SInvalidationFile", "")
         return updated
+
+    def _strip_archive_list_keys(self, ini_path: Path) -> None:
+        """Remove SArchiveList / SInvalidationFile from an INI we no longer want
+        to manage (the Oblivion Prefs INI). Leaves other Archive keys alone."""
+        if _read_ini_key(ini_path, "Archive",
+                         self._invalidation_archive_list_key) is not None:
+            _set_ini_key(ini_path, "Archive",
+                         self._invalidation_archive_list_key, None)
+        if _read_ini_key(ini_path, "Archive", "SInvalidationFile") == "":
+            _set_ini_key(ini_path, "Archive", "SInvalidationFile", None)
 
     def _revert_dummy_bsa_invalidation_ini(self, ini_path: Path) -> None:
         """Undo dummy-BSA INI edits for one INI. The dummy file itself is removed
@@ -1564,7 +1594,17 @@ class Fallout_4VR(Fallout_3):
 
 class Oblivion(Fallout_3):
 
+    # Don't force/reorder mod BSAs in SArchiveList (inherits False). Oblivion
+    # auto-loads a mod's BSA via plugin-name association (the ESP loads it),
+    # AFTER the vanilla archives. Reliable BSA-over-vanilla override needs the
+    # SkyBSA OBSE plugin (reverses the in-memory list so the latest-loaded BSA
+    # wins); forcing the mod BSA early would invert that, and the 256-char
+    # SArchiveList limit makes registration impractical anyway.
     _archive_list_needs_mod_bsas = False
+    # OblivionPrefs.ini does NOT manage SArchiveList; writing a partial list
+    # there shadowed Oblivion.ini's full list and broke BSA loading for every
+    # mod. Keep the archive list out of the Prefs INI.
+    _archive_list_in_prefs_ini = False
     vanilla_plugins = ["Oblivion.esm", "Update.esm"]
     vanilla_dlc_plugins = [
         "DLCShiveringIsles.esp", "Knights.esp",

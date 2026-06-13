@@ -135,14 +135,20 @@ def bsa_version_for_game(game_id: str | None) -> int | None:
 # else. The engine accepts this and uses the file's presence as the trigger
 # to mount <ModName>.bsa from the Data folder.
 #
-# TES4 record header (24 bytes, FO3+ — Skyrim/SSE included):
+# The TES4 record header size is GAME-SPECIFIC:
+#
+# Oblivion — 20-byte header (no timestamp/version fields; they postdate it):
 #     type        4 B   b"TES4"
 #     datasize    4 B   uint32 LE — size of subrecord block (excludes header)
-#     flags       4 B   record flags (e.g. 0x200 = ESL on SSE/VR/Enderal SE)
+#     flags       4 B   record flags
 #     formID      4 B   0 for the TES4 header record
+#     vcs         4 B   version-control info, 0 is fine
+#
+# FO3/FNV/Skyrim/FO4 (+VR/Enderal SE) — 24-byte header (8-byte trailer):
+#     type/datasize/flags/formID  as above (16 B)
 #     timestamp   2 B   editor timestamp, 0 is fine
 #     last_mod    2 B   last user-mod-index, 0
-#     internal_v  2 B   per-game; engine refuses plugins with version 0!
+#     internal_v  2 B   per-game; these engines refuse plugins with version 0!
 #                       LE=43, SSE=44, FO3/NV=15, FO4=131
 #     unknown     2 B   0
 #
@@ -153,9 +159,11 @@ def bsa_version_for_game(game_id: str | None) -> int | None:
 #     numRecs  4 B   uint32 LE — 0
 #     nextID   4 B   uint32 LE — 0x800 (lowest valid free FormID)
 #
-# Without the internal_version (offset 20 in the record header) the SSE
-# engine silently rejects the plugin — assets ship in the BSA but never
-# load, surfacing as the missing-texture purple grid before a crash.
+# Getting the header size wrong shifts HEDR off its expected offset and the
+# engine silently rejects the plugin: assets ship in the BSA but never load
+# (missing-texture purple grid, or just vanilla content). Writing the FO3+
+# 24-byte header for Oblivion put HEDR at offset 24 instead of 20 and broke
+# plugin-association BSA loading — the bug this split fixes.
 # ---------------------------------------------------------------------------
 
 # Per-game HEDR version — what the official editors stamp.
@@ -202,15 +210,18 @@ def is_our_stub_plugin(plugin_path: Path) -> bool:
     """Return True if *plugin_path* looks like a stub previously generated
     by ``write_stub_plugin``.
 
-    The current stub is 49 bytes (TES4 header + HEDR + empty CNAM); an
-    older 42-byte variant (no CNAM) is also recognised so users who
-    packed before that change can still re-pack cleanly. Anything else
-    — including real authored plugins, which always carry MAST/at-least-
-    one-record and are well over 60 bytes — is rejected.
+    Recognised variants (all start with a TES4 record carrying only HEDR
+    [+ optional empty CNAM], which real authored plugins never do — they
+    carry MAST/records and run well over 60 bytes):
+      - FO3+ 24-byte header: 49 B (HEDR+CNAM) or older 42 B (HEDR only),
+        HEDR at offset 24. NB: Oblivion stubs written before the header-size
+        fix also land here (49 B, HEDR at 24) so they re-pack cleanly.
+      - Oblivion 20-byte header: 45 B (HEDR+CNAM) or 38 B (HEDR only),
+        HEDR at offset 20.
     """
     try:
         size = plugin_path.stat().st_size
-        if size not in (42, 49):
+        if size not in (38, 42, 45, 49):
             return False
         data = plugin_path.read_bytes()
     except OSError:
@@ -221,8 +232,8 @@ def is_our_stub_plugin(plugin_path: Path) -> bool:
     datasize = struct.unpack_from("<I", data, 4)[0]
     if datasize not in (18, 25):
         return False
-    # First subrecord is always HEDR at offset 24.
-    return data[24:28] == b"HEDR"
+    # HEDR follows the record header: offset 20 (Oblivion) or 24 (FO3+).
+    return data[20:24] == b"HEDR" or data[24:28] == b"HEDR"
 
 
 def write_stub_plugin(
@@ -271,19 +282,33 @@ def write_stub_plugin(
     cnam = struct.pack("<4sH", b"CNAM", 1) + b"\x00"
     subrecord_block = hedr + cnam
 
-    # TES4 record header — 24 B.  The trailing 8 B encode (in order):
-    # timestamp(u16) | last_mod(u16) | internal_version(u16) | unknown(u16).
-    record_header = struct.pack(
-        "<4sIIIHHHH",
-        b"TES4",
-        len(subrecord_block),  # datasize
-        record_flags,
-        0,                     # formID
-        0,                     # timestamp
-        0,                     # last_mod
-        internal_version,      # internal version (== "Form Version" in xEdit)
-        0,                     # unknown
-    )
+    # TES4 record header. Oblivion uses a 20-byte header (the trailing 8-byte
+    # timestamp/version trailer postdates it); FO3+ use 24 bytes. Writing the
+    # 24-byte form for Oblivion shifts HEDR to offset 24 and the engine refuses
+    # the plugin, so its BSA never auto-loads.
+    if game_id == "Oblivion":
+        record_header = struct.pack(
+            "<4sIIII",
+            b"TES4",
+            len(subrecord_block),  # datasize
+            record_flags,
+            0,                     # formID
+            0,                     # version-control info
+        )
+    else:
+        # The trailing 8 B encode (in order):
+        # timestamp(u16) | last_mod(u16) | internal_version(u16) | unknown(u16).
+        record_header = struct.pack(
+            "<4sIIIHHHH",
+            b"TES4",
+            len(subrecord_block),  # datasize
+            record_flags,
+            0,                     # formID
+            0,                     # timestamp
+            0,                     # last_mod
+            internal_version,      # internal version (== "Form Version" in xEdit)
+            0,                     # unknown
+        )
 
     payload = record_header + subrecord_block
     try:
