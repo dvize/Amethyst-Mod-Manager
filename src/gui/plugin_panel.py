@@ -3063,6 +3063,80 @@ class PluginPanel(PluginPanelExeLauncherMixin, PluginPanelLOOTMixin,
                 basenames.add(k.rsplit("/", 1)[-1])
         return basenames
 
+    def _script_extender_detected(self) -> bool:
+        """True if a script-extender framework loader is present in this profile.
+
+        Mirrors the framework-banner logic in `_refresh_framework_banners`: a
+        loader counts as installed if it sits in the game root, the Root_Folder
+        staging dir, the enabled filemap, or a disabled mod. Used by the LOOT
+        tooltip to suppress a "Requires (missing): Script Extender" line when the
+        extender is actually installed (e.g. deployed as a mod rather than
+        dropped in the game root).
+        """
+        if self._game is None:
+            return False
+        try:
+            frameworks: dict[str, str] = self._game.frameworks or {}
+        except Exception:
+            frameworks = {}
+        if not frameworks:
+            return False
+
+        # Restrict to script-extender loaders (frameworks may also hold things
+        # like ContentPatcher.dll that aren't script extenders).
+        se_exes = [
+            exe for label, exe in frameworks.items()
+            if "script extender" in label.lower()
+            or re.search(r"\b(sk?se(64|vr)?|f4se(vr)?|fose|nvse|obse|sfse|mwse)\b",
+                         exe.rsplit("/", 1)[-1].lower())
+        ]
+        if not se_exes:
+            return False
+
+        game_root: "Path | None" = None
+        try:
+            game_root = self._game.get_game_path() if hasattr(self._game, "get_game_path") else None
+        except Exception:
+            pass
+        root_folder: "Path | None" = None
+        try:
+            root_folder = self._game.get_effective_root_folder_path()
+        except Exception:
+            pass
+
+        filemap_path_str = self._get_filemap_path()
+        staged_keys: set[str] = set()
+        if filemap_path_str:
+            fm_path = Path(filemap_path_str)
+            for fm in (fm_path, fm_path.parent / "filemap_root.txt"):
+                if not fm.is_file():
+                    continue
+                try:
+                    with fm.open(encoding="utf-8") as f:
+                        for line in f:
+                            if "\t" not in line:
+                                continue
+                            rel_path = line.split("\t", 1)[0].replace("\\", "/")
+                            staged_keys.add(rel_path.lower())
+                except OSError:
+                    pass
+
+        rf_allowed = getattr(self._game, "root_folder_deploy_enabled", True)
+        disabled_basenames = self._framework_disabled_basenames(filemap_path_str)
+
+        for exe in se_exes:
+            exe_path = Path(exe)
+            if game_root is not None and _file_exists_ci(game_root, exe_path):
+                return True
+            if rf_allowed and root_folder is not None and _file_exists_ci(root_folder, exe_path):
+                return True
+            if self._framework_exe_in_staged(exe, staged_keys):
+                return True
+            exe_basename = exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if exe_basename and exe_basename in disabled_basenames:
+                return True
+        return False
+
     def _refresh_plugins_tab(self) -> None:
         """Reload plugin entries from plugins.txt and redraw."""
         try:

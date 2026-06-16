@@ -695,13 +695,17 @@ class PluginPanelLOOTMixin:
         mod_id = self._extract_nexus_mod_id(display) or self._extract_nexus_mod_id(raw)
         if mod_id is not None and mod_id in enabled_mod_ids:
             return True
-        # Heuristic for script extenders (SKSE/SKSE64/F4SE/OBSE/etc.) which
-        # users often drop straight into the game root instead of a mod folder.
+        # Script extenders (SKSE/SKSE64/F4SE/OBSE/etc.) — defer to the same
+        # framework detection that drives the green/red status banner, so the
+        # "missing" line is suppressed whenever the extender is actually
+        # installed: in the game root, Root_Folder staging, the enabled filemap,
+        # or even a disabled mod. Without this, an extender deployed as a mod
+        # (rather than dropped loose in the game root) read as missing here even
+        # though the banner showed it installed.
         text = f"{display} {raw}".lower()
         if "script extender" in text or re.search(r"\bsk?se\b|\bf4se\b|\bobse\b|\bnvse\b", text):
-            for fname in self._get_game_root_files():
-                if "_loader.exe" in fname or fname.endswith("se_loader.exe"):
-                    return True
+            if self._script_extender_detected():
+                return True
         return False
 
     def _has_loot_tooltip_content(self, plugin_name: str) -> bool:
