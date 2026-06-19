@@ -464,7 +464,10 @@ class SkyrimSE(Fallout_3):
         _log("Step 5: Symlinking profile INI files ...")
         self._symlink_profile_ini_files(profile, _log)
 
-        _log("Step 6: Applying archive invalidation ...")
+        _log("Step 6: Symlinking profile saves ...")
+        self._symlink_profile_saves(profile, _log)
+
+        _log("Step 7: Applying archive invalidation ...")
         self.apply_archive_invalidation(_log)
 
         _log(
@@ -497,6 +500,8 @@ class SkyrimSE(Fallout_3):
         _profile_dir = self._active_profile_dir
         if _profile_dir is not None:
             self._remove_profile_ini_symlinks(_profile_dir.name, _log)
+            _log("Restore: removing profile saves symlinks ...")
+            self._remove_profile_saves_symlinks(_profile_dir.name, _log)
 
         _profile_dir = self._active_profile_dir
         _entries = read_modlist(_profile_dir / "modlist.txt") if _profile_dir else []
