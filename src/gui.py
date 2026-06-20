@@ -2339,6 +2339,12 @@ class App(ctk.CTk):
         import json as _json
         from Utils.config_paths import get_plugins_dir as _gpd
         from Utils.gh_cache import fetch_text as _gh_fetch_text
+        from Utils.ui_config import load_dev_mode
+
+        # In dev mode, never overwrite local plugins with the repo copy — the
+        # developer is editing them in place (mirrors _sync_custom_handlers).
+        if load_dev_mode():
+            return
 
         _PLUGINS_API_URL = (
             "https://api.github.com/repos/ChrisDKN/Amethyst-Mod-Manager/contents/"
