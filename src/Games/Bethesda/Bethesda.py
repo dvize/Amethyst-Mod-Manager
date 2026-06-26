@@ -148,6 +148,14 @@ class Fallout_3(BaseGame):
     ]
     synthesis_registry_name = "Fallout3"
 
+    # paths.json extras that a non-default profile may override (per-profile).
+    # heroic_app_name etc. are deliberately excluded so they stay global.
+    profile_overridable_paths_extras = (
+        "script_extender_swap",
+        "profile_ini_files",
+        "profile_saves",
+    )
+
     # BAIN packages are authored for Bethesda games, so re-enable the
     # sub-package picker that BaseGame disables by default.
     @property

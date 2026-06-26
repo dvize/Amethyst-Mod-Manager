@@ -421,6 +421,8 @@ class SSEEditWizard(ProtonPrefixStepMixin, ctk.CTkFrame):
                 game.set_active_profile_dir(
                     game.get_profile_root() / "profiles" / last_deployed
                 )
+                # Reload so the last-deployed profile's path overrides apply.
+                game.load_paths()
             try:
                 game.restore(log_fn=lambda m: self._log(f"{name} Wizard: {m}"))
                 restored_ok = True
@@ -434,6 +436,7 @@ class SSEEditWizard(ProtonPrefixStepMixin, ctk.CTkFrame):
             if saved_profile_dir is not None:
                 try:
                     game.set_active_profile_dir(saved_profile_dir)
+                    game.load_paths()
                 except Exception:
                     pass
         # The game is no longer deployed — drop the deploy-active flag so the

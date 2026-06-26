@@ -291,10 +291,11 @@ class App(ctk.CTk):
                     return min(rects, key=lambda r: r[2] * r[3])[2:]
             except Exception:
                 pass
-            # No per-monitor data: avoid the virtual-desktop trap. Assume a
-            # common single-monitor size capped at the reported screen.
-            return (min(1920, self.winfo_screenwidth()),
-                    min(1080, self.winfo_screenheight()))
+            # No per-monitor data available — fall back to the original
+            # behaviour (full reported screen). This is the combined virtual
+            # desktop on multi-monitor, but with no rect data we can't do
+            # better, and it's strictly no worse than before this change.
+            return self.winfo_screenwidth(), self.winfo_screenheight()
 
         _mon_w, _mon_h = _current_monitor_size()
         # Restore saved window size/position, or use default
@@ -1556,6 +1557,8 @@ class App(ctk.CTk):
                 initial_game.set_active_profile_dir(
                     initial_game.get_profile_root() / "profiles" / profile
                 )
+                # Reload so the startup profile's per-profile path overrides apply.
+                initial_game.load_paths()
                 self._plugin_panel._plugins_path = plugins_path
                 self._plugin_panel._plugin_extensions = initial_game.plugin_extensions
                 self._plugin_panel._vanilla_plugins = _vanilla_plugins_for_game(initial_game)
@@ -2520,6 +2523,10 @@ if __name__ == "__main__":
                     game.set_active_profile_dir(
                         game.get_profile_root() / "profiles" / last_deployed
                     )
+                    # Reload so the last-deployed profile's path overrides drive
+                    # the restore (it may target a different game folder).
+                    game.load_paths()
+                    game_root = game.get_game_path()
                 try:
                     if hasattr(game, "restore"):
                         game.restore(log_fn=log_fn)
@@ -2530,6 +2537,7 @@ if __name__ == "__main__":
                 finally:
                     if original_profile_dir is not None:
                         game.set_active_profile_dir(original_profile_dir)
+                        game.load_paths()
             except Exception as e:
                 log_fn(f"Restore-on-close error for {game.name}: {e}")
 

@@ -2663,6 +2663,7 @@ class CollectionDetailDialog(tk.Frame):
                 pass
 
         self._game.set_active_profile_dir(profile_dir)
+        self._game.load_paths()
         modlist_path = profile_dir / "modlist.txt"
         plugins_path = profile_dir / "plugins.txt"
         staging_path = self._game.get_effective_mod_staging_path()
@@ -4223,6 +4224,7 @@ class CollectionDetailDialog(tk.Frame):
 
         # Restore the original profile dir
         self._game.set_active_profile_dir(old_profile)
+        self._game.load_paths()
 
         # If cancelled, hand off to cleanup (runs on main thread via after()).
         if _col_cancel.is_set():
@@ -5222,6 +5224,7 @@ class CollectionDetailDialog(tk.Frame):
                 pass
 
         self._game.set_active_profile_dir(profile_dir)
+        self._game.load_paths()
         modlist_path = profile_dir / "modlist.txt"
         staging_path = self._game.get_effective_mod_staging_path()
         installed = 0
@@ -6042,6 +6045,7 @@ class CollectionDetailDialog(tk.Frame):
                 pass
 
         self._game.set_active_profile_dir(old_profile)
+        self._game.load_paths()
 
         # Handle cancel
         if self._manual_cancel_event.is_set():
@@ -6196,6 +6200,7 @@ class CollectionDetailDialog(tk.Frame):
         # Restore any deployed mod files so we don't orphan files in the game folder
         if profile_dir is not None and profile_dir.is_dir() and game is not None and game.is_configured():
             game.set_active_profile_dir(profile_dir)
+            game.load_paths()
             try:
                 if hasattr(game, "restore"):
                     game.restore()
@@ -6210,6 +6215,7 @@ class CollectionDetailDialog(tk.Frame):
             except Exception as exc:
                 self._log(f"Cancel: restore_root_folder failed: {exc}")
             game.set_active_profile_dir(None)
+            game.load_paths()
 
         # Delete the collection profile directory
         if profile_dir is not None and profile_dir.is_dir():

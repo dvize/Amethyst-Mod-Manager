@@ -338,6 +338,8 @@ class ESLifierWizard(ProtonPrefixStepMixin, ctk.CTkFrame):
         game.set_active_profile_dir(
             game.get_profile_root() / "profiles" / profile
         )
+        # Reload so this profile's game/prefix path overrides apply.
+        game.load_paths()
 
         staging   = game.get_effective_mod_staging_path()
         overwrite = game.get_effective_overwrite_path()

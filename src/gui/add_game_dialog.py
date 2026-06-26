@@ -189,6 +189,21 @@ class ReconfigureGamePanel(ctk.CTkFrame):
             font=FONT_BOLD, text_color=TEXT_MAIN, anchor="w"
         ).pack(side="left", padx=12, pady=8)
 
+        # Tell the user whether these settings are shared (default profile) or
+        # scoped to the currently-active non-default profile — saving from a
+        # non-default profile writes the game/prefix paths, deploy mode and the
+        # options below as that profile's own overrides (the Mod Staging Folder
+        # stays shared across all profiles).
+        _active = getattr(self._game, "_active_profile_dir", None)
+        if _active is not None and _active.name != "default":
+            _scope_text = f"Settings saved to profile: {_active.name} (this profile only)"
+        else:
+            _scope_text = "Editing shared settings (default profile)"
+        ctk.CTkLabel(
+            title_bar, text=_scope_text,
+            font=FONT_SMALL, text_color=TEXT_WARN, anchor="e"
+        ).pack(side="right", padx=12, pady=8)
+
         # Body
         _scroll = ctk.CTkScrollableFrame(
             self, fg_color=BG_PANEL, corner_radius=0,
@@ -1307,6 +1322,36 @@ class ReconfigureGamePanel(ctk.CTkFrame):
     def _on_add(self):
         if self._found_path is None:
             return
+
+        # Block game/prefix path changes while deployed: the deployed mod files
+        # would be stranded in the OLD game folder (restore looks at the new
+        # path). Only blocks when a path actually changes — re-saving other
+        # settings while deployed is fine.
+        if self._game.is_configured() and self._game.get_deploy_active():
+            def _changed(old, new) -> bool:
+                if old and new:
+                    try:
+                        return Path(old).resolve() != Path(new).resolve()
+                    except Exception:
+                        return str(old) != str(new)
+                return bool(old) != bool(new)
+
+            cur_game = self._game.get_game_path()
+            cur_pfx = self._game.get_prefix_path()
+            if _changed(cur_game, self._found_path) or (
+                self._found_prefix is not None and _changed(cur_pfx, self._found_prefix)
+            ):
+                deployed = self._game.get_last_deployed_profile()
+                self._status_label.configure(
+                    text=(
+                        "Cannot change the game or prefix path while mods are "
+                        f"deployed (profile '{deployed}' is currently deployed). "
+                        "Restore the game first, then change the path."
+                    ),
+                    text_color=TEXT_ERR,
+                )
+                return
+        # ---------------------------------------------------------------------
 
         # Capture the staging root currently on disk, before any setters mutate
         # it. We need this to offer a migration if the staging location changed.
