@@ -20,9 +20,12 @@ Mod structure:
   The game must be patched with dtkit-patch after every game update. Patching
   is owned solely by the dtkit-patch wizard (see wizards/dtkit_patch.py) — it is
   deliberately NOT run during deploy/restore. Those steps don't manage
-  bundle_database.data or its dtkit .bak, so running --patch/--unpatch there can
+  bundle_database.data or its dtkit .bak, so running the patcher there can
   desync the patched state from the backup (stranded/wrong-version .bak →
   black-screen CTD). Users run the wizard after installing mods or game updates.
+  The wizard runs the dtkit-patch.exe that ships with the Darktide Mod Loader
+  (deployed to <game>/tools/) under Proton, mirroring toggle_darktide_mods.bat,
+  so the patcher version always matches the user's DML install.
 """
 
 import json
@@ -143,7 +146,8 @@ class Darktide(BaseGame):
                 id="run_dtkit_patch",
                 label="Patch Game (dtkit-patch)",
                 description=(
-                    "Download and run dtkit-patch to enable Darktide Mod Loader. "
+                    "Deploy mods and toggle the Darktide Mod Loader bundle patch "
+                    "(runs the shipped dtkit-patch.exe under Proton). "
                     "Re-run this wizard after every game update."
                 ),
                 dialog_class_path="wizards.dtkit_patch.DtkitPatchWizard",
