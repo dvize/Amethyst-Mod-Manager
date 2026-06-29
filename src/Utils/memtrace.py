@@ -74,35 +74,26 @@ def _fmt_signed(n: int) -> str:
     return f"+{n}" if n > 0 else str(n)
 
 
+# Toolkit-specific widget-object counter → (canvas_items, image_count).
+# Injected by the GUI (set_tk_object_counter) so this debug module needn't
+# import a GUI toolkit. Unset → counts report (0, 0).
+_object_counter: "callable | None" = None
+
+
+def set_tk_object_counter(fn: "callable | None") -> None:
+    """Register a callable(root) -> (canvas_items, image_count)."""
+    global _object_counter
+    _object_counter = fn
+
+
 def _tk_object_counts(root) -> tuple[int, int]:
     """(live canvas items across all Canvas widgets, live Tk image count)."""
-    items = 0
-    images = 0
+    if _object_counter is None:
+        return 0, 0
     try:
-        # Number of registered Tk images (PhotoImage/BitmapImage) in the interp.
-        names = root.tk.call("image", "names")
-        if isinstance(names, str):
-            names = root.tk.splitlist(names)
-        images = len(names)
+        return _object_counter(root)
     except Exception:
-        pass
-    try:
-        from tkinter import Canvas
-
-        def _walk(w):
-            nonlocal items
-            if isinstance(w, Canvas):
-                try:
-                    items += len(w.find_all())
-                except Exception:
-                    pass
-            for child in w.winfo_children():
-                _walk(child)
-
-        _walk(root)
-    except Exception:
-        pass
-    return items, images
+        return 0, 0
 
 
 def _histogram() -> Counter:

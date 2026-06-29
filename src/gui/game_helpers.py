@@ -13,6 +13,7 @@ from Utils.game_loader import discover_games
 from Utils.plugin_loader import discover_plugins
 from Utils.profile_state import (
     merge_profile_settings,
+    profile_uses_specific_mods,  # re-exported: backend now imports from Utils
     read_profile_settings,
     write_profile_settings,
 )
@@ -140,11 +141,6 @@ def _profiles_for_game(game_name: str) -> list[str]:
         names.remove("default")
         names.insert(0, "default")
     return names if names else ["default"]
-
-
-def profile_uses_specific_mods(profile_dir: Path) -> bool:
-    """Return True if this profile stores its own mods folder inside itself."""
-    return bool(read_profile_settings(profile_dir, None).get("profile_specific_mods", False))
 
 
 def get_collection_url_from_profile(profile_dir: Path) -> str | None:

@@ -12,6 +12,7 @@ from PIL import Image as PilImage
 from Utils.ui_config import (
     get_ui_scale, get_font_family, load_font_family,
     load_theme_colors, get_theme_color, get_appearance_mode,
+    set_theme_override_resolver,
 )
 
 # ---------------------------------------------------------------------------
@@ -138,6 +139,18 @@ def hover_tint(hex_bg: str, amount: int = 20) -> str:
         return f"#{r:02x}{g:02x}{b:02x}"
     except Exception:
         return hex_bg
+
+# Let ui_config resolve per-theme color overrides from gui.themes.<mode>
+# without importing the GUI package itself. Registered before the first
+# load_theme_colors() so import-time theme reads pick up overrides.
+def _resolve_theme_overrides(mode: str) -> dict:
+    import importlib
+    mod = importlib.import_module(f"gui.themes.{mode}")
+    raw = getattr(mod, "THEME_DEFAULTS_OVERRIDE", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+set_theme_override_resolver(_resolve_theme_overrides)
 
 # Highlight colours — user-customisable via Settings → Theme, persisted in amethyst.ini.
 load_theme_colors()

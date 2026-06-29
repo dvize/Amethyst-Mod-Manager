@@ -24,12 +24,12 @@ from gui.theme import (
 )
 
 
-# Sentinel returned by ask_choice when the user presses "Back" to revisit the
-# previous page of a multi-page wizard.
-BACK = object()
-# Sentinel returned when the user opts to accept the default selection for this
-# page and every remaining page without being prompted further.
-USE_DEFAULTS = object()
+# Navigation sentinels are owned by Utils.ui_hooks so the backend and GUI
+# compare against the *same* objects (identity comparison). Re-exported here for
+# existing call sites.
+#   BACK         — user pressed "Back" to revisit the previous wizard page.
+#   USE_DEFAULTS — user accepts the default for this and all remaining pages.
+from Utils.ui_hooks import BACK, USE_DEFAULTS
 
 
 class _ChoiceOverlay(ctk.CTkFrame):

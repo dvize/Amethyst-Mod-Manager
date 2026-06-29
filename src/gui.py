@@ -69,6 +69,125 @@ if not os.environ.get("MOD_MANAGER_GAMES"):
         break
 
 from Utils.ui_config import load_ui_scale, get_ui_scale, load_window_geometry, save_window_geometry, load_allow_prerelease
+from Utils.ui_config import set_screen_probe as _set_screen_probe
+
+
+def _tk_screen_probe() -> "tuple[int, int, float]":
+    """Probe the primary display via a throwaway Tk root → (w, h, de_scale).
+
+    Registered with ui_config so get_screen_info() can query the display
+    without ui_config importing a GUI toolkit. winfo_fpixels('1i') > 96 means
+    the DE is applying its own scaling.
+    """
+    import tkinter as _tk
+    root = _tk.Tk()
+    try:
+        root.withdraw()
+        root.update_idletasks()
+        w = root.winfo_screenwidth()
+        h = root.winfo_screenheight()
+        try:
+            dpi = root.winfo_fpixels('1i')
+            de_scale = dpi / 96.0 if dpi > 96 else 1.0
+        except Exception:
+            de_scale = 1.0
+    finally:
+        root.destroy()
+    return w, h, de_scale
+
+
+_set_screen_probe(_tk_screen_probe)
+
+
+def _tk_object_counts(root) -> "tuple[int, int]":
+    """(live canvas items across all Canvas widgets, live Tk image count).
+
+    Registered with Utils.memtrace so the leak diagnostic can count Tk objects
+    without memtrace importing tkinter.
+    """
+    items = 0
+    images = 0
+    try:
+        names = root.tk.call("image", "names")
+        if isinstance(names, str):
+            names = root.tk.splitlist(names)
+        images = len(names)
+    except Exception:
+        pass
+    try:
+        from tkinter import Canvas
+
+        def _walk(w):
+            nonlocal items
+            if isinstance(w, Canvas):
+                try:
+                    items += len(w.find_all())
+                except Exception:
+                    pass
+            for child in w.winfo_children():
+                _walk(child)
+
+        _walk(root)
+    except Exception:
+        pass
+    return items, images
+
+
+# Last-resort tkinter.filedialog pickers, registered with portal_filechooser so
+# that Utils module needn't import tkinter. Each runs on the main thread (the
+# portal_filechooser dispatcher guarantees this).
+def _tk_pick_folder(title):
+    import tkinter.filedialog as fd
+    from pathlib import Path as _P
+    chosen = fd.askdirectory(title=title)
+    if chosen:
+        p = _P(chosen)
+        if p.is_dir():
+            return p
+    return None
+
+
+def _tk_pick_file(title, filters=None):
+    import tkinter.filedialog as fd
+    from pathlib import Path as _P
+    filetypes = [(label, " ".join(globs)) for label, globs in (filters or [])]
+    chosen = fd.askopenfilename(title=title, filetypes=filetypes)
+    if chosen:
+        p = _P(chosen)
+        if p.is_file():
+            return p
+    return None
+
+
+def _tk_pick_files(title):
+    import tkinter.filedialog as fd
+    from pathlib import Path as _P
+    chosen = fd.askopenfilenames(
+        title=title,
+        filetypes=[
+            ("Mod Archives", "*.zip *.7z *.rar *.tar.gz *.tar *.dazip *.override *.fomod"),
+            ("All files", "*"),
+        ],
+    )
+    if chosen:
+        return [_P(s) for s in chosen if _P(s).is_file()]
+    return []
+
+
+def _tk_pick_save(title, current_name, filters):
+    import tkinter.filedialog as fd
+    from pathlib import Path as _P
+    chosen = fd.asksaveasfilename(
+        title=title,
+        initialfile=current_name,
+        defaultextension=".json",
+        filetypes=filters or [("JSON files", "*.json"), ("All files", "*.*")],
+    )
+    if chosen:
+        return _P(chosen)
+    return None
+
+
 _UI_SCALE = load_ui_scale()
 
 # Note: older versions ran `xrdb -merge Xft.dpi: 96` here to stop the DE's
@@ -423,6 +542,7 @@ class App(ctk.CTk):
         # dump an RSS / object-count / Tk-item snapshot to the terminal.
         try:
             from Utils import memtrace
+            memtrace.set_tk_object_counter(_tk_object_counts)
             memtrace.install(self)
         except Exception:
             pass
@@ -527,6 +647,38 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self.after(50, self._poll_threadsafe_queue)
+
+    def _register_ui_hooks(self):
+        """Wire backend UI-interaction hooks (Utils.ui_hooks) to the GUI.
+
+        Lets headless-safe backend code (e.g. DAO install) prompt the user and
+        surface warnings without importing the GUI toolkit.
+        """
+        from Utils import ui_hooks
+        from gui.install_question import ask_choice
+        from gui.dialogs import show_warning
+
+        # ask_choice already manages its own main-thread/worker-thread dispatch
+        # (wait_variable / after) and returns the shared ui_hooks sentinels.
+        ui_hooks.set_choice_handler(ask_choice)
+
+        def _warn(title, message, **kwargs):
+            # Display modally on the UI thread; safe from any caller thread.
+            self.call_threadsafe(
+                lambda: show_warning(title, message, parent=self, **kwargs)
+            )
+
+        ui_hooks.set_warning_handler(_warn)
+
+        # Last-resort tkinter file pickers, so portal_filechooser needn't import
+        # tkinter. Only used when both the XDG portal and zenity/kdialog fail.
+        from Utils.portal_filechooser import set_toolkit_pickers
+        set_toolkit_pickers(
+            folder=_tk_pick_folder,
+            file=_tk_pick_file,
+            files=_tk_pick_files,
+            save=_tk_pick_save,
+        )
 
     # -- Nexus API init -----------------------------------------------------
 
@@ -1290,6 +1442,11 @@ class App(ctk.CTk):
 
         log = self._status.log
         set_app_log(log, self.after)
+
+        # Register toolkit-neutral UI interaction hooks so the backend (e.g.
+        # DAO install) can ask the user questions / surface warnings without
+        # importing the GUI. See Utils/ui_hooks.py.
+        self._register_ui_hooks()
 
         self._topbar = TopBar(
             self, log_fn=log,

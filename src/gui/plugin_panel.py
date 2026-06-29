@@ -105,27 +105,12 @@ def _file_exists_ci(base: Path, rel: Path) -> bool:
     return current.is_file()
 
 
-def _resolve_compat_data(prefix_path: Path) -> Path:
-    """Return the STEAM_COMPAT_DATA_PATH for a given user-selected pfx/ folder.
-
-    Steam layout: compatdata/<id>/pfx/ → compat_data = prefix_path.parent.
-    Heroic layout: <prefix>/pfx is a symlink to "." → compat_data = prefix_path
-    itself (config_info lives alongside the pfx symlink, not one level up)."""
-    if (prefix_path / "config_info").is_file():
-        return prefix_path
-    parent = prefix_path.parent
-    if (parent / "config_info").is_file():
-        return parent
-    return parent
-
-
-def _read_prefix_runner(compat_data: Path) -> str:
-    """Read the Proton runner name from <compat_data>/config_info (first line).
-    Returns an empty string if the file is absent or unreadable."""
-    try:
-        return (compat_data / "config_info").read_text(encoding="utf-8").splitlines()[0].strip()
-    except (OSError, IndexError):
-        return ""
+# Proton prefix helpers live in Utils now (shared with backend); re-exported
+# here under their original private names so existing GUI call sites are unchanged.
+from Utils.proton_prefix import (
+    resolve_compat_data as _resolve_compat_data,
+    read_prefix_runner as _read_prefix_runner,
+)
 
 
 from gui.text_utils import truncate_text as _truncate_plugin_name, clear_truncate_cache as _clear_truncate_cache

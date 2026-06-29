@@ -391,7 +391,8 @@ def build_proton_env_for_game(game) -> "tuple[Path, dict] | tuple[None, None]":
     steam_id = game_steam_id(game)
     proton_script = find_proton_for_game(steam_id) if steam_id else None
 
-    from gui.plugin_panel import _read_prefix_runner, _resolve_compat_data
+    from Utils.proton_prefix import read_prefix_runner as _read_prefix_runner, \
+        resolve_compat_data as _resolve_compat_data
     compat_data = _resolve_compat_data(prefix_path)
 
     if proton_script is None:

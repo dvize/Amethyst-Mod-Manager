@@ -10,25 +10,9 @@ from typing import Callable
 
 from Utils.portal_filechooser import pick_file, pick_files
 
-
-def _to_wine_path(linux_path: Path | str, prefix: Path | None = None) -> str:
-    r"""Convert a Linux absolute path to a Proton/Wine Z:\ path.
-
-    If *prefix* is the Wine pfx directory (containing dosdevices/), the Z:
-    symlink target is resolved first.  This handles prefixes where Z: points
-    to a UUID mount (e.g. /mnt/c3edc2f9-.../`) rather than / — without this,
-    paths on that drive would be double-prefixed (Z:\mnt\uuid\...).
-    """
-    if prefix is not None:
-        z_link = Path(prefix) / "dosdevices" / "z:"
-        if z_link.is_symlink():
-            z_target = z_link.resolve()
-            try:
-                rel = Path(linux_path).resolve().relative_to(z_target)
-                return "Z:\\" + str(rel).replace("/", "\\")
-            except ValueError:
-                pass
-    return "Z:" + str(linux_path).replace("/", "\\")
+# Wine path conversion lives in Utils now (shared with backend); re-exported
+# here under its original private name so existing GUI call sites are unchanged.
+from Utils.wine_paths import to_wine_path as _to_wine_path
 
 
 def pick_file_mod_archive(title: str, callback: Callable[[str], None]) -> None:

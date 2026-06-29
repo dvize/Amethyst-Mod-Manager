@@ -323,25 +323,30 @@ def _get_primary_monitor_size() -> tuple[int, int]:
     return 0, 0
 
 
+# Toolkit-specific display probe → (width, height, de_scale). Injected by the
+# GUI (set_screen_probe) so this module needn't import a GUI toolkit. When
+# unset, get_screen_info falls back to the xrandr/wlr-randr + portal path.
+_screen_probe: "callable | None" = None
+
+
+def set_screen_probe(fn: "callable | None") -> None:
+    """Register a callable() -> (width, height, de_scale) display probe."""
+    global _screen_probe
+    _screen_probe = fn
+
+
 def get_screen_info() -> tuple[int, int, float]:
     """Return (screen_width, screen_height, detected_scale) for the primary display."""
-    try:
-        import tkinter as _tk
-        root = _tk.Tk()
-        root.withdraw()
-        root.update_idletasks()
-        w = root.winfo_screenwidth()
-        h = root.winfo_screenheight()
-        # winfo_fpixels('1i') returns pixels-per-inch as seen by Tk; higher
-        # than 96 means the DE is applying its own scaling.
+    if _screen_probe is not None:
         try:
-            dpi = root.winfo_fpixels('1i')
-            de_scale = dpi / 96.0 if dpi > 96 else 1.0
+            w, h, de_scale = _screen_probe()
         except Exception:
-            de_scale = 1.0
-        root.destroy()
-    except Exception:
-        return 0, 0, _DEFAULT_SCALE
+            return 0, 0, _DEFAULT_SCALE
+    else:
+        # No GUI toolkit attached: derive size from xrandr/wlr-randr and let the
+        # portal/compositor path below supply the scale.
+        w, h = _get_primary_monitor_size()
+        de_scale = 1.0
     if w <= 0 or h <= 0:
         return w, h, _DEFAULT_SCALE
 
@@ -1277,23 +1282,39 @@ THEME_DEFAULTS: dict[str, str] = {
 _theme_defaults_override_cache: dict[str, dict[str, str]] = {}
 
 
-def _theme_defaults_override_for(mode: str) -> dict[str, str]:
-    """Return {key: hex} overrides declared by the active theme file.
+# Resolver that maps a theme *mode* name → {key: hex} overrides. Injected by
+# the GUI (set_theme_override_resolver) so this module needn't import the GUI's
+# theme package. Headless / non-GUI builds leave it unset → no overrides.
+_theme_override_resolver: "callable | None" = None
 
-    Imports gui.themes.<mode> lazily. Missing file or missing dict yields {}.
-    Results are cached per mode to keep the ini read path cheap.
+
+def set_theme_override_resolver(fn: "callable | None") -> None:
+    """Register a callable(mode: str) -> dict[str, str] of theme overrides.
+
+    Clears the per-mode cache so a freshly-registered resolver takes effect.
+    """
+    global _theme_override_resolver
+    _theme_override_resolver = fn
+    _theme_defaults_override_cache.clear()
+
+
+def _theme_defaults_override_for(mode: str) -> dict[str, str]:
+    """Return {key: hex} overrides declared by the active theme.
+
+    Delegates to the GUI-registered resolver (set_theme_override_resolver);
+    yields {} when no resolver is attached or it fails. Results are cached per
+    mode to keep the ini read path cheap.
     """
     if mode in _theme_defaults_override_cache:
         return _theme_defaults_override_cache[mode]
     result: dict[str, str] = {}
-    try:
-        import importlib
-        mod = importlib.import_module(f"gui.themes.{mode}")
-        raw = getattr(mod, "THEME_DEFAULTS_OVERRIDE", None)
-        if isinstance(raw, dict):
-            result = {k: v for k, v in raw.items() if k in THEME_DEFAULTS and _valid_hex(v)}
-    except Exception:
-        pass
+    if _theme_override_resolver is not None:
+        try:
+            raw = _theme_override_resolver(mode)
+            if isinstance(raw, dict):
+                result = {k: v for k, v in raw.items() if k in THEME_DEFAULTS and _valid_hex(v)}
+        except Exception:
+            pass
     _theme_defaults_override_cache[mode] = result
     return result
 

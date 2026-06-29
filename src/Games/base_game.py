@@ -1201,8 +1201,7 @@ class BaseGame(ABC):
         """
         if self._active_profile_dir is not None:
             try:
-                # Import here to avoid a circular import at module level.
-                from gui.game_helpers import profile_uses_specific_mods  # type: ignore
+                from Utils.profile_state import profile_uses_specific_mods
                 if profile_uses_specific_mods(self._active_profile_dir):
                     return self._active_profile_dir / "mods"
             except Exception:
@@ -1244,7 +1243,7 @@ class BaseGame(ABC):
         """
         if self._active_profile_dir is not None:
             try:
-                from gui.game_helpers import profile_uses_specific_mods  # type: ignore
+                from Utils.profile_state import profile_uses_specific_mods
                 if profile_uses_specific_mods(self._active_profile_dir):
                     return self._active_profile_dir / "Root_Folder"
             except Exception:

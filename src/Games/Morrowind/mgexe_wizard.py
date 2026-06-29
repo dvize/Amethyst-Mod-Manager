@@ -363,7 +363,8 @@ class MGEXEWizard(ctk.CTkFrame):
             return None, None
 
         steam_id = game_steam_id(self._game)
-        from gui.plugin_panel import _resolve_compat_data, _read_prefix_runner
+        from Utils.proton_prefix import resolve_compat_data as _resolve_compat_data, \
+            read_prefix_runner as _read_prefix_runner
         compat_data = _resolve_compat_data(prefix_path)
         proton_script = find_proton_for_game(steam_id) if steam_id else None
         if proton_script is None:
