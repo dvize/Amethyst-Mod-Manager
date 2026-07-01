@@ -436,6 +436,13 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(6)
 
+        # Stats row (pills) above the buttons: enabled / disabled. Spacing matches
+        # the button row (4px) so, once the first pill is sized to the first
+        # button's width, the second pill lines up under the second button.
+        from gui_qt.stats_bar import StatsBar
+        self._modlist_stats = StatsBar(placeholder="…", spacing=4)
+        v.addWidget(self._modlist_stats)
+
         btns = QHBoxLayout()
         btns.setSpacing(4)
         # label -> handler ("" = no-op stub, needs a dialog/auth — wired later).
@@ -491,7 +498,9 @@ class MainWindow(QMainWindow):
 
     def _sync_modlist_search_width(self):
         """Cap the modlist search box to the combined width of the footer button
-        row so its right edge aligns with the last button."""
+        row so its right edge aligns with the last button, and size the stat
+        pills so each lines up under its button (Enabled↔Expand all,
+        Disabled↔Disable all)."""
         btns = getattr(self, "_modlist_footer_btns", None)
         search = getattr(self, "_modlist_search", None)
         if not btns or search is None:
@@ -499,6 +508,16 @@ class MainWindow(QMainWindow):
         spacing = 4
         total = sum(b.sizeHint().width() for b in btns) + spacing * (len(btns) - 1)
         search.setFixedWidth(total)
+        # Align the pills: fix all-but-the-last pill to the matching button's
+        # width so the next pill (and the button below it) share the same left
+        # edge; matching row spacing + equal text inset lines up the letters.
+        stats = getattr(self, "_modlist_stats", None)
+        if stats is not None and stats._pills:
+            n = len(stats._pills)
+            widths = [btns[i].sizeHint().width() if i < len(btns) else 0
+                      for i in range(n)]
+            widths[-1] = 0            # last pill keeps its natural width
+            stats.align_pills_to_widths(widths)
 
     def _plugins_footer(self) -> QWidget:
         """Colored tool buttons + search, under the plugins."""
@@ -508,9 +527,16 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(6)
 
+        # Stats row (pills) above the buttons: total / ESL / non-ESL plugins.
+        # Spacing matches the button row so the pills can line up under buttons.
+        from gui_qt.stats_bar import StatsBar
+        self._plugin_stats = StatsBar(placeholder="…", spacing=4)
+        v.addWidget(self._plugin_stats)
+
         btns = QHBoxLayout()
         btns.setSpacing(4)
         _made = {}
+        self._plugin_footer_btns: list = []
         for label, key in [
             ("Sort Plugins", "BTN_SUCCESS"),
             ("Groups", "BTN_INFO"),
@@ -521,6 +547,7 @@ class MainWindow(QMainWindow):
             b.setFixedHeight(self._FOOT_BTN_H)
             btns.addWidget(b)
             _made[label] = b
+            self._plugin_footer_btns.append(b)
         btns.addStretch(1)
         v.addLayout(btns)
         # Store + wire the buttons that are implemented (Groups / Plugin Rules
@@ -532,15 +559,28 @@ class MainWindow(QMainWindow):
         self._plugin_sort_btn.clicked.connect(self._on_sort_plugins)
         self._plugin_filters_btn.clicked.connect(self._toggle_plugin_filters)
 
-        # (Plugin count / ESL status removed — to be relocated later.)
-
         search = QLineEdit()
         search.setPlaceholderText("Search plugins…")
         search.setClearButtonEnabled(True)
         search.textChanged.connect(self._on_plugin_search)
         v.addWidget(search)
         self._plugins_search = search
+        # Align the stat pills under their buttons once layout has settled.
+        QTimer.singleShot(0, self._sync_plugin_stats_align)
         return bar
+
+    def _sync_plugin_stats_align(self):
+        """Size the plugin stat pills so each lines up under its button
+        (Plugins↔Sort Plugins, ESL↔Groups, Non-ESL↔Plugin Rules)."""
+        btns = getattr(self, "_plugin_footer_btns", None)
+        stats = getattr(self, "_plugin_stats", None)
+        if not btns or stats is None or not stats._pills:
+            return
+        n = len(stats._pills)
+        widths = [btns[i].sizeHint().width() if i < len(btns) else 0
+                  for i in range(n)]
+        widths[-1] = 0
+        stats.align_pills_to_widths(widths)
 
     def _mod_files_footer(self) -> QWidget:
         """Pack/Unpack BSA + Filters buttons + search, shown under the plugins
@@ -946,6 +986,10 @@ class MainWindow(QMainWindow):
         if name == self._gs.game_name:
             return
         self._gs.set_game(name)
+        # The Profile Settings tab is scoped to the previous game — close it.
+        if self._tabs.has_key("profile_settings"):
+            self._tabs.close_tab("profile_settings")
+            self._profile_settings_view = None
         # Reflect the new game's profiles + keep both game selectors in sync.
         profs = self._gs.profiles()
         if profs:
@@ -964,6 +1008,11 @@ class MainWindow(QMainWindow):
         self._reload_modlist()
         self._reload_plugins()
         self._update_deployed_profile_highlight()
+        # Keep the Profile Settings ★ marker in sync if that tab is open.
+        if self._tabs.has_key("profile_settings"):
+            v = getattr(self, "_profile_settings_view", None)
+            if v is not None:
+                v.set_current_profile(name)
 
     def _on_game_action(self, which):
         if which == "add":
@@ -1586,7 +1635,110 @@ class MainWindow(QMainWindow):
         self._tabs.open_tab(page, f"{verb} game", key="configure_game")
 
     def _on_profile_action(self, which):
-        self._append_log(f"[profile] {which} (not wired yet)")
+        if which == "add":
+            if self._gs.game is None:
+                self._append_log("[profile] no game selected.")
+                return
+            self._new_profile_bar.open_for()
+        elif which == "settings":
+            self._open_profile_settings_tab()
+        else:
+            self._append_log(f"[profile] {which} (not wired yet)")
+
+    def _open_profile_settings_tab(self):
+        """Open the Profile Settings panel scoped over the MODLIST panel (like the
+        Settings gear / image preview): profile rows with lock / rename / open /
+        remove, while the plugins panel + the rest of the UI stay live."""
+        if self._gs.game_name is None:
+            self._notify("No game selected.", "warning")
+            return
+        if self._tabs.has_key("profile_settings"):
+            self._tabs.focus_key("profile_settings")
+            return
+        from gui_qt.profile_settings_view import ProfileSettingsView
+        view = ProfileSettingsView(
+            self,
+            game_name=self._gs.game_name,
+            current_profile=self._gs.profile,
+            on_profile_renamed=self._on_profile_renamed,
+            on_profile_removed=self._on_profile_removed,
+            on_profiles_changed=self._on_profiles_lock_changed,
+            log_fn=self._append_log,
+        )
+        self._profile_settings_view = view
+        self._tabs.open_scoped_tab(
+            view, "Profile Settings", self._modlist_panel_stack,
+            key="profile_settings")
+
+    # -- Profile Settings callbacks (view → app: refresh selector + reload) --
+    def _on_profiles_lock_changed(self):
+        """A profile's lock toggled — the active profile is unchanged, so just
+        refresh the selector list (Remove-eligibility, etc.)."""
+        self._profile_selector.set_items(self._gs.profiles(),
+                                         current=self._gs.profile)
+
+    def _on_profile_renamed(self, old: str, new: str):
+        profs = self._gs.profiles()
+        if self._gs.profile == old:
+            # The active profile was renamed → switch GameState + reload.
+            self._gs.set_profile(new)
+            self._profile_selector.set_items(profs, current=new)
+            self._reload_modlist()
+            self._reload_plugins()
+        else:
+            self._profile_selector.set_items(profs, current=self._gs.profile)
+        self._update_deployed_profile_highlight()
+
+    def _on_profile_removed(self, name: str):
+        profs = self._gs.profiles()
+        if self._gs.profile == name:
+            # The active profile was removed → fall back like the view did.
+            target = "default" if "default" in profs else (
+                profs[0] if profs else "default")
+            self._gs.set_profile(target)
+            self._profile_selector.set_items(profs, current=target)
+            self._reload_modlist()
+            self._reload_plugins()
+        else:
+            self._profile_selector.set_items(profs, current=self._gs.profile)
+        self._update_deployed_profile_highlight()
+
+    def _on_new_profile_create(self, name: str, profile_specific_mods: bool):
+        """Create a new profile for the active game and switch to it. Mirrors the
+        Tk top_bar._on_add_profile flow: reject an existing name, create via the
+        neutral _create_profile, repopulate the selector, select + reload."""
+        from gui.game_helpers import _create_profile, _profiles_for_game
+        game_name = self._gs.game_name
+        if not game_name:
+            return
+        existing = _profiles_for_game(game_name)
+        if name in existing:
+            self._notify(f"Profile '{name}' already exists.", "error")
+            # Re-open so the user can pick another name (fields reset).
+            self._new_profile_bar.open_for()
+            return
+        try:
+            _create_profile(game_name, name,
+                            profile_specific_mods=profile_specific_mods)
+        except Exception as exc:
+            self._append_log(f"[profile] create failed: {exc}")
+            self._notify(f"Could not create profile: {exc}", "error")
+            return
+        # Success — make sure the bar is closed (the widget hides itself before
+        # calling us, but close explicitly so the flow is robust to any caller).
+        self._new_profile_bar.close()
+        self._append_log(f"[profile] created '{name}'"
+                         + (" (profile-specific mods)" if profile_specific_mods
+                            else ""))
+        # Refresh the profile selector, select the new profile, and load it.
+        profs = self._gs.profiles()
+        self._profile_selector.set_items(profs, current=name)
+        self._gs.set_profile(name)
+        self._profile_selector.set_current(name)
+        self._reload_modlist()
+        self._reload_plugins()
+        self._update_deployed_profile_highlight()
+        self._notify(f"Profile '{name}' created", "info")
 
     def _update_deployed_profile_highlight(self):
         """Green-highlight the deployed profile in the profile dropdown. Reads the
@@ -2307,11 +2459,18 @@ class MainWindow(QMainWindow):
         """Modlist column: the list + its tool footer (buttons + search) stacked
         vertically, with a collapsible filter side panel docked on the left (Tk
         parity — the filter panel pushes the column right, not an overlay)."""
-        # The list + footer share one vertical column.
+        # The list + footer share one vertical column. A hidden 'new profile'
+        # bar sits at the very top (row 0, Tk parity) and appears when the user
+        # picks 'Add new profile…'.
         col = QWidget()
         cv = QVBoxLayout(col)
         cv.setContentsMargins(0, 0, 0, 0)
         cv.setSpacing(0)
+        from gui_qt.new_profile_bar import NewProfileBar
+        self._new_profile_bar = NewProfileBar(
+            on_create=self._on_new_profile_create,
+            on_cancel=lambda: None)
+        cv.addWidget(self._new_profile_bar)
         cv.addWidget(self._build_modlist(), 1)
         cv.addWidget(self._modlist_footer())
 
@@ -2934,6 +3093,7 @@ class MainWindow(QMainWindow):
         self._refresh_footer_toggle_labels()
         # Re-apply an active search against the fresh row indices.
         self._apply_modlist_search()
+        self._refresh_modlist_stats()
         print(f"[gui_qt] modlist: {ml_path} ({len(entries)} entries)")
 
         # The Downloads tab reflects the active profile's STAGING folder (which
@@ -2968,6 +3128,29 @@ class MainWindow(QMainWindow):
                    for r in range(self._modlist_model.rowCount())]
         self._modlist_model.set_sizes(compute_sizes(entries, staging))
 
+    def _refresh_modlist_stats(self):
+        """Update the modlist footer stat pills: enabled / disabled mod counts.
+        Both come straight from the model, so this is instant."""
+        bar = getattr(self, "_modlist_stats", None)
+        if bar is None:
+            return
+        entries = [self._modlist_model.entry(r)
+                   for r in range(self._modlist_model.rowCount())]
+        enabled = sum(1 for e in entries if not e.is_separator and e.enabled)
+        disabled = sum(1 for e in entries if not e.is_separator and not e.enabled)
+        bar.set_stats([("Enabled", enabled), ("Disabled", disabled)])
+
+    def _refresh_plugin_stats(self):
+        """Update the plugins footer stat pills: total / ESL / non-ESL. All the
+        data is in-memory on the plugin model, so this is instant."""
+        bar = getattr(self, "_plugin_stats", None)
+        if bar is None:
+            return
+        from gui_qt.modlist_data import compute_plugin_stats
+        s = compute_plugin_stats(self._plugin_model._rows)
+        bar.set_stats([("Plugins", s["total"]),
+                       ("ESL", s["esl"]), ("Non-ESL", s["non_esl"])])
+
     def _reload_plugins(self):
         """Load the active game/profile's plugins into the Plugins tab."""
         from gui_qt.plugin_state import load_plugins
@@ -2979,6 +3162,7 @@ class MainWindow(QMainWindow):
         # Row indices/flags changed — re-apply any active plugin filter.
         if getattr(self, "_plugin_filter_panel", None) is not None:
             self._apply_plugin_filters()
+        self._refresh_plugin_stats()
         self._refresh_framework_banner()
         print(f"[gui_qt] plugins: {len(rows)} entries")
 
@@ -3186,6 +3370,9 @@ class MainWindow(QMainWindow):
         # The filemap (staged/deployed file set) changed → framework states may
         # have flipped (e.g. a framework mod toggled, deployed, or removed).
         self._refresh_framework_banner()
+        # A mod was toggled / added / removed → the footer counts + size are
+        # stale (token-guarded, so overlapping walks coalesce).
+        self._refresh_modlist_stats()
 
     # ----------------------------------------------------------------- right
     def _build_plugins(self) -> QWidget:

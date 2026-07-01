@@ -54,9 +54,16 @@ class GameState:
             self.game_name = self.game_names[0]
         else:
             self.game_name = None
-        # Restore the saved profile if it still exists, else the first one.
-        self.profile = self._select_profile(sess_profile)
+        # Restore the profile: prefer the global session profile (the one open
+        # when the app last closed), then this game's own last-active profile,
+        # then the first profile. Records it as the game's last-active too.
+        g = self.game
+        per_game = g.get_last_active_profile() if g is not None else None
+        self.profile = (self._select_profile(sess_profile)
+                        if sess_profile else None) or \
+            self._select_profile(per_game)
         self._apply_active_profile()
+        self._save_last_active_profile()
 
     # -- current handler ----------------------------------------------------
     @property
@@ -72,8 +79,11 @@ class GameState:
             return
         self.game_name = name
         _save_last_game(name)
-        self._select_default_profile()
+        # Restore the profile last used ON THIS GAME (Tk parity — top_bar uses
+        # game.get_last_active_profile()), falling back to the first profile.
+        self._select_last_active_profile()
         self._apply_active_profile()
+        self._save_last_active_profile()
         save_last_session(self.game_name, self.profile)
 
     def set_profile(self, profile: str) -> None:
@@ -81,6 +91,9 @@ class GameState:
             return
         self.profile = profile
         self._apply_active_profile()
+        # Remember this as the game's last active profile so switching away and
+        # back returns here (Tk parity — top_bar._on_profile_change).
+        self._save_last_active_profile()
         save_last_session(self.game_name, self.profile)
 
     # -- resolved paths -----------------------------------------------------
@@ -249,6 +262,23 @@ class GameState:
 
     def _select_default_profile(self) -> None:
         self.profile = self._select_profile(None)
+
+    def _select_last_active_profile(self) -> None:
+        """Set self.profile to this game's saved last-active profile (if it still
+        exists), else the first profile. Used when switching games."""
+        g = self.game
+        preferred = g.get_last_active_profile() if g is not None else None
+        self.profile = self._select_profile(preferred)
+
+    def _save_last_active_profile(self) -> None:
+        """Persist self.profile as the current game's last-active profile, so a
+        later switch back to this game restores it (Tk parity)."""
+        g = self.game
+        if g is not None and self.profile:
+            try:
+                g.save_last_active_profile(self.profile)
+            except Exception:
+                pass
 
     def _apply_active_profile(self) -> None:
         g = self.game
