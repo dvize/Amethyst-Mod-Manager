@@ -91,6 +91,9 @@ class MainWindow(QMainWindow):
         self._mod_exists.connect(self._on_mod_exists_ui)
         self._proton_busy = False
         self._proton_done.connect(self._on_proton_done)
+        # Game-scoped panel views (lazily built; closed on game change).
+        self._profile_settings_view = None
+        self._dll_overrides_view = None
         self._sort_running = False
         self._sort_plugins_ready.connect(self._on_sort_plugins_ready)
         self.setWindowTitle("Amethyst Mod Manager")
@@ -921,6 +924,7 @@ class MainWindow(QMainWindow):
                 ("Run an .exe in this prefix…", self._proton_run_exe),
                 None,
                 ("Open wine registry", self._proton_regedit),
+                ("Wine DLL overrides", self._proton_dll_overrides),
                 None,
                 ("Install VC++ Redistributable", self._proton_install_vcredist),
                 ("Install d3dcompiler_47", self._proton_install_d3dcompiler),
@@ -990,6 +994,10 @@ class MainWindow(QMainWindow):
         if self._tabs.has_key("profile_settings"):
             self._tabs.close_tab("profile_settings")
             self._profile_settings_view = None
+        # The Wine DLL overrides tab is game-scoped too — close it.
+        if self._tabs.has_key("dll_overrides"):
+            self._tabs.close_tab("dll_overrides")
+            self._dll_overrides_view = None
         # Reflect the new game's profiles + keep both game selectors in sync.
         profs = self._gs.profiles()
         if profs:
@@ -2000,6 +2008,23 @@ class MainWindow(QMainWindow):
             return
         from Utils.proton_tools import launch_wine_tool
         launch_wine_tool(game, "regedit", log_fn=self._append_log)
+
+    def _proton_dll_overrides(self):
+        """Open the Wine DLL overrides manager scoped over the MODLIST panel
+        (like the Settings gear): a per-DLL load-order picker for this game's
+        prefix. The plugins panel + rest of the UI stay live."""
+        game = self._proton_game()
+        if game is None:
+            return
+        if self._tabs.has_key("dll_overrides"):
+            self._tabs.focus_key("dll_overrides")
+            return
+        from gui_qt.dll_overrides_view import DllOverridesView
+        view = DllOverridesView(self, game, log_fn=self._append_log)
+        self._dll_overrides_view = view
+        self._tabs.open_scoped_tab(
+            view, "Wine DLL overrides", self._modlist_panel_stack,
+            key="dll_overrides")
 
     def _proton_winetricks(self):
         game = self._proton_game()
