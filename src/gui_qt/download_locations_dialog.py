@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QListWidget,
     QPushButton, QFrame,
@@ -17,10 +17,15 @@ import Utils.download_locations as dl
 
 
 class DownloadLocationsDialog(QDialog):
+    # pick_folder's callback fires on the portal WORKER thread; marshal the
+    # result to the GUI thread via this Signal before touching any widget.
+    _folder_picked = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Download locations")
         self.setMinimumWidth(520)
+        self._folder_picked.connect(self._on_folder_picked)
         self._build()
         self._load()
 
@@ -70,17 +75,17 @@ class DownloadLocationsDialog(QDialog):
 
     def _add(self):
         from Utils.portal_filechooser import pick_folder
+        pick_folder("Add download folder",
+                    lambda path: self._folder_picked.emit(path))
 
-        def _chosen(path):
-            if not path:
-                return
-            folder = str(path)
-            existing = {self._list.item(i).text()
-                        for i in range(self._list.count())}
-            if folder not in existing:
-                self._list.addItem(folder)
-
-        pick_folder("Add download folder", _chosen)
+    def _on_folder_picked(self, path):
+        if not path:
+            return
+        folder = str(path)
+        existing = {self._list.item(i).text()
+                    for i in range(self._list.count())}
+        if folder not in existing:
+            self._list.addItem(folder)
 
     def _remove(self):
         for it in self._list.selectedItems():

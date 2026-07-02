@@ -36,6 +36,9 @@ class SettingsView(QWidget):
     # thread (queued — thread-safe). A plain QThread crashed on app exit if the
     # rglob was still running; a daemon thread is safely abandoned instead.
     _cache_size_ready = Signal(int)
+    # pick_folder's callback fires on the portal WORKER thread; marshal the
+    # (edit, save_fn, path) result to the GUI thread before touching a widget.
+    _folder_picked = Signal(object)
 
     def __init__(self, window):
         super().__init__()
@@ -44,6 +47,7 @@ class SettingsView(QWidget):
         self.setObjectName("SettingsView")
         self._cache_scanning = False
         self._cache_size_ready.connect(self._on_cache_size)
+        self._folder_picked.connect(self._on_folder_picked)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -374,13 +378,14 @@ class SettingsView(QWidget):
     # ---- path browse / clear ----------------------------------------------
     def _browse_into(self, edit: QLineEdit, save_fn, title: str):
         from Utils.portal_filechooser import pick_folder
+        pick_folder(f"Select {title}",
+                    lambda path: self._folder_picked.emit((edit, save_fn, path)))
 
-        def _chosen(path):
-            if path:
-                edit.setText(str(path))
-                self._safe_save(save_fn, str(path))
-
-        pick_folder(f"Select {title}", _chosen)
+    def _on_folder_picked(self, payload):
+        edit, save_fn, path = payload
+        if path:
+            edit.setText(str(path))
+            self._safe_save(save_fn, str(path))
 
     def _clear_path(self, edit: QLineEdit, save_fn):
         edit.clear()

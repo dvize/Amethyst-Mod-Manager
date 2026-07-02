@@ -77,12 +77,14 @@ class MainWindow(QMainWindow):
     _col_status = Signal(str)
     _col_progress = Signal(object)             # float | None
     _col_agg = Signal(int, int, float)         # bytes cur, total, MB/s
+    _col_display_total = Signal(int)           # true collection size (bytes)
     _col_dl = Signal(str, object)              # ("start"|"update"|"finish", payload)
     _col_extract = Signal(str, object)         # ("queue"|"add"|"remove", payload)
     _col_row = Signal(int)                     # file_id installed
     _col_finished = Signal(str, object)        # ("done"|"paused"|"cancelled", payload)
     _col_import_done = Signal(object)          # (profile_name, installed, total, skipped)
     _import_file_picked = Signal(object)       # portal picker result (Path|None) → UI thread
+    _install_files_picked = Signal(object)     # portal picker result (list[Path]) → UI thread
     # Worker blocks on these to show the deferred FOMOD / BAIN pickers (holder+Event).
     _col_fomod = Signal(object)
     _col_bain = Signal(object)
@@ -230,12 +232,14 @@ class MainWindow(QMainWindow):
         self._col_status.connect(self._on_col_status)
         self._col_progress.connect(self._on_col_progress)
         self._col_agg.connect(self._on_col_agg)
+        self._col_display_total.connect(self._on_col_display_total)
         self._col_dl.connect(self._on_col_dl)
         self._col_extract.connect(self._on_col_extract)
         self._col_row.connect(self._on_col_row)
         self._col_finished.connect(self._on_col_finished)
         self._col_import_done.connect(self._on_import_bundle_done)
         self._import_file_picked.connect(self._on_import_file_picked)
+        self._install_files_picked.connect(self._on_install_files_picked)
         self._col_fomod.connect(self._on_col_fomod_ui)
         self._col_bain.connect(self._on_col_bain_ui)
         QTimer.singleShot(0, self._ensure_nexus_api)
@@ -1379,6 +1383,10 @@ class MainWindow(QMainWindow):
             return
         dl_path = getattr(detail_view, "download_link_path", "") or ""
         revision_number = getattr(detail_view, "_revision_number", None)
+        # True collection size (installed/uncompressed) shown in the detail header —
+        # surfaced in the install overlay's aggregate label (the compressed download
+        # total is much smaller and misrepresents the collection's real size).
+        total_size = int(getattr(detail_view, "_total_size", 0) or 0)
         # Manifest rule: this collection must be installed as a NEW profile.
         recommend_new = bool(getattr(detail_view, "_recommend_new_profile", False))
         # Local-manifest import (Import profile): a parsed manifest to feed straight
@@ -1416,6 +1424,7 @@ class MainWindow(QMainWindow):
                              "collection": collection, "domain": domain,
                              "slug": slug, "dl_path": dl_path,
                              "revision": revision_number, "mods": mods,
+                             "total_size": total_size,
                              "skipped": set(skipped), "game": game, "api": api,
                              "recommend_new": recommend_new, "intent": intent,
                              "local_manifest": local_manifest,
@@ -1663,6 +1672,7 @@ class MainWindow(QMainWindow):
         slug = info["slug"]; domain = info["domain"]
         revision_number = info["revision"]; mods = info["mods"]
         skipped = info["skipped"]; dl_path = info["dl_path"]
+        total_size = int(info.get("total_size", 0) or 0)
         self._col_install_slug = slug
         update_context = info.get("update_context")
         # Local-manifest import: feed the parsed manifest to the orchestrator (no
@@ -1755,7 +1765,8 @@ class MainWindow(QMainWindow):
                     game=game, api=api, downloader=downloader, mods=mods,
                     download_link_path=dl_path, profile_dir=profile_dir,
                     old_profile_dir=old_profile_dir, collection_slug=slug,
-                    revision_number=revision_number, skipped_fids=skipped,
+                    revision_number=revision_number, collection_total_size=total_size,
+                    skipped_fids=skipped,
                     skipped_mods=skipped_mods, overwrite_existing=overwrite_existing,
                     skip_existing=skip_existing_arg, update_context=update_context,
                     collection_schema_cache=local_manifest,
@@ -1800,6 +1811,7 @@ class MainWindow(QMainWindow):
             on_status=lambda m: self._col_status.emit(m),
             on_progress=lambda v: self._col_progress.emit(v),
             on_agg_download=lambda c, t, s: self._col_agg.emit(int(c), int(t), float(s)),
+            on_display_total=lambda n: self._col_display_total.emit(int(n)),
             on_dl_mod_start=lambda f, n, s: self._col_dl.emit("start", (f, n, s)),
             on_dl_mod_update=lambda f, c, t: self._col_dl.emit("update", (f, c, t)),
             on_dl_mod_finish=lambda f: self._col_dl.emit("finish", f),
@@ -1826,6 +1838,10 @@ class MainWindow(QMainWindow):
     def _on_col_agg(self, cur, tot, mbps):
         if self._col_install_overlay is not None:
             self._col_install_overlay.set_agg(cur, tot, mbps)
+
+    def _on_col_display_total(self, n):
+        if self._col_install_overlay is not None:
+            self._col_install_overlay.set_display_total(n)
 
     def _on_col_dl(self, verb, payload):
         ov = self._col_install_overlay
@@ -2734,6 +2750,74 @@ class MainWindow(QMainWindow):
             self._tabs.close_tab("change_version")
         self._reload_modlist()
 
+    # ---- Bundle options (plugins-panel-scoped overlay) --------------------
+
+    def _open_bundle_tab(self, mod_name: str):
+        """Open the Bundle Options selector for the RE/Fluffy bundle *mod_name*
+        as a full (detachable) tab, like the Nexus browser. Triggered by the
+        bundle-flag click + the right-click 'Bundle options…' item. On Save the
+        new selection is materialised, the mod re-indexed and the filemap
+        rebuilt."""
+        game = self._gs.game
+        if game is None or not game.is_configured():
+            self._notify("No configured game selected.", "warning")
+            return
+        staging = self._gs.staging_dir()
+        if staging is None:
+            self._notify("No mod staging folder for this profile.", "warning")
+            return
+        from Utils.re_bundle import read_bundle_spec, BUNDLE_LIB_DIR
+        meta_path = staging / mod_name / "meta.ini"
+        spec = read_bundle_spec(meta_path)
+        if spec is None:
+            self._notify(f"'{mod_name}' has no bundle configuration.", "warning")
+            return
+        lib_dir = staging / mod_name / BUNDLE_LIB_DIR
+
+        # Reuse one tab: rebuild it for the new mod if already open.
+        if self._tabs.has_key("bundle_options"):
+            self._tabs.close_tab("bundle_options")
+        from gui_qt.bundle_options_view import BundleOptionsView
+        view = BundleOptionsView(
+            mod_name, spec, lib_dir,
+            on_save=lambda s, m=mod_name, mp=meta_path:
+                self._apply_bundle_selection(m, mp, s),
+            on_close=self._close_bundle_tab,
+            log_fn=self._append_log)
+        self._bundle_options_view = view
+        view.destroyed.connect(
+            lambda *_: setattr(self, "_bundle_options_view", None))
+        self._tabs.open_tab(view, f"Bundle: {mod_name}", key="bundle_options")
+
+    def _apply_bundle_selection(self, mod_name, meta_path, new_spec):
+        """Persist *new_spec*, re-materialise the bundle's selection, then close
+        the tab and re-index + rebuild the filemap (Tk parity, gui/modlist_panel.
+        _apply_bundle_selection). The rescan skips <mod>/.mm_bundle/ so only the
+        materialised selection at the mod root is indexed/deployed."""
+        staging = self._gs.staging_dir()
+        if staging is None:
+            return
+        try:
+            from Utils.re_bundle import write_bundle_spec, materialize_selection
+            write_bundle_spec(meta_path, new_spec)
+            materialize_selection(staging / mod_name, new_spec)
+        except Exception as exc:
+            self._append_log(f"Bundle options: apply failed — {exc}")
+            self._notify(f"Could not update bundle: {exc}", "error")
+            return
+        if self._tabs.has_key("bundle_options"):
+            self._tabs.close_tab("bundle_options")
+        # Full re-index (skips .mm_bundle/) then filemap rebuild — the Qt
+        # equivalent of Tk's rescan_mods_in_index([mod]) + _rebuild_filemap.
+        self._rebuild_conflicts_async(rescan_index=True)
+        self._notify(f"Updated bundle: {mod_name}", "info")
+
+    def _close_bundle_tab(self):
+        """Close the Bundle Options overlay + refresh the modlist."""
+        if self._tabs.has_key("bundle_options"):
+            self._tabs.close_tab("bundle_options")
+        self._reload_modlist()
+
     # ---- Separator settings (plugins-panel-scoped overlay) ----------------
 
     def _open_sep_settings_tab(self, sep_name, current_color, current_deploy):
@@ -3293,9 +3377,10 @@ class MainWindow(QMainWindow):
         """A flag icon in the modlist Flags column was clicked → its action
         (Tk parity, gui/modlist_panel ~3960): update→Change Version,
         modio-update→open mod.io page, missing→Missing Requirements,
-        note→note editor. (Bundle options deferred — no Qt bundle UI yet.)"""
+        note→note editor, bundle→Bundle Options."""
         from gui_qt.modlist_data import (
-            FLAG_UPDATE, FLAG_MISSING_REQS, FLAG_NOTE, FLAG_MODIO_UPDATE)
+            FLAG_UPDATE, FLAG_MISSING_REQS, FLAG_NOTE, FLAG_MODIO_UPDATE,
+            FLAG_BUNDLE)
         e = self._modlist_model.entry(row)
         if e is None or e.is_separator:
             return
@@ -3309,6 +3394,8 @@ class MainWindow(QMainWindow):
         elif flag == FLAG_NOTE:
             from gui_qt.modlist_menu import _open_note_editor
             _open_note_editor(self._modlist_view, [e.name])
+        elif flag == FLAG_BUNDLE:
+            self._open_bundle_tab(e.name)
 
     def _on_add_game_select(self, name: str):
         """A configured game was picked in the Add-Game view → switch to it and
@@ -3792,14 +3879,17 @@ class MainWindow(QMainWindow):
         if self._install_running:
             self._notify("An install is already in progress.", "warning")
             return
+        # The picker callback fires on the portal WORKER thread; QTimer.singleShot
+        # from there never fires (no event loop on that thread), so marshal to the
+        # GUI thread with a Signal (auto-queued to the receiver's thread).
         from Utils.portal_filechooser import pick_files
-
-        def _on_picked(paths):
-            if paths:
-                self._install_paths([str(p) for p in paths])
-
         pick_files("Select mod archive(s)",
-                   lambda ps: QTimer.singleShot(0, lambda: _on_picked(ps)))
+                   lambda ps: self._install_files_picked.emit(ps))
+
+    def _on_install_files_picked(self, paths):
+        """GUI thread: start the install once archives were chosen in the portal."""
+        if paths:
+            self._install_paths([str(p) for p in paths])
 
     # ---- Proton tools ------------------------------------------------------
     def _proton_game(self):
@@ -5110,6 +5200,7 @@ class MainWindow(QMainWindow):
         self._modlist_view.on_check_updates = self._on_check_updates
         # Change Version: right-click item + clicking the update flag icon.
         self._modlist_view.on_change_version = self._open_change_version_tab
+        self._modlist_view.on_bundle_options = self._open_bundle_tab
         self._modlist_view.on_flag_clicked = self._on_modlist_flag_clicked
         # Missing Requirements: right-click item + clicking the ⚠ flag icon.
         self._modlist_view.on_missing_reqs = self._open_missing_reqs_tab

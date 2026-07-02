@@ -50,6 +50,11 @@ def _heroic_app_names(game) -> list[str]:
 class _ScanSignals(QObject):
     game_found = Signal(object, str)        # (path|None, source)
     prefix_found = Signal(object)           # (path|None)
+    # Browse (portal) picks — fired from the portal WORKER thread, so they must
+    # be marshalled to the GUI thread via a Signal before touching any widget.
+    game_picked = Signal(object)            # (path|None)
+    prefix_picked = Signal(object)          # (path|None)
+    staging_picked = Signal(object)         # (path|None)
 
 
 class ConfigureGameView(QWidget):
@@ -69,6 +74,9 @@ class ConfigureGameView(QWidget):
         self._sig = _ScanSignals()
         self._sig.game_found.connect(self._on_game_found)
         self._sig.prefix_found.connect(self._on_prefix_found)
+        self._sig.game_picked.connect(self._on_game_picked)
+        self._sig.prefix_picked.connect(self._on_prefix_picked)
+        self._sig.staging_picked.connect(self._on_staging_picked)
 
         self._build()
         self._prepopulate()
@@ -398,35 +406,38 @@ class ConfigureGameView(QWidget):
 
     # ---- browse / open ----------------------------------------------------
     def _browse_game(self):
+        # pick_folder's callback fires on the portal WORKER thread — marshal to
+        # the GUI thread via a Signal before touching any widget (see the note
+        # on _ScanSignals). Calling _set_game here directly would segfault Qt.
         from Utils.portal_filechooser import pick_folder
+        pick_folder("Select game install folder",
+                    lambda path: self._sig.game_picked.emit(path))
 
-        def _chosen(path):
-            if path:
-                self._set_game(Path(path), source="manual")
-
-        pick_folder("Select game install folder", _chosen)
+    def _on_game_picked(self, path):
+        if path:
+            self._set_game(Path(path), source="manual")
 
     def _browse_prefix(self):
         from Utils.portal_filechooser import pick_folder
+        pick_folder("Select Proton/Wine prefix (pfx)",
+                    lambda path: self._sig.prefix_picked.emit(path))
 
-        def _chosen(path):
-            if path:
-                self._set_prefix(Path(path))
-
-        pick_folder("Select Proton/Wine prefix (pfx)", _chosen)
+    def _on_prefix_picked(self, path):
+        if path:
+            self._set_prefix(Path(path))
 
     def _browse_staging(self):
         from Utils.portal_filechooser import pick_folder
+        pick_folder("Select mod staging folder",
+                    lambda path: self._sig.staging_picked.emit(path))
 
-        def _chosen(path):
-            if not path:
-                return
-            self._custom_staging = Path(path)
-            self._staging_edit.setText(str(path))
-            self._staging_status.setText("Custom staging folder selected.")
-            self._staging_status.setStyleSheet(f"color:{self._c('TEXT_OK')};")
-
-        pick_folder("Select mod staging folder", _chosen)
+    def _on_staging_picked(self, path):
+        if not path:
+            return
+        self._custom_staging = Path(path)
+        self._staging_edit.setText(str(path))
+        self._staging_status.setText("Custom staging folder selected.")
+        self._staging_status.setStyleSheet(f"color:{self._c('TEXT_OK')};")
 
     def _open_path(self, path):
         if path and Path(path).exists():

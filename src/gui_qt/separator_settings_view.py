@@ -18,7 +18,7 @@ on_close() is called on Cancel, Save, or the ✕ button.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
@@ -39,9 +39,14 @@ def _hline(color: str) -> QFrame:
 class SeparatorSettingsView(QWidget):
     """Scoped-tab body for editing one separator's colour + deploy override."""
 
+    # pick_folder's callback fires on the portal WORKER thread; marshal the
+    # result to the GUI thread via this Signal before touching any widget.
+    _folder_picked = Signal(object)
+
     def __init__(self, sep_name: str, current_color: str | None,
                  current_deploy: dict | None, on_save, on_close):
         super().__init__()
+        self._folder_picked.connect(self._on_folder_picked)
         self._sep_name = sep_name
         self._color: str | None = current_color or None
         self._deploy = dict(current_deploy or {})
@@ -279,12 +284,12 @@ class SeparatorSettingsView(QWidget):
     # ---- deploy handling -------------------------------------------------
     def _on_browse(self):
         from Utils.portal_filechooser import pick_folder
+        pick_folder("Select deployment directory",
+                    lambda chosen: self._folder_picked.emit(chosen))
 
-        def _cb(chosen):
-            if chosen is not None:
-                # pick_folder may call back off the GUI thread — marshal.
-                self._path.setText(str(chosen))
-        pick_folder("Select deployment directory", _cb)
+    def _on_folder_picked(self, chosen):
+        if chosen is not None:
+            self._path.setText(str(chosen))
 
     def _current_deploy(self) -> dict | None:
         path = self._path.text().strip()

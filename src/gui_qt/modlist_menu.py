@@ -214,9 +214,9 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
     _staging_ok = getattr(view, "staging_dir", None) is not None
     # Group 1: manage
     act("Open folder", lambda: _open_folder(view, model, row))
-    # Bundle options… — unwired stub, shown greyed only when a bundle spec exists.
+    # Bundle options… — shown only when the mod carries a RE/Fluffy bundle spec.
     if _has_bundle_spec(view, name):
-        stub("Bundle options…")
+        act("Bundle options…", lambda: _open_bundle(view, name))
     if _staging_ok:
         act("Create empty mod below", lambda: _create_empty_mod(view, model, row))
     # Reinstall Mod — unwired stub, shown greyed only when the install archive
@@ -313,6 +313,14 @@ def _change_version(view, name):
     """Open the Change Version picker for *name* (the window installs the
     callback in _reload_modlist). No-op if it isn't wired (e.g. headless)."""
     cb = getattr(view, "on_change_version", None)
+    if cb is not None and name:
+        cb(name)
+
+
+def _open_bundle(view, name):
+    """Open the Bundle Options selector for *name* (the window installs the
+    callback in _reload_modlist). No-op if it isn't wired (e.g. headless)."""
+    cb = getattr(view, "on_bundle_options", None)
     if cb is not None and name:
         cb(name)
 
