@@ -44,24 +44,15 @@ from gui.theme import (
     TEXT_DIM, TEXT_MAIN,
     FONT_NORMAL, FONT_BOLD,
 )
-from Utils.protontricks import dotnet_dep_key as _dotnet_dep_key
-
-_EXE_NAME = "Pandora Behaviour Engine+.exe"
-
-_NET10_URL      = "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/10.0.0/windowsdesktop-runtime-10.0.0-win-x64.exe"
-_NET10_FILENAME = "windowsdesktop-runtime-10.0.0-win-x64.exe"
-_NET10_DEP_KEY  = _dotnet_dep_key("10")
-
-
-def find_pandora_exe(game: "BaseGame") -> Path | None:
-    """Search the mod staging directory for Pandora Behaviour Engine+.exe."""
-    staging = game.get_effective_mod_staging_path()
-    if not staging.is_dir():
-        return None
-    for candidate in staging.rglob(_EXE_NAME):
-        if candidate.is_file():
-            return candidate
-    return None
+# Exe discovery + .NET 10 constants live in the GUI-neutral Utils.pandora_tools
+# (shared with the Qt wizard view and the game files' wizard gating).
+from Utils.pandora_tools import (  # noqa: F401 — find_pandora_exe re-exported
+    EXE_NAME as _EXE_NAME,
+    NET10_DEP_KEY as _NET10_DEP_KEY,
+    NET10_FILENAME as _NET10_FILENAME,
+    NET10_URL as _NET10_URL,
+    find_pandora_exe,
+)
 
 
 from wizards._proton_prefix import ProtonPrefixStepMixin, shutdown_prefix_wineserver
