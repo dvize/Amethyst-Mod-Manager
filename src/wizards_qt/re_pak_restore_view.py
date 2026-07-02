@@ -103,7 +103,7 @@ class RePakRestoreView(QWidget):
 
         root_lbl = QLabel(f"Game root: {self._game_root}")
         root_lbl.setWordWrap(True)
-        root_lbl.setStyleSheet(f"color:{_c(p,'TEXT_DIM')}; font-size:12px;")
+        root_lbl.setStyleSheet(f"color:{_c(p,'TEXT_DIM')};")
         bl.addWidget(root_lbl)
 
         pak_count, entry_count = root_manifest_summary(self._game_root)
@@ -115,7 +115,7 @@ class RePakRestoreView(QWidget):
                 "restore.\n\n"
                 "If the game is still broken, verify the game files via Steam.")
             status.setWordWrap(True)
-            status.setStyleSheet(f"color:{_c(p,'TEXT_DIM')}; font-size:12px;")
+            status.setStyleSheet(f"color:{_c(p,'TEXT_DIM')};")
             bl.addWidget(status)
         else:
             status = QLabel(
@@ -132,7 +132,7 @@ class RePakRestoreView(QWidget):
             bl.addWidget(self._repair_btn, 0, Qt.AlignLeft)
 
         log_lbl = QLabel("Log:")
-        log_lbl.setStyleSheet(f"color:{_c(p,'TEXT_DIM')}; font-size:12px;")
+        log_lbl.setStyleSheet(f"color:{_c(p,'TEXT_DIM')};")
         bl.addWidget(log_lbl)
 
         self._log_text = QPlainTextEdit()
@@ -140,7 +140,7 @@ class RePakRestoreView(QWidget):
         self._log_text.setStyleSheet(
             f"QPlainTextEdit{{background:{_c(p,'BG_PANEL')};"
             f" color:{_c(p,'TEXT_MAIN')}; border:none;"
-            " font-family:monospace; font-size:12px;}")
+            " font-family:monospace;}")
         bl.addWidget(self._log_text, 1)
 
     # ---- helpers ----------------------------------------------------------

@@ -60,15 +60,25 @@ class PandoraView(QWidget):
         self._prefix_env = None       # (proton_script, compat_data, env)
         self._busy = False            # a worker step is running
         self._ran = False             # Pandora was launched at least once
+        self._closing = False         # teardown started — ignore late signals
 
+        # Guard every worker→UI signal: a daemon worker (deps install, or the
+        # run worker blocking on proc.communicate()) can emit AFTER the user
+        # closed the tab and the widget was deleteLater()'d. Dropping late
+        # signals avoids touching a half-deleted widget.
         self._deploy_status_sig.connect(
-            lambda t, c: self._set_status(self._deploy_status, t, c))
+            lambda t, c: None if self._closing
+            else self._set_status(self._deploy_status, t, c))
         self._deps_status_sig.connect(
-            lambda t, c: self._set_status(self._deps_status, t, c))
+            lambda t, c: None if self._closing
+            else self._set_status(self._deps_status, t, c))
         self._run_status_sig.connect(
-            lambda t, c: self._set_status(self._run_status, t, c))
-        self._goto_step_sig.connect(self._goto_step)
-        self._run_started_sig.connect(self._on_run_started)
+            lambda t, c: None if self._closing
+            else self._set_status(self._run_status, t, c))
+        self._goto_step_sig.connect(
+            lambda i: None if self._closing else self._goto_step(i))
+        self._run_started_sig.connect(
+            lambda: None if self._closing else self._on_run_started())
 
         self.setObjectName("PandoraView")
         self._build()
@@ -114,7 +124,7 @@ class PandoraView(QWidget):
         lay.setSpacing(8)
         head = QLabel(title)
         head.setAlignment(Qt.AlignHCenter)
-        head.setStyleSheet(f"color:{_c(p,'TEXT_MAIN')}; font-weight:600;")
+        head.setStyleSheet(f"color:{_c(p,'TEXT_MAIN')}; font-weight:700;")
         lay.addWidget(head)
         return page, lay
 
@@ -343,24 +353,24 @@ class PandoraView(QWidget):
             self._start_run()
 
     def _on_close(self):
-        # The header ✕ is blocked while a worker step (deploy / .NET install)
-        # is mid-flight; the Done button uses _on_done instead so it always
-        # works once Pandora has launched.
-        if self._busy:
-            return
+        # Both the header ✕ and the Done button always close. Any in-flight
+        # daemon worker keeps running harmlessly (Pandora is its own process;
+        # deploy/.NET steps finish in the background) — the _closing guard
+        # drops their late UI signals so nothing touches the deleted widget.
         self._finish()
 
     def _on_done(self):
-        # Done always closes + refreshes: Pandora may still be running in the
-        # background (that's fine — closing the wizard doesn't kill it), so we
-        # don't gate this on _busy.
         self._finish()
 
     def _finish(self):
+        if self._closing:
+            return
+        self._closing = True
+        # Snapshot before the widget is torn down — the refresh is a ctx
+        # method (safe post-close), but read our own flags/ctx first.
+        do_refresh = self._ran and getattr(self._ctx, "refresh_modlist", None)
         self._on_close_cb()
-        if self._ran:
+        if do_refresh:
             # Pandora may have written a new Pandora_output mod — re-sync the
             # modlist so it appears (mirrors the Tk wizard's _reload_mod_panel).
-            refresh = getattr(self._ctx, "refresh_modlist", None)
-            if refresh is not None:
-                refresh()
+            do_refresh()

@@ -26,25 +26,24 @@ def derive_mod_name(archive: Path, fallback: str) -> str:
     return stem.strip() or fallback
 
 
-def register_as_mod(
+def register_as_mod_neutral(
     game: "BaseGame",
     mod_name: str,
     archive: "Path | None" = None,
     *,
-    parent_widget,
+    modlist_path: "Path | None" = None,
     log_fn: Callable[[str], None],
     root_folder: bool = True,
 ) -> Path:
-    """Write meta.ini with rootFolder=*root_folder*, prepend the mod to
-    modlist.txt, and trigger a refresh of the modlist panel if reachable from
-    *parent_widget*.
+    """GUI-neutral core of :func:`register_as_mod`.
+
+    Writes meta.ini with rootFolder=*root_folder* and prepends the mod to
+    *modlist_path* (defaults to the game's ``profiles/default/modlist.txt``).
+    Does NO UI refresh — callers that have a panel/app refresh it themselves.
 
     *archive* is optional — pass ``None`` for payloads built directly in the
-    staging folder (no source archive), in which case ``installation_file`` is
-    left blank.
-
-    Returns the staging mod directory so callers can drop files into it.
-    Must be called from the worker thread; UI refresh is scheduled via .after().
+    staging folder, leaving ``installation_file`` blank. Returns the staging
+    mod directory. Call from a worker thread.
     """
     from Nexus.nexus_meta import NexusModMeta, write_meta
     from Utils.modlist import prepend_mod
@@ -63,6 +62,30 @@ def register_as_mod(
     )
     write_meta(mod_dir / "meta.ini", meta)
 
+    if modlist_path is None:
+        modlist_path = game.get_profile_root() / "profiles" / "default" / "modlist.txt"
+
+    prepend_mod(modlist_path, mod_name, enabled=True)
+    log_fn(f"Wizard: added '{mod_name}' to modlist with rootFolder={str(root_folder).lower()}.")
+
+    return mod_dir
+
+
+def register_as_mod(
+    game: "BaseGame",
+    mod_name: str,
+    archive: "Path | None" = None,
+    *,
+    parent_widget,
+    log_fn: Callable[[str], None],
+    root_folder: bool = True,
+) -> Path:
+    """Tk variant: :func:`register_as_mod_neutral` plus a modlist-panel refresh
+    reached through *parent_widget*.
+
+    Returns the staging mod directory so callers can drop files into it.
+    Must be called from the worker thread; UI refresh is scheduled via .after().
+    """
     mod_panel = None
     try:
         toplevel = parent_widget.winfo_toplevel()
@@ -73,11 +96,11 @@ def register_as_mod(
     modlist_path: Path | None = None
     if mod_panel is not None:
         modlist_path = getattr(mod_panel, "_modlist_path", None)
-    if modlist_path is None:
-        modlist_path = game.get_profile_root() / "profiles" / "default" / "modlist.txt"
 
-    prepend_mod(modlist_path, mod_name, enabled=True)
-    log_fn(f"Wizard: added '{mod_name}' to modlist with rootFolder={str(root_folder).lower()}.")
+    mod_dir = register_as_mod_neutral(
+        game, mod_name, archive,
+        modlist_path=modlist_path, log_fn=log_fn, root_folder=root_folder,
+    )
 
     if mod_panel is not None:
         try:

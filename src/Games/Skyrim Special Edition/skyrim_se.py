@@ -179,10 +179,12 @@ class SkyrimSE(Fallout_3):
 
     @property
     def wizard_tools(self) -> list[WizardTool]:
-        from wizards.pandora import find_pandora_exe
-        from wizards.bodyslide import find_mod_exe
-        from wizards.sse_display_tweaks import is_installed as sdt_installed
-        from wizards.engine_fixes import is_installed as ef_installed
+        from Utils.pandora_tools import find_pandora_exe
+        from Utils.wizard_gates import (
+            engine_fixes_installed as ef_installed,
+            find_mod_exe,
+            sse_display_tweaks_installed as sdt_installed,
+        )
         pandora_tools = []
         if sdt_installed(self):
             pandora_tools.append(WizardTool(

@@ -613,6 +613,199 @@ def prepare_tool_prefix(exe_path: Path, proton_name: str, game,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Wizard-tool prefix placement (ported from wizards/_proton_prefix.py; file
+# formats identical so choices are shared with the Tk wizards)
+# ---------------------------------------------------------------------------
+
+# Prefix-placement modes persisted per-exe alongside the Proton override.
+PREFIX_MODE_ISOLATED = "isolated"  # prefix_<Proton>/ next to the exe (default)
+PREFIX_MODE_SHARED = "shared"      # wine_prefixes/shared_<Proton>/, one per Proton
+PREFIX_MODE_GAME = "game"          # reuse the game's own prefix
+
+_LAUNCH_ENV_FILE = "launch_env.json"
+_ENV_VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def shared_prefix_dir(proton_dir_name: str) -> Path:
+    """Return the shared tool prefix dir for a Proton version (one per version).
+
+    Lives under the app config ``wine_prefixes/`` folder so it is shared by
+    every wizard tool that opts into the shared prefix and survives Clear Cache.
+    """
+    from Utils.config_paths import get_wine_prefixes_dir
+    return get_wine_prefixes_dir() / f"shared_{proton_dir_name}"
+
+
+def load_prefix_mode(game, exe_name: str) -> str:
+    """Return the saved prefix-placement mode for exe_name (isolated default)."""
+    val = _read_launch_mode_data(game).get(f"__prefix_mode_{exe_name}")
+    return val if val in (PREFIX_MODE_SHARED, PREFIX_MODE_GAME) else PREFIX_MODE_ISOLATED
+
+
+def save_prefix_mode(game, exe_name: str, mode: str) -> None:
+    """Persist the prefix-placement mode for exe_name (isolated = remove key)."""
+    _write_launch_mode_key(
+        game, f"__prefix_mode_{exe_name}",
+        mode if mode in (PREFIX_MODE_SHARED, PREFIX_MODE_GAME) else None)
+
+
+def load_tool_launch_env(exe: Path | None) -> str:
+    """Return the saved env-var string for this exe ('' if none)."""
+    if exe is None:
+        return ""
+    p = exe.parent / _LAUNCH_ENV_FILE
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get(exe.name) or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def save_tool_launch_env(exe: Path | None, text: str) -> None:
+    """Persist the env-var string in launch_env.json next to the exe."""
+    if exe is None:
+        return
+    p = exe.parent / _LAUNCH_ENV_FILE
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    except (OSError, ValueError):
+        data = {}
+    if text:
+        data[exe.name] = text
+    else:
+        data.pop(exe.name, None)
+    try:
+        if data:
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        elif p.is_file():
+            p.unlink()
+    except OSError:
+        pass
+
+
+def parse_env_overrides(text: str) -> dict:
+    """Parse a space-separated KEY=VALUE string into a dict (bad tokens skipped)."""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    out: dict = {}
+    for token in tokens:
+        if _ENV_VAR_RE.match(token):
+            k, v = token.split("=", 1)
+            out[k] = v
+    return out
+
+
+def shutdown_prefix_wineserver(proton_script: Path, compat_data: Path,
+                               log_fn=None) -> None:
+    """Kill leftover wine processes still attached to a tool prefix.
+
+    Proton sidecars (xalia.exe, services.exe, explorer.exe) can keep the
+    prefix's wineserver alive indefinitely after the tool itself closes;
+    they outlive the app and linger until the desktop session ends.
+    """
+    try:
+        proton_dir = Path(proton_script).parent
+        bin_dir = next(
+            (proton_dir / d / "bin" for d in ("files", "dist")
+             if (proton_dir / d / "bin" / "wineserver").is_file()),
+            None,
+        )
+        if bin_dir is None:
+            return
+        env = os.environ.copy()
+        env["WINEPREFIX"] = str(Path(compat_data) / "pfx")
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        subprocess.run(
+            [str(bin_dir / "wineserver"), "-k"],
+            env=env, timeout=15,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if log_fn is not None:
+            log_fn("tool prefix wineserver shut down")
+    except Exception:
+        pass
+
+
+def get_game_prefix_env(game, log_fn=_noop_log):
+    """Resolve (proton_script, compat_data, env) for the game's OWN prefix.
+
+    Reuses the existing game prefix (already initialised by the game), so no
+    wineboot is run. Picks the Proton version Steam assigns to the game.
+    Returns None on failure (after logging why).
+    """
+    from Utils.steam_finder import (
+        find_proton_for_game, find_steam_root_for_proton_script,
+    )
+    pfx = game.get_prefix_path() if hasattr(game, "get_prefix_path") else None
+    if pfx is None or not Path(pfx).is_dir():
+        log_fn("game prefix not found — deploy/launch the game once, or pick "
+               "a different prefix option.")
+        return None
+    steam_id = effective_steam_id(game)
+    proton_script = find_proton_for_game(steam_id) if steam_id else None
+    if proton_script is None:
+        log_fn("could not resolve the game's Proton version — pick a "
+               "different prefix option.")
+        return None
+    steam_root = find_steam_root_for_proton_script(proton_script)
+    if steam_root is None:
+        return None
+    compat_data = Path(pfx).parent
+    env = os.environ.copy()
+    env["STEAM_COMPAT_DATA_PATH"] = str(compat_data)
+    env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(steam_root)
+    if steam_id:
+        env.setdefault("SteamAppId", str(steam_id))
+        env.setdefault("SteamGameId", str(steam_id))
+    return proton_script, compat_data, env
+
+
+def resolve_tool_prefix(exe: Path, game, proton_name: str, prefix_mode: str,
+                        log_fn=_noop_log):
+    """Resolve (proton_script, compat_data, env) for a wizard tool's prefix.
+
+    Honours the chosen placement mode:
+      * isolated — creates/initialises prefix_<ProtonName>/ next to the exe
+      * shared   — creates/initialises wine_prefixes/shared_<ProtonName>/
+      * game     — reuses the game's own prefix (no init)
+    Saved per-exe env-var overrides (launch_env.json) are merged into env.
+    First use of an isolated/shared prefix runs a synchronous wineboot —
+    only call from a worker thread. Returns None on failure.
+
+    Port of the Tk ProtonPrefixStepMixin._get_tool_env (note the different
+    tuple order: compat_data before env, matching get_tool_prefix_env).
+    """
+    if prefix_mode == PREFIX_MODE_GAME:
+        result = get_game_prefix_env(game, log_fn=log_fn)
+    else:
+        target = None
+        if prefix_mode == PREFIX_MODE_SHARED:
+            from Utils.steam_finder import find_any_installed_proton
+            proton_script = find_any_installed_proton(proton_name)
+            if proton_script is None:
+                log_fn(f"could not find Proton '{proton_name}'.")
+                return None
+            target = shared_prefix_dir(proton_script.parent.name)
+        result = get_tool_prefix_env(
+            exe, proton_name, prefix_dir=target,
+            steam_id=effective_steam_id(game),
+        )
+    if result is None:
+        return None
+    proton_script, compat_data, env = result
+    extra = parse_env_overrides(load_tool_launch_env(exe))
+    if extra:
+        env.update(extra)
+        log_fn("applying saved env vars: "
+               + " ".join(f"{k}={v}" for k, v in extra.items()))
+    return proton_script, compat_data, env
+
+
 def launch_winetricks_in_prefix(wineprefix: Path, log_fn=_noop_log) -> None:
     """Launch the winetricks GUI against *wineprefix* (a .../pfx dir),
     downloading winetricks/cabextract on demand."""

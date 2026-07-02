@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self._deploy_running = False
         self._deploy_rerun_pending = False
         self._post_deploy_action = None   # launch closure run after deploy succeeds
+        self._deploy_done_hooks: list = []   # wizard on_done(ok) one-shots
         self._progress_popup = None
         self._notifier = None
         self._op_progress.connect(self._on_op_progress)
@@ -828,37 +829,38 @@ class MainWindow(QMainWindow):
                 b.setText(f"{label} ({n})" if n else label)
 
     def _on_downloads_locations(self):
-        from gui_qt.download_locations_dialog import DownloadLocationsDialog
-        dlg = DownloadLocationsDialog(self)
-        if dlg.exec():
-            self._downloads_view.refresh()
+        from gui_qt.download_locations_overlay import DownloadLocationsOverlay
+        DownloadLocationsOverlay.show_over(
+            self,
+            lambda saved: self._downloads_view.refresh() if saved else None)
 
     def _on_downloads_remove(self):
-        from PySide6.QtWidgets import QMessageBox
         paths = self._downloads_view.checked_paths()
         if not paths:
             return
         names = "\n".join(Path(p).name for p in paths[:20])
         more = f"\n… and {len(paths) - 20} more" if len(paths) > 20 else ""
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("Remove archives")
-        box.setText(f"Permanently delete {len(paths)} archive(s) from disk?")
-        box.setInformativeText(names + more)
-        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        box.setDefaultButton(QMessageBox.No)
-        if box.exec() != QMessageBox.Yes:
-            return
-        removed = 0
-        for p in paths:
-            try:
-                Path(p).unlink()
-                removed += 1
-            except OSError as exc:
-                print(f"[gui_qt] remove failed: {p}: {exc}", flush=True)
-        self._notify(f"Removed {removed} archive(s)", "info")
-        self._downloads_view.clear_checks()
-        self._downloads_view.refresh()
+
+        def _confirmed(ok):
+            if not ok:
+                return
+            removed = 0
+            for p in paths:
+                try:
+                    Path(p).unlink()
+                    removed += 1
+                except OSError as exc:
+                    print(f"[gui_qt] remove failed: {p}: {exc}", flush=True)
+            self._notify(f"Removed {removed} archive(s)", "info")
+            self._downloads_view.clear_checks()
+            self._downloads_view.refresh()
+
+        from gui_qt.confirm_overlay import ConfirmOverlay
+        ConfirmOverlay.show_over(
+            self, "Remove archives",
+            f"Permanently delete {len(paths)} archive(s) from disk?\n\n"
+            + names + more,
+            _confirmed, confirm_label="Delete")
 
     def _text_files_footer(self) -> QWidget:
         """Search Content / Filters + search, shown under the plugins column when
@@ -1050,10 +1052,8 @@ class MainWindow(QMainWindow):
                     for v in DOTNET_VERSIONS
                 ]),
             ]),
-            ("Wizard", "wizard.png", [
-                ("Mod wizards…", None),
-                ("Tool wizards…", None),
-            ]),
+            # Wizard's menu is dynamic — rebuilt per game on aboutToShow.
+            ("Wizard", "wizard.png", []),
             ("Nexus", "nexus.png", [
                 ("Open Nexus Mods", self._open_nexus_browser_tab),
                 None,
@@ -1076,6 +1076,9 @@ class MainWindow(QMainWindow):
             b.setFixedHeight(self._BTN_H)
             b.setToolTip(label)
             b._full_label = label
+            if label == "Wizard":
+                self._wizard_btn = b
+                b._menu.aboutToShow.connect(self._rebuild_wizard_menu)
             self._action_buttons.append(b)
             h.addWidget(b)
 
@@ -1125,6 +1128,8 @@ class MainWindow(QMainWindow):
         if self._tabs.has_key("dll_overrides"):
             self._tabs.close_tab("dll_overrides")
             self._dll_overrides_view = None
+        # Wizard tool tabs are game-scoped — close them all.
+        self._close_wizard_tabs()
         # The exe-settings tab is bound to the previous game's exe.
         self._close_exe_settings_tab()
         # Userlist tabs/bars hold the previous profile's userlist path.
@@ -2337,14 +2342,21 @@ class MainWindow(QMainWindow):
             self._notify("Start 'Login via SSO' first, then paste the code.",
                          "warning")
             return
-        from PySide6.QtWidgets import QInputDialog
-        blob, ok = QInputDialog.getText(
+        def _pasted(blob):
+            if not blob or not blob.strip():
+                return
+            if self._oauth_client is None or not self._oauth_client.is_running:
+                self._notify("The login session has ended — start "
+                             "'Login via SSO' again.", "warning")
+                return
+            ok2, msg = self._oauth_client.submit_manual_code(blob)
+            self._notify(msg, "info" if ok2 else "warning")
+
+        from gui_qt.text_input_overlay import TextInputOverlay
+        TextInputOverlay.show_over(
             self, "Paste Nexus login code",
-            "Paste the code from the Nexus 'Having issues?' page:")
-        if not ok or not blob.strip():
-            return
-        ok2, msg = self._oauth_client.submit_manual_code(blob)
-        self._notify(msg, "info" if ok2 else "warning")
+            "Paste the code from the Nexus 'Having issues?' page:", _pasted,
+            ok_label="Submit")
 
     def _nexus_clear_credentials(self):
         """Forget the saved OAuth tokens + legacy API key."""
@@ -4133,6 +4145,14 @@ class MainWindow(QMainWindow):
             action, self._post_deploy_action = self._post_deploy_action, None
             if action is not None and success:
                 action()
+            # Wizard deploy steps: one-shot completion hooks (get the outcome
+            # either way so the wizard can show failure and re-enable Deploy).
+            hooks, self._deploy_done_hooks = self._deploy_done_hooks, []
+            for h in hooks:
+                try:
+                    h(success)
+                except Exception as exc:
+                    self._append_log(f"Wizards: deploy hook error: {exc}")
 
     # ----------------------------------------------------------------- install
     def _on_install_mod(self):
@@ -4345,6 +4365,135 @@ class MainWindow(QMainWindow):
             self._notify(f"{title} — done.", "success")
         else:
             self._notify(f"{title} — failed (see log).", "error")
+
+    # ---- Wizard tools ------------------------------------------------------
+    def _rebuild_wizard_menu(self):
+        """(Re)populate the Wizard header menu for the current game. Runs on
+        every aboutToShow: several games' wizard_tools do live filesystem
+        checks (e.g. BodySlide only appears once its exe exists in staging),
+        and this also handles game switches for free. Tools without a Qt view
+        registered yet appear greyed out; EXCLUDED ones are dropped."""
+        menu = getattr(self._wizard_btn, "_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        menu.setToolTipsVisible(True)
+        game = self._gs.game
+        if game is None:
+            menu.addAction("No game selected").setEnabled(False)
+            self._add_prefix_manager_action(menu)
+            return
+        from Utils.plugin_loader import get_all_wizard_tools
+        from Utils.wizard_catalog import group_by_category
+        from wizards_qt import EXCLUDED, get_spec
+        try:
+            tools = [t for t in get_all_wizard_tools(game)
+                     if t.dialog_class_path not in EXCLUDED]
+        except Exception as exc:
+            self._append_log(f"Wizards: failed to list tools: {exc}")
+            tools = []
+        if not tools:
+            menu.addAction("No wizard tools for this game").setEnabled(False)
+            self._add_prefix_manager_action(menu)
+            return
+        groups = group_by_category(tools)
+        for cat, cat_tools in groups:
+            target = menu if len(groups) == 1 else menu.addMenu(cat)
+            target.setToolTipsVisible(True)
+            for tool in cat_tools:
+                act = target.addAction(tool.label)
+                if tool.description:
+                    act.setToolTip(tool.description)
+                if get_spec(tool.dialog_class_path) is None:
+                    act.setEnabled(False)   # not ported to Qt yet
+                else:
+                    act.triggered.connect(
+                        lambda _=False, t=tool: self._open_wizard_tool(t))
+        self._add_prefix_manager_action(menu)
+
+    def _add_prefix_manager_action(self, menu):
+        """Trailing 'Manage Prefixes…' entry — always available (it lists
+        every game's tool prefixes, like the Tk wizard picker's button)."""
+        menu.addSeparator()
+        act = menu.addAction("Manage Prefixes…")
+        act.setToolTip("Browse every wizard-tool Wine prefix and delete them "
+                       "to reclaim disk space.")
+        act.triggered.connect(lambda _=False: self._open_prefix_manager())
+
+    def _open_prefix_manager(self):
+        """Open the prefix manager as a plugins-panel-scoped tab."""
+        if self._tabs.has_key("prefix_manager"):
+            self._tabs.focus_key("prefix_manager")
+            return
+        from gui_qt.prefix_manager_view import PrefixManagerView
+        game = self._gs.game
+        view = PrefixManagerView(
+            active_game_name=(game.name if game is not None else ""),
+            on_close=lambda: self._close_wizard_tab("prefix_manager"),
+            log_fn=self._append_log)
+        self._tabs.open_scoped_tab(
+            view, "Manage Prefixes", self._plugins_panel_stack,
+            key="prefix_manager")
+
+    def _open_wizard_tool(self, tool):
+        """Open a ported wizard tool as a panel-scoped tab (plugins panel for
+        most tools; modlist panel for the wide ones that were full-width
+        overlays in Tk). Re-opening an already-open tool refocuses its tab."""
+        game = self._gs.game
+        if game is None:
+            return
+        from wizards_qt import get_spec
+        spec = get_spec(tool.dialog_class_path)
+        if spec is None:
+            return
+        key = f"wizard:{tool.id}"
+        if self._tabs.has_key(key):
+            self._tabs.focus_key(key)
+            return
+        # _full_width_overlay is a Tk-only hint (the registry's `panel` field
+        # replaces it); the rest of extra is forwarded to the view.
+        extra = {k: v for k, v in (tool.extra or {}).items()
+                 if k != "_full_width_overlay"}
+        stack = (self._modlist_panel_stack if spec.panel == "modlist"
+                 else self._plugins_panel_stack)
+        from wizards_qt import QtWizardContext
+        ctx = QtWizardContext(
+            profile_name=self._gs.profile or "default",
+            run_deploy=self._wizard_run_deploy,
+            refresh_modlist=self._on_refresh_modlist,
+        )
+        try:
+            view = spec.view_factory(
+                game, log_fn=self._append_log,
+                on_close=lambda k=key: self._close_wizard_tab(k),
+                ctx=ctx, **extra)
+        except Exception as exc:
+            self._append_log(f"Wizards: failed to open {tool.label}: {exc}")
+            return
+        self._tabs.open_scoped_tab(view, tool.label, stack, key=key)
+
+    def _wizard_run_deploy(self, on_done) -> bool:
+        """Start a deploy for a wizard step through the normal deploy path
+        (mutex/coalesce + progress popup). *on_done(ok)* fires on the UI
+        thread after the final deploy completes. Returns False when a deploy
+        can't be started (unconfigured game)."""
+        game = self._gs.game
+        if game is None or not game.is_configured() or not hasattr(game, "deploy"):
+            return False
+        self._deploy_done_hooks.append(on_done)
+        self._on_deploy()
+        return True
+
+    def _close_wizard_tab(self, key: str):
+        if self._tabs.has_key(key):
+            self._tabs.close_tab(key)
+
+    def _close_wizard_tabs(self):
+        """Close every open wizard tab (game switch — they're game-scoped).
+        The prefix manager closes too: its active-game highlight goes stale."""
+        for key in [k for k in list(self._tabs._keys)
+                    if k.startswith("wizard:") or k == "prefix_manager"]:
+            self._tabs.close_tab(key)
 
     def _install_paths(self, paths: list[str], metas: dict | None = None,
                        previous_mod_name: str | None = None,
@@ -4630,14 +4779,20 @@ class MainWindow(QMainWindow):
         if name:
             # Optional post-install rename prompt (Tk parity). Modal, before the
             # next queued install — keeps one dialog at a time.
-            name = self._maybe_prompt_rename(name)
-            self._install_ok.append(name)
-            # Change Version landed a different-named version → offer to remove
-            # the previous version (Tk parity). One-shot per queue.
-            prev = getattr(self, "_install_prev_name", None)
-            if prev and name != prev:
-                self._install_prev_name = None   # don't re-prompt for later items
-                self._maybe_prompt_remove_previous(prev, name)
+            self._maybe_prompt_rename(name, self._finish_one_install)
+        else:
+            self._install_next()   # continue the queue
+
+    def _finish_one_install(self, name: str):
+        """Tail of _on_one_install_done, run after the optional rename prompt
+        resolves (*name* is the final mod name)."""
+        self._install_ok.append(name)
+        # Change Version landed a different-named version → offer to remove
+        # the previous version (Tk parity). One-shot per queue.
+        prev = getattr(self, "_install_prev_name", None)
+        if prev and name != prev:
+            self._install_prev_name = None   # don't re-prompt for later items
+            self._maybe_prompt_remove_previous(prev, name)
         self._install_next()   # continue the queue
 
     def _maybe_prompt_remove_previous(self, old_name: str, new_name: str):
@@ -4694,23 +4849,30 @@ class MainWindow(QMainWindow):
         self._reload_modlist()
         self._rebuild_conflicts_async()
 
-    def _maybe_prompt_rename(self, name: str) -> str:
+    def _maybe_prompt_rename(self, name: str, on_done):
         """If 'Rename mod after install' is on, prompt for a new name and rename
-        the mod (staging folder + index + modlist entry). Returns the final name
-        (unchanged if the user cancels or the rename fails)."""
+        the mod (staging folder + index + modlist entry). Calls ``on_done`` with
+        the final name (unchanged if the user cancels or the rename fails)."""
         try:
             from Utils.ui_config import load_rename_mod_after_install
             if not load_rename_mod_after_install():
-                return name
+                on_done(name)
+                return
         except Exception:
-            return name
-        from PySide6.QtWidgets import QInputDialog
-        new, ok = QInputDialog.getText(
-            self, "Rename mod", "New name for the installed mod:", text=name)
-        if not ok or not new.strip():
-            return name
-        renamed = self._rename_mod_on_disk(name, new.strip())
-        return renamed or name
+            on_done(name)
+            return
+
+        def _named(new):
+            if new is None or not new.strip():
+                on_done(name)
+                return
+            renamed = self._rename_mod_on_disk(name, new.strip())
+            on_done(renamed or name)
+
+        from gui_qt.text_input_overlay import TextInputOverlay
+        TextInputOverlay.show_over(
+            self, "Rename mod", "New name for the installed mod:", _named,
+            initial=name, ok_label="Rename")
 
     def _rename_mod_on_disk(self, old_name: str, new_name: str) -> str | None:
         """Rename a mod: staging folder → new, modindex entry, modlist entry,

@@ -1760,7 +1760,7 @@ class Fallout_4(Fallout_3):
 
     @property
     def wizard_tools(self) -> list[WizardTool]:
-        from wizards.bodyslide import find_mod_exe
+        from Utils.wizard_gates import find_mod_exe
         bodyslide_tools = []
         if find_mod_exe(self, ("BodySlide.exe", "BodySlide x64.exe")) is not None:
             bodyslide_tools.append(WizardTool(
