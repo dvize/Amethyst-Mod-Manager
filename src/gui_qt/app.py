@@ -502,8 +502,7 @@ class MainWindow(QMainWindow):
             "Filters": self._toggle_modlist_filters,
             "Refresh Modlist": self._on_refresh_modlist,
             "Check Updates": self._on_check_updates,
-            "Restore backup": lambda: self._append_log(
-                "[modlist] Restore backup (not wired yet)"),
+            "Restore backup": self._open_restore_backup_tab,
         }
         self._modlist_footer_btns: list[QToolButton] = []
         for label in ["Expand all", "Enable all", "Check Updates", "Filters",
@@ -2480,6 +2479,43 @@ class MainWindow(QMainWindow):
             f"Quick Update: {problems} mod(s) couldn't be updated — "
             + " and ".join(parts) + ". See the log; use Change Version manually.",
             "warning")
+
+    # ---- Restore backup (plugins-panel-scoped overlay) --------------------
+
+    def _open_restore_backup_tab(self):
+        """Open the Restore backup list for the current profile as a tab that
+        takes over the whole plugins panel. Triggered by the footer button."""
+        game = self._gs.game
+        if game is None or not game.is_configured():
+            self._notify("No configured game selected.", "warning")
+            return
+        pname = self._gs.profile
+        if not pname:
+            self._notify("No profile selected.", "warning")
+            return
+        if self._tabs.has_key("restore_backup"):
+            self._tabs.focus_key("restore_backup")
+            return
+        profile_dir = game.get_profile_root() / "profiles" / pname
+        from gui_qt.backup_restore_view import BackupRestoreView
+        view = BackupRestoreView(
+            profile_dir, pname,
+            on_restored=self._on_backup_restored,
+            on_close=self._close_restore_backup_tab,
+            log_fn=self._append_log)
+        self._tabs.open_scoped_tab(
+            view, "Restore backup", self._plugins_panel_stack,
+            key="restore_backup")
+
+    def _on_backup_restored(self):
+        """A backup was restored — refresh both panels (backups cover modlist
+        AND plugins)."""
+        self._reload_modlist()
+        self._reload_plugins()
+
+    def _close_restore_backup_tab(self):
+        if self._tabs.has_key("restore_backup"):
+            self._tabs.close_tab("restore_backup")
 
     # ---- Change Version (plugins-panel-scoped overlay) --------------------
 
