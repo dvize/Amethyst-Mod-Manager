@@ -2476,6 +2476,53 @@ class MainWindow(QMainWindow):
 
     # ---- Quick Update -----------------------------------------------------
 
+    def _reinstall_mods(self, mod_names):
+        """Reinstall one or more mods from their recorded installation archives
+        (Tk parity, gui/modlist_nexus_actions._reinstall_mod). Each mod's archive
+        is located across the Downloads dir + configured caches + extra locations
+        (Utils.download_locations / config_paths); mods with no on-disk archive
+        are skipped with a log line. Resolved archives go through _install_paths
+        with the mod's existing folder name forced (silent Replace-All, keeping
+        the modlist position + endorsed flag), so no Mod-Already-Exists dialog."""
+        if getattr(self, "_install_running", False):
+            self._notify("An install is already in progress.", "warning")
+            return
+        game = self._gs.game
+        if game is None or not game.is_configured():
+            self._notify("No configured game selected.", "warning")
+            return
+        staging = self._gs.staging_dir()
+        if staging is None:
+            self._notify("No mod staging folder for this profile.", "warning")
+            return
+        names = list(mod_names or [])
+        if not names:
+            return
+
+        from gui_qt.modlist_menu import _installation_archive
+        preferred: dict[str, str] = {}   # archive path → forced folder name
+        paths: list[str] = []
+        missing: list[str] = []
+        for nm in names:
+            arc = _installation_archive(self._modlist_view, nm)
+            if arc is None:
+                missing.append(nm)
+                self._append_log(f"[reinstall] {nm} — install archive not found, "
+                                 "skipped.")
+                continue
+            paths.append(str(arc))
+            preferred[str(arc)] = nm
+
+        if not paths:
+            self._notify("No install archive found for the selected mod(s).",
+                         "warning")
+            return
+        if missing:
+            self._notify(
+                f"Reinstalling {len(paths)} mod(s); {len(missing)} skipped "
+                "(no archive found).", "info")
+        self._install_paths(paths, preferred_names=preferred)
+
     def _quick_update_mods(self, mod_names):
         """Auto-install the latest name-matched version for each update-flagged
         mod (Tk parity, gui/modlist_nexus_actions._quick_update_mods). Mods whose
@@ -5227,6 +5274,8 @@ class MainWindow(QMainWindow):
         self._modlist_view.on_missing_reqs = self._open_missing_reqs_tab
         # Quick Update: right-click on update-flagged mods (premium direct DL).
         self._modlist_view.on_quick_update = self._quick_update_mods
+        # Reinstall: right-click item(s) whose install archive is still on disk.
+        self._modlist_view.on_reinstall = self._reinstall_mods
         # Show Conflicts: right-click item.
         self._modlist_view.on_show_conflicts = self._open_show_conflicts_tab
         # Root-Folder toggle wrote meta.ini → refresh the root flag immediately,

@@ -3,9 +3,8 @@
 Mirrors the Tk menu (gui/modlist_panel.py `_populate_context_menu`) for all three
 target types — normal mods, separators, and the Overwrite folder. Each item is
 SHOWN only when its Tk condition holds and HIDDEN otherwise (Tk omits items; it
-never disables them). The only greyed items are the handful still awaiting a Qt
-backend (Bundle options…, Reinstall Mod, Change separator color, Separator
-settings…), and even those appear only when their Tk show-condition passes.
+never disables them). Any remaining greyed items are the handful still awaiting a
+Qt backend, and even those appear only when their Tk show-condition passes.
 """
 
 from __future__ import annotations
@@ -160,6 +159,8 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
         _nexus_multi = [nm for nm in _names if _has_nexus_page(view, nm)]
         _reqs_multi = [nm for nm in _names if _has_missing_reqs(view, nm)]
         _qu = [nm for nm in _names if _has_update_flag(view, nm)]
+        _reinstall_multi = [nm for nm in _names
+                            if _installation_archive(view, nm) is not None]
         if _abstain_multi:
             act(f"Abstain selected ({len(_abstain_multi)})",
                 lambda ns=_abstain_multi: _endorse(view, ns, False))
@@ -178,6 +179,9 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
         if _qu:
             act(f"Quick Update ({len(_qu)})",
                 lambda ns=_qu: _quick_update(view, ns))
+        if _reinstall_multi:
+            act(f"Reinstall ({len(_reinstall_multi)})",
+                lambda ns=_reinstall_multi: _reinstall(view, ns))
         divider()
         # Group: organise
         _others = _other_profiles(view)
@@ -219,10 +223,11 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
         act("Bundle options…", lambda: _open_bundle(view, name))
     if _staging_ok:
         act("Create empty mod below", lambda: _create_empty_mod(view, model, row))
-    # Reinstall Mod — unwired stub, shown greyed only when the install archive
-    # is still on disk (Tk: ctx_meta present + _find_installation_archive).
+    # Reinstall Mod — shown only when the install archive is still on disk
+    # (Tk: ctx_meta present + _find_installation_archive). Reinstalls from the
+    # recorded archive into the same folder (silent Replace-All).
     if _installation_archive(view, name) is not None:
-        stub("Reinstall Mod")
+        act("Reinstall Mod", lambda: _reinstall(view, [name]))
     act("Rename mod", lambda: _rename(view, model, row), enabled=not locked)
     divider()
     # Group 2: files & install options
@@ -359,6 +364,15 @@ def _quick_update(view, names):
     targets = [n for n in names if _has_update_flag(view, n)]
     if cb is not None and targets:
         cb(targets)
+
+
+def _reinstall(view, names):
+    """Reinstall each mod in *names* from its recorded install archive (the
+    window installs the callback in _reload_modlist). Mods whose archive is gone
+    are skipped by the handler. No-op if it isn't wired (e.g. headless)."""
+    cb = getattr(view, "on_reinstall", None)
+    if cb is not None and names:
+        cb(list(names))
 
 
 def _missing_reqs(view, names):
