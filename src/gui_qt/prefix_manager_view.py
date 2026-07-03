@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame,
 )
 
-from gui_qt.theme_qt import active_palette, _c
+from gui_qt.theme_qt import active_palette, _c, danger_close_button
 from gui_qt.safe_emit import safe_emit
 from Utils.prefix_manager import (
     PrefixEntry, enumerate_prefixes, fmt_size, get_dir_size,
@@ -74,12 +74,7 @@ class PrefixManagerView(QWidget):
         self._total_lbl = QLabel("")
         self._total_lbl.setStyleSheet(self._dim_css)
         hb.addWidget(self._total_lbl)
-        close = QPushButton("✕ Close")
-        close.setCursor(Qt.PointingHandCursor)
-        close.setStyleSheet(
-            "QPushButton{background:#6b3333; color:#fff; border:none;"
-            " padding:5px 12px; border-radius:4px; font-weight:600;}"
-            "QPushButton:hover{background:#8c4444;}")
+        close = danger_close_button(pal=p)
         close.clicked.connect(lambda: self._on_close())
         hb.addWidget(close)
         v.addWidget(bar)

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QScrollArea,
 )
 
-from gui_qt.theme_qt import active_palette, _c
+from gui_qt.theme_qt import active_palette, _c, danger_close_button
 from Utils.wine_dll_config import (
     load_wine_dll_overrides, save_wine_dll_overrides,
 )
@@ -102,9 +102,7 @@ class DllOverridesView(QWidget):
         title = QLabel(f"Wine DLL Overrides — {gname}")
         title.setObjectName("DllTitle")
         hb.addWidget(title); hb.addStretch(1)
-        close = QPushButton("✕ Close")
-        close.setObjectName("DangerButton")
-        close.setCursor(Qt.PointingHandCursor)
+        close = danger_close_button()
         close.clicked.connect(self._close)
         hb.addWidget(close)
         root.addWidget(bar)

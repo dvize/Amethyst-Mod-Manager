@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QButtonGroup, QScrollArea, QSizePolicy, QSplitter,
 )
 
-from gui_qt.theme_qt import active_palette, _c
+from gui_qt.theme_qt import active_palette, _c, danger_close_button
 from gui_qt.icons import icon_rotated
 from gui_qt.image_preview import _load_qimage
 from PySide6.QtGui import QPixmap
@@ -145,12 +145,7 @@ class BundleOptionsView(QWidget):
         title.setStyleSheet(f"color:{_c(p,'TEXT_MAIN')}; font-weight:600;")
         hb.addWidget(title)
         hb.addStretch(1)
-        close = QPushButton("✕ Close")
-        close.setCursor(Qt.PointingHandCursor)
-        close.setStyleSheet(
-            "QPushButton{background:#6b3333; color:#fff; border:none;"
-            " padding:5px 12px; border-radius:4px; font-weight:600;}"
-            "QPushButton:hover{background:#8c4444;}")
+        close = danger_close_button(pal=p)
         close.clicked.connect(lambda: self._on_close())
         hb.addWidget(close)
         v.addWidget(bar)

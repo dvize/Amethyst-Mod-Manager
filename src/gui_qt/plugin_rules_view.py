@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget, QFrame, QScrollArea,
 )
 
-from gui_qt.theme_qt import active_palette, _c
+from gui_qt.theme_qt import active_palette, _c, danger_close_button
 from Utils.userlist import (
     parse_userlist, write_userlist, save_plugin_rules_merged,
 )
@@ -181,13 +181,7 @@ class PluginRulesView(QWidget):
         title = QLabel("LOOT Plugin Rules - Select a plugin on the plugins panel")
         title.setStyleSheet(f"color:{self._c_text}; font-weight:bold;")
         tb.addWidget(title, 1)
-        close_btn = QPushButton("✕ Close")
-        close_btn.setFixedSize(85, 30)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(
-            "QPushButton { background:#6b3333; color:white; border:none;"
-            " border-radius:4px; font-weight:bold; }"
-            "QPushButton:hover { background:#8c4444; }")
+        close_btn = danger_close_button(pal=p)
         close_btn.clicked.connect(self._do_close)
         tb.addWidget(close_btn)
         root.addWidget(toolbar)

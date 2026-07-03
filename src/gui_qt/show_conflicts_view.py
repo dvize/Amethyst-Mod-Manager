@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QSplitter, QTreeWidget, QTreeWidgetItem,
 )
 
-from gui_qt.theme_qt import active_palette, _c
+from gui_qt.theme_qt import active_palette, _c, danger_close_button
 from gui_qt.safe_emit import safe_emit
 from Utils.conflicts_view import BSA_ROW_RE
 
@@ -60,9 +60,7 @@ class ShowConflictsView(QWidget):
         title.setStyleSheet(f"color:{_c(p,'TEXT_MAIN')}; font-weight:600; font-size:15px;")
         hb.addWidget(title)
         hb.addStretch(1)
-        close = QPushButton("✕ Close")
-        close.setObjectName("FormButton")
-        close.setCursor(Qt.PointingHandCursor)
+        close = danger_close_button(pal=p)
         close.clicked.connect(lambda: self._on_close())
         hb.addWidget(close)
         v.addWidget(bar)

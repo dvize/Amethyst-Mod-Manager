@@ -570,6 +570,50 @@ def _resolve_base_style(p: dict):
     return QStyleFactory.create(pick) if pick else None
 
 
+def _lighten(hex_color: str, factor: float = 0.18) -> str:
+    """Return *hex_color* blended toward white by *factor* (0..1) — used for the
+    hover state of danger buttons so it lifts consistently regardless of theme."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return hex_color
+    r = int(r + (255 - r) * factor)
+    g = int(g + (255 - g) * factor)
+    b = int(b + (255 - b) * factor)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# One fixed size for every in-view close button (see danger_close_button).
+CLOSE_BTN_SIZE = (90, 30)
+
+
+def danger_close_button(text: str = "✕ Close", pal: dict | None = None):
+    """Shared red close button for tab/scoped views.
+
+    Every view that opens in a tab dismisses itself with an identical control:
+    the theme's ``BTN_DANGER`` red (adapts to dark/light/breeze), a lighter
+    hover, a single fixed size, rounded corners, and a pointing-hand cursor.
+    Callers just connect ``.clicked``. Keeping this in one place is why the old
+    per-view hardcoded ``#6b3333`` maroon buttons could all be replaced."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QPushButton
+    if pal is None:
+        pal = active_palette()
+    danger = _c(pal, "BTN_DANGER")
+    hover = _lighten(danger)
+    btn = QPushButton(text)
+    btn.setFixedSize(*CLOSE_BTN_SIZE)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setStyleSheet(
+        "QPushButton{background:%s; color:#fff; border:none;"
+        " border-radius:4px; font-weight:600;}"
+        "QPushButton:hover{background:%s;}" % (danger, hover))
+    return btn
+
+
 def apply_theme(app) -> None:
     """Apply the active theme: a base QStyle (Fusion, or the theme's declared
     BASE_QSTYLE / system Breeze when present) wrapped in a ProxyStyle (enlarged

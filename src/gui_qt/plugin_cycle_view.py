@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QFrame, QScrollArea,
 )
 
-from gui_qt.theme_qt import active_palette, _c
+from gui_qt.theme_qt import active_palette, _c, danger_close_button
 
 STATUS_BROKEN_BG = "#6b3333"
 STATUS_BROKEN_FG = "#ffd9d9"
@@ -147,13 +147,7 @@ class PluginCycleView(QWidget):
         self._title_label.setStyleSheet(
             f"color:{self._c_text}; font-weight:bold;")
         tb.addWidget(self._title_label, 1)
-        close_btn = QPushButton("✕ Close")
-        close_btn.setFixedSize(85, 30)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setStyleSheet(
-            "QPushButton { background:#6b3333; color:white; border:none;"
-            " border-radius:4px; font-weight:bold; }"
-            "QPushButton:hover { background:#8c4444; }")
+        close_btn = danger_close_button(pal=p)
         close_btn.clicked.connect(self._do_close)
         tb.addWidget(close_btn)
         root.addWidget(toolbar)
