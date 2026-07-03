@@ -181,6 +181,11 @@ class MainWindow(QMainWindow):
         # Deploy/restore state + notification host.
         self._deploy_running = False
         self._deploy_rerun_pending = False
+        # Auto-deploy guard: a deploy triggers _reload_modlist → conflict rebuild
+        # → _on_conflicts_ready; without this flag that would re-fire auto-deploy
+        # in an infinite loop (Tk parity: gui.py _auto_deploy_in_progress).
+        self._auto_deploy_in_progress = False
+        self._op_silent = False   # silent (auto) deploy: suppress progress popup
         self._post_deploy_action = None   # launch closure run after deploy succeeds
         self._deploy_done_hooks: list = []   # wizard on_done(ok) one-shots
         self._progress_popup = None
@@ -1121,7 +1126,9 @@ class MainWindow(QMainWindow):
         # Plain mod-action buttons.
         self._action_buttons = []
         _handlers = {"Install Mod": self._on_install_mod,
-                     "Deploy": self._on_deploy, "Restore": self._on_restore}
+                     # drop QPushButton.clicked's `bool checked` arg — it would
+                     # otherwise land in _on_deploy's `silent` parameter.
+                     "Deploy": lambda: self._on_deploy(), "Restore": self._on_restore}
         for label, disp, ico in [
             ("Install Mod", self.tr("Install Mod"), "install.png"),
             ("Deploy",      self.tr("Deploy"),      "deploy.png"),
@@ -4584,7 +4591,11 @@ class MainWindow(QMainWindow):
             if b is not None:
                 b.setEnabled(enabled)
 
-    def _on_deploy(self):
+    def _on_deploy(self, silent: bool = False):
+        """Deploy the current game/profile. *silent* (used by auto-deploy)
+        suppresses the progress popup + interim toast so rapid mod toggles
+        don't flash the UI; log lines + the final success/warning toasts still
+        surface (Tk parity: top_bar._run_deploy silent=)."""
         game = self._gs.game
         if game is None or not game.is_configured():
             self._notify(self.tr("No configured game selected."), "warning")
@@ -4595,13 +4606,19 @@ class MainWindow(QMainWindow):
         # Serialize: coalesce a request that arrives mid-deploy into one re-run.
         if self._deploy_running:
             self._deploy_rerun_pending = True
+            # This request is coalesced rather than deployed, so the rebuild the
+            # auto-deploy caller is waiting on to clear its guard won't happen —
+            # clear it now (Tk parity: top_bar._run_deploy coalesce branch).
+            self._auto_deploy_in_progress = False
             return
         self._deploy_running = True
+        self._op_silent = silent
         self._op_is_restore = False
         self._op_title = "Deploying"
         self._set_deploy_buttons_enabled(False)
-        self._ensure_feedback()
-        self._notify(self.tr("Deploying {0}…").format(game.name), "info")
+        if not silent:
+            self._ensure_feedback()
+            self._notify(self.tr("Deploying {0}…").format(game.name), "info")
         profile = self._gs.profile
         rf_enabled = True   # Root_Folder toggle lives in the modlist; default on
 
@@ -4750,15 +4767,28 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_op_progress(self, done: int, total: int, phase):
+        if getattr(self, "_op_silent", False):
+            return   # silent auto-deploy: no progress popup
         if self._progress_popup is not None:
             title = getattr(self, "_op_title", "Working")
             self._progress_popup.set_progress(done, total, phase, title=title)
 
     def _on_op_done(self, kind: str, success: bool, warnings):
         self._deploy_running = False
+        self._op_silent = False
         self._set_deploy_buttons_enabled(True)
         if self._progress_popup is not None:
             QTimer.singleShot(1200, self._progress_popup.clear)
+        # Any deploy (manual OR auto) is followed by a modlist reload → conflict
+        # rebuild → _on_conflicts_ready. With auto_deploy on, that rebuild would
+        # otherwise start a *fresh* auto-deploy every time (an endless loop, and
+        # an extra deploy even after a manual Deploy press). Arm the guard so the
+        # rebuild caused by THIS deploy's reload is swallowed. (Tk parity: the
+        # gui.py entry path + top_bar._on_deploy_finished both set this flag.)
+        game = self._gs.game
+        if (kind == "deploy" and game is not None and game.is_configured()
+                and getattr(game, "auto_deploy", False)):
+            self._auto_deploy_in_progress = True
         # Refresh the modlist/conflicts + deployed-profile highlight after the op.
         self._reload_modlist()
         self._update_deployed_profile_highlight()
@@ -7374,6 +7404,21 @@ class MainWindow(QMainWindow):
         # gui.py _on_filemap_rebuilt calls _refresh_plugins_tab() here, AFTER the
         # rebuild — reloading earlier (on the toggle) races the stale filemap.
         self._reload_plugins()
+        # Auto deploy: if the game has auto_deploy enabled, deploy after every
+        # successful conflict/filemap rebuild (enable/disable/reorder/install) —
+        # but NOT when the rebuild was itself triggered by that auto-deploy
+        # (deploy → _reload_modlist → rebuild → here again), or we'd loop.
+        # Tk parity: gui.py _on_filemap_rebuilt.
+        if self._auto_deploy_in_progress:
+            self._auto_deploy_in_progress = False
+        else:
+            game = self._gs.game
+            if (game is not None and game.is_configured()
+                    and getattr(game, "auto_deploy", False)
+                    and hasattr(game, "deploy")
+                    and not self._deploy_running):
+                self._auto_deploy_in_progress = True
+                self._on_deploy(silent=True)
 
     # ----------------------------------------------------------------- right
     def _build_plugins(self) -> QWidget:
