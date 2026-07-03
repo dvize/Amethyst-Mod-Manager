@@ -64,9 +64,7 @@ class CollectionsBrowserView(QWidget):
         self._thumbs.loaded.connect(self._on_thumb)
         self._results_ready.connect(self._on_results)
 
-        self._open_current_url = None
         self._build()
-        self.refresh_open_current()
         self._reload()
 
     # -- construction -------------------------------------------------------
@@ -87,15 +85,6 @@ class CollectionsBrowserView(QWidget):
         title.setStyleSheet(f"color:{_c(p,'TEXT_MAIN')}; font-weight:600;")
         tb.addWidget(title)
         tb.addStretch(1)
-
-        # Shown only when the active profile is a collection (see refresh_open_current).
-        self._open_current_btn = QToolButton()
-        self._open_current_btn.setText("Open Current")
-        self._open_current_btn.setObjectName("ActionButton")
-        self._open_current_btn.setCursor(Qt.PointingHandCursor)
-        self._open_current_btn.clicked.connect(self._open_current)
-        self._open_current_btn.setVisible(False)
-        tb.addWidget(self._open_current_btn)
 
         open_btn = QToolButton()
         open_btn.setText("Open on Nexus")
@@ -232,7 +221,6 @@ class CollectionsBrowserView(QWidget):
             self._search.blockSignals(False)
         except Exception:
             pass
-        self.refresh_open_current()
         self._reload()
 
     def _reload(self):
@@ -359,33 +347,6 @@ class CollectionsBrowserView(QWidget):
         from Utils.xdg import open_url
         open_url(f"https://www.nexusmods.com/games/{self._domain}/collections",
                  log_fn=self._log)
-
-    # -- "Open Current" (installed collection) ------------------------------
-    def refresh_open_current(self):
-        """Show 'Open Current' only when the active profile is a collection.
-        Call this on profile change (the app does)."""
-        url = None
-        try:
-            from Utils.game_helpers import get_collection_url_from_profile
-            pdir = getattr(self._game, "_active_profile_dir", None)
-            if pdir is not None:
-                url = get_collection_url_from_profile(pdir)
-        except Exception:
-            url = None
-        self._open_current_url = url or None
-        self._open_current_btn.setVisible(bool(self._open_current_url))
-
-    def _open_current(self):
-        if not self._open_current_url or self._on_open_detail is None:
-            return
-        from Utils.collection_manifest import parse_collection_url
-        from Nexus.nexus_api import NexusCollection
-        slug, url_domain, rev = parse_collection_url(self._open_current_url)
-        if not slug:
-            return
-        col = NexusCollection(slug=slug, name=slug,
-                              game_domain=url_domain or self._domain)
-        self._on_open_detail(col, revision_number=rev)
 
     def _show_card_menu(self, entry, global_pos):
         menu = QMenu(self)

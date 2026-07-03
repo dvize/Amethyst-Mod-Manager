@@ -1176,6 +1176,7 @@ class MainWindow(QMainWindow):
                 ]),
                 ("Collections", [
                     ("Browse collections…", self._open_collections_tab),
+                    ("Open current collection", self._open_current_collection),
                     ("Reset load order", self._reset_collection_load_order),
                 ]),
             ]),
@@ -1320,10 +1321,6 @@ class MainWindow(QMainWindow):
             v = getattr(self, "_profile_settings_view", None)
             if v is not None:
                 v.set_current_profile(name)
-        # The collections browser's "Open Current" depends on the active profile.
-        cv = getattr(self, "_collections_view", None)
-        if cv is not None:
-            cv.refresh_open_current()
 
     def _on_game_action(self, which):
         if which == "add":
@@ -1730,9 +1727,6 @@ class MainWindow(QMainWindow):
         the install/detail flow is a separate feature). Same guards as the mods
         browser: a configured game with a Nexus domain + OAuth tokens."""
         if self._tabs.has_key("collections"):
-            cv = getattr(self, "_collections_view", None)
-            if cv is not None:
-                cv.refresh_open_current()
             self._tabs.focus_key("collections")
             return
         game = self._gs.game
@@ -1757,6 +1751,31 @@ class MainWindow(QMainWindow):
         view.destroyed.connect(
             lambda *_: setattr(self, "_collections_view", None))
         self._tabs.open_tab(view, "Collections", key="collections")
+
+    def _open_current_collection(self):
+        """Open the detail tab for the collection installed in the active profile.
+        No-op (with a toast) unless the active profile is a collection profile."""
+        game = self._gs.game
+        if game is None or not game.is_configured():
+            self._notify("No configured game selected.", "warning")
+            return
+        pdir = self._gs.profile_dir()
+        from Utils.game_helpers import get_collection_url_from_profile
+        url = get_collection_url_from_profile(pdir) if pdir is not None else None
+        if not url:
+            self._notify("The active profile isn't a collection profile.",
+                         "warning")
+            return
+        from Utils.collection_manifest import parse_collection_url
+        from Nexus.nexus_api import NexusCollection
+        slug, url_domain, rev = parse_collection_url(url)
+        if not slug:
+            self._notify("Couldn't read the collection from this profile.",
+                         "warning")
+            return
+        domain = url_domain or getattr(game, "nexus_game_domain", "") or ""
+        col = NexusCollection(slug=slug, name=slug, game_domain=domain)
+        self._open_collection_detail_tab(col, revision_number=rev)
 
     def _open_collection_detail_tab(self, collection, revision_number=None):
         """Open a collection's detail panel as a NEW detachable tab (the
@@ -2615,9 +2634,6 @@ class MainWindow(QMainWindow):
             self._update_deployed_profile_highlight()
         except Exception:
             pass
-        cv = getattr(self, "_collections_view", None)
-        if cv is not None:
-            cv.refresh_open_current()
 
     # ---- Collections ▸ Reset load order ----------------------------------
     def _reset_collection_load_order(self):
