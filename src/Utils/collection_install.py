@@ -422,6 +422,11 @@ def run_collection_install(
     already_installed_by_ids: dict[tuple[int, int], str] = {}
     already_installed_by_fid: dict[int, str] = {}
     staging_lower_map: dict[str, str] = {}
+    # folder name (lower) -> file_id recorded in its meta.ini (0 if none). Used to
+    # guard name-fallback removal of unticked optionals: a folder that carries a
+    # DIFFERENT mod's file_id must never be removed just because its name matches
+    # the cleaned-up title of a skipped optional (e.g. "X - AE" cleans to "X").
+    staging_folder_fid: dict[str, int] = {}
 
     _profile_mod_names: set[str] = set()
     if modlist_path.is_file():
@@ -451,6 +456,7 @@ def run_collection_install(
                         continue
                     _fid = int(fid_str)
                     _mid = int(mid_str) if mid_str.isdigit() else 0
+                    staging_folder_fid[mod_dir.name.lower()] = _fid
                     if _mid > 0:
                         already_installed_by_ids[(_mid, _fid)] = mod_dir.name
                     else:
@@ -486,13 +492,28 @@ def run_collection_install(
         for mod in skipped_mods:
             if not mod.file_id or mod.file_id not in skipped_fids:
                 continue
+            # Exact (mod_id, file_id) / file_id match is always safe.
             folder_name = _match_existing(mod)
             if not folder_name:
+                # Name fallback: only for legacy installs with no id match. A
+                # cleaned title ("HSMarkarth - The Warrens - AE" → "HSMarkarth -
+                # The Warrens") can collide with a DIFFERENT mod's folder, so
+                # never remove a folder that carries another mod's file_id —
+                # removing an optional must never take out another mod.
                 for candidate in _name_candidates(mod):
                     key = candidate.lower()
-                    if key in staging_lower_map:
-                        folder_name = staging_lower_map[key]
-                        break
+                    if key not in staging_lower_map:
+                        continue
+                    cand_folder = staging_lower_map[key]
+                    _cand_fid = staging_folder_fid.get(cand_folder.lower(), 0)
+                    if _cand_fid and _cand_fid != mod.file_id:
+                        log(f"Collection install: NOT removing '{cand_folder}' as "
+                            f"the unticked optional '{mod.mod_name}' "
+                            f"(file_id={mod.file_id}) — folder belongs to "
+                            f"file_id={_cand_fid}")
+                        continue
+                    folder_name = cand_folder
+                    break
             if folder_name:
                 skip_dir = staging_path / folder_name
                 if skip_dir.is_dir():
@@ -1249,6 +1270,24 @@ def run_collection_install(
         except Exception as exc:
             log(f"Collection install: Step 3b failed: {exc}")
 
+    # Step 3c: build filemap.txt BEFORE the LOOT sort in Step 4.
+    #   LOOT resolves each plugin to the copy of its *winning* enabled mod via
+    #   filemap.txt (LOOT/loot_sorter._read_filemap_winners) so it reads the
+    #   correct header (masters/ESL flags) — the same file that would deploy.
+    #   Without a fresh filemap it falls back to an arbitrary staging tree walk
+    #   and can sort against the wrong copy, producing an order that differs
+    #   from a post-deploy manual sort. The profile's active dir is already
+    #   pointed at profile_dir (set at Step 0), so this builds for the right
+    #   staging/modlist. New-profile/continue/update runs only (LOOT is gated
+    #   on overwrite_existing is None in _write_collection_plugins).
+    if (not _col_pause.is_set() and overwrite_existing is None
+            and getattr(game, "loot_sort_enabled", False) and _loot_available()):
+        try:
+            from Utils.deploy_pipeline import _build_filemap_for_game
+            _build_filemap_for_game(game, profile_dir.name, log_fn=log)
+        except Exception as exc:
+            log(f"Collection install: filemap rebuild before LOOT failed: {exc}")
+
     # Step 4: write plugins.txt / loadorder.txt from collection.json
     if not _col_pause.is_set():
         _write_collection_plugins(
@@ -1530,6 +1569,16 @@ def _write_collection_plugins(game, profile_dir, plugins_path, collection_schema
             vanilla_map = _vanilla_plugins_for_game(game)
             plugins_include_vanilla = getattr(game, "plugins_include_vanilla", False)
             vanilla_lower = set() if plugins_include_vanilla else set(vanilla_map.keys())
+            # Recover plugins staged by the collection's mods but absent from the
+            # manifest's ``plugins`` array (FOMOD-conditional / unlisted plugins).
+            # These are read from the filemap built in Step 3c so the LOOT sort
+            # covers the SAME set as a later manual sort — otherwise they're
+            # dropped and the manual sort re-inserts them (the "400+ moved" bug).
+            for low, orig in _filemap_deployed_plugins(game, profile_dir).items():
+                if low in author_lower or low in vanilla_map:
+                    continue
+                author_entries.append(PluginEntry(name=orig, enabled=True))
+                author_lower.add(low)
             _apply_collection_groups(profile_dir, collection_schema, log)
             final_entries: list[PluginEntry] = []
             loot_enabled = getattr(game, "loot_sort_enabled", False)
@@ -1595,6 +1644,43 @@ def _loot_available() -> bool:
         return bool(is_available())
     except Exception:
         return False
+
+
+def _filemap_deployed_plugins(game, profile_dir) -> "dict[str, str]":
+    """Top-level plugin names the freshly-built filemap.txt deploys, keyed
+    {lower: original_name}. Port of gui_qt.plugin_state._filemap_deployed_plugins
+    (kept here so the neutral install layer doesn't import the Qt module).
+
+    A collection's manifest ``plugins`` array doesn't always list every plugin
+    that its mods actually ship (FOMOD-conditional plugins, plugins bundled in a
+    mod but omitted from the author's list). Those show up in the panel/manual
+    sort via this same filemap recovery, so the install-time LOOT sort must feed
+    them in too — otherwise they're dropped from plugins.txt and a later manual
+    sort re-inserts them, reporting hundreds of "moved" plugins.
+    """
+    staging = (game.get_effective_mod_staging_path()
+               if hasattr(game, "get_effective_mod_staging_path") else None)
+    if staging is None:
+        return {}
+    fm = staging.parent / "filemap.txt"
+    if not fm.is_file():
+        return {}
+    exts = tuple(e.lower() for e in (getattr(game, "plugin_extensions", []) or [])) \
+        or (".esp", ".esm", ".esl")
+    found: "dict[str, str]" = {}
+    try:
+        for line in fm.read_text(encoding="utf-8").splitlines():
+            if "\t" not in line:
+                continue
+            rel_path = line.split("\t", 1)[0].replace("\\", "/")
+            if "/" in rel_path:
+                continue   # top-level plugins only (matches deploy layout)
+            low = rel_path.lower()
+            if low.endswith(exts):
+                found.setdefault(low, rel_path)
+    except OSError:
+        pass
+    return found
 
 
 # ---------------------------------------------------------------------------

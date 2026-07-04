@@ -2106,6 +2106,10 @@ class MainWindow(QMainWindow):
         local_manifest = getattr(detail_view, "_local_manifest", None)
         bundle_zip = getattr(detail_view, "_bundle_zip_path", "") or ""
         mods = detail_view.install_mods(skipped)
+        # Unticked optionals, taken from the FULL mod list (mods above already
+        # excludes them) — the orchestrator removes these from an existing
+        # profile on continue/append/update.
+        skipped_mods = detail_view.skipped_optional_mods(skipped)
         if not mods:
             self._notify(self.tr("This collection has no installable mods."), "info")
             return
@@ -2137,7 +2141,9 @@ class MainWindow(QMainWindow):
                              "slug": slug, "dl_path": dl_path,
                              "revision": revision_number, "mods": mods,
                              "total_size": total_size,
-                             "skipped": set(skipped), "game": game, "api": api,
+                             "skipped": set(skipped),
+                             "skipped_mods": skipped_mods,
+                             "game": game, "api": api,
                              "recommend_new": recommend_new, "intent": intent,
                              "local_manifest": local_manifest,
                              "bundle_zip": bundle_zip})
@@ -2397,8 +2403,9 @@ class MainWindow(QMainWindow):
         mode_result = info.get("mode_result") or ("new", None, False, False)
         mode, append_profile_name, ov_existing, skip_existing = mode_result
         # Mods whose optional was unticked — the orchestrator removes these from
-        # an existing profile (append/continue).
-        skipped_mods = [m for m in mods if getattr(m, "file_id", None) in skipped]
+        # an existing profile (append/continue). NB: must come from the full
+        # detail-view list; *mods* already excludes them.
+        skipped_mods = list(info.get("skipped_mods") or [])
 
         from Utils.game_helpers import (
             _create_profile, _profiles_for_game, save_collection_url_to_profile)
@@ -2536,8 +2543,8 @@ class MainWindow(QMainWindow):
         try:
             if revision_number is not None:
                 write_collection_revision(profile_dir, revision_number)
-            if skipped:
-                write_collection_optional_skipped(profile_dir, skipped)
+            # Always write — an empty set clears a previously saved selection.
+            write_collection_optional_skipped(profile_dir, set(skipped or ()))
         except Exception:
             pass
 
@@ -2809,6 +2816,10 @@ class MainWindow(QMainWindow):
             if ov is not None:
                 ov.dismiss()
                 self._col_install_overlay = None
+            # cleanup_cancelled_install left game._active_profile_dir = None;
+            # re-assert now because the switch below early-returns when the
+            # target profile is already the active one.
+            self._gs.reassert_active_profile()
             # Switch back to the default profile + reload.
             try:
                 profs = self._gs.profiles()
@@ -2999,7 +3010,8 @@ class MainWindow(QMainWindow):
                 else:
                     res = reset_collection_load_order(
                         pdir, manifest,
-                        log_fn=lambda m: self._op_log.emit(str(m)))
+                        log_fn=lambda m: self._op_log.emit(str(m)),
+                        game=game)
             except Exception as exc:
                 self._op_log.emit(f"Reset load order failed: {exc}")
                 res = {"error": str(exc)}
@@ -6632,6 +6644,7 @@ class MainWindow(QMainWindow):
         """Refresh: re-sync the mods folder, reload the modlist + plugins, and
         force a full index rescan (picks up files added/removed inside mods)."""
         from Utils.modlist import sync_modlist_with_mods_folder
+        self._reassert_profile_paths()
         ml = self._gs.modlist_path()
         staging = self._gs.staging_dir()
         if ml is not None and staging is not None:
@@ -6881,12 +6894,30 @@ class MainWindow(QMainWindow):
         m = {1: CONFLICT_WINS, -1: CONFLICT_LOSES, 2: CONFLICT_PARTIAL}
         return {n: m[c] for n, c in (cd.bsa_codes or {}).items() if c in m}
 
+    def _reassert_profile_paths(self):
+        """Force game._active_profile_dir back in sync with GameState before
+        resolving profile-derived paths (modlist/plugins/staging). Background
+        workers (deploy pipeline, collection install/cancel-cleanup) swap the
+        game object's active dir and can leave it stale or None — after which
+        get_effective_mod_staging_path() silently falls back to the SHARED
+        mods folder for profile-specific-mods profiles, and reload/sync/prune
+        paths read (and destructively write) against the wrong profile.
+        Skipped while a worker that legitimately owns that state is running —
+        it re-establishes the right dir itself when it finishes. (getattr:
+        the first _reload_modlist runs before the collection state is set.)"""
+        if (getattr(self, "_deploy_running", False)
+                or getattr(self, "_col_install_running", False)):
+            return
+        self._gs.reassert_active_profile()
+
     def _reload_modlist(self, rescan_index: bool = False):
         """Load the active game/profile's modlist + metadata into the model.
         rescan_index=True forces the conflict rebuild to rescan the index from
         disk (Refresh button)."""
         from Utils.modlist import read_modlist
         from gui_qt.modlist_data import read_meta_for_entries
+
+        self._reassert_profile_paths()
 
         ml_path = self._gs.modlist_path()
         staging = self._gs.staging_dir()
@@ -7218,6 +7249,7 @@ class MainWindow(QMainWindow):
         UI applies the rows. A generation counter drops results from a
         superseded reload (game/profile switched mid-read)."""
         import threading
+        self._reassert_profile_paths()
         self._plugins_gen += 1
         gen = self._plugins_gen
         game, profile = self._gs.game, self._gs.profile
@@ -7684,6 +7716,7 @@ class MainWindow(QMainWindow):
         superseded reload (user switched game before the build finished).
         rescan_index=True forces a full disk rescan (Refresh button)."""
         import threading
+        self._reassert_profile_paths()
         gen = getattr(self, "_conflict_gen", 0) + 1
         self._conflict_gen = gen
         # Serialize the actual build: rapid triggers (e.g. a Mod Files edit while

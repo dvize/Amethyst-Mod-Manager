@@ -100,7 +100,7 @@ class CollectionDetailView(QWidget):
     *log_fn*, *on_install(chosen_fids, skipped_fids)* (install is stubbed)."""
 
     _detail_ready = Signal(object)      # (name, size, count, mods, dl_path, revisions) | None
-    _manifest_ready = Signal(object)    # list[(name, url)]
+    _manifest_ready = Signal(object)    # (offsite list[(name, url)], manifest dict|None)
     title_resolved = Signal(str)        # real collection name once the detail loads
 
     def __init__(self, api, collection, game, log_fn=None, on_install=None,
@@ -183,7 +183,8 @@ class CollectionDetailView(QWidget):
             self.tr("Total size: {0}  |  {1} mods").format(fmt_size(total_size), len(mods)))
         self._fill_table()
         self._fill_optional()
-        self._on_manifest_ready(offsite)
+        # Optional flags already came straight from the manifest — no override.
+        self._on_manifest_ready((offsite, None))
 
     # -- construction -------------------------------------------------------
     def _build(self):
@@ -614,6 +615,11 @@ class CollectionDetailView(QWidget):
         self._table.setItem(row, col, QTableWidgetItem(text))
 
     def _fill_optional(self):
+        # In-session choices: keep the user's unticks when the checklist is
+        # rebuilt (revision switch, manifest-override refresh).
+        prior_fids = {fid for _cb, fid in self._opt_boxes if fid}
+        prior_unticked = {fid for cb, fid in self._opt_boxes
+                          if fid and not cb.isChecked()}
         # Clear the placeholder + any prior boxes.
         while self._opt_layout.count() > 1:      # keep the trailing stretch
             it = self._opt_layout.takeAt(0)
@@ -631,12 +637,30 @@ class CollectionDetailView(QWidget):
             lbl.setStyleSheet(f"color:{_c(active_palette(),'TEXT_DIM')};")
             self._opt_layout.insertWidget(0, lbl)
             return
+        # Selections saved by the last install of this collection (Tk parity:
+        # pre_skipped_fids) — only consulted for boxes not shown this session.
+        saved_skipped = self._saved_skipped_fids()
         for i, m in enumerate(optionals):
             cb = QCheckBox(m.mod_name or f"Mod {m.mod_id}")
-            cb.setChecked(True)                  # checked by default (Tk parity)
+            if m.file_id in prior_fids:
+                cb.setChecked(m.file_id not in prior_unticked)
+            else:
+                cb.setChecked(m.file_id not in saved_skipped)
             cb.setToolTip(m.mod_name or "")
             self._opt_layout.insertWidget(i, cb)
             self._opt_boxes.append((cb, m.file_id))
+
+    def _saved_skipped_fids(self) -> "set[int]":
+        """Optional mods unticked on the LAST install of this collection, read
+        from the profile that holds it. Empty set when none is saved."""
+        _pname, pdir = self._collection_profile()
+        if pdir is None or not pdir.is_dir():
+            return set()
+        try:
+            from Utils.profile_state import read_collection_optional_skipped
+            return read_collection_optional_skipped(pdir)
+        except Exception:
+            return set()
 
     def _set_all_optional(self, checked: bool):
         for cb, _fid in self._opt_boxes:
@@ -663,6 +687,7 @@ class CollectionDetailView(QWidget):
 
         def worker():
             offsite = []
+            manifest = {}
             try:
                 from Utils.collection_manifest import (
                     load_collection_manifest, extract_offsite_mods)
@@ -680,12 +705,49 @@ class CollectionDetailView(QWidget):
                     pass
             except Exception as exc:
                 self._log(f"Collection manifest error: {exc}")
-            safe_emit(self._manifest_ready, offsite)
+            safe_emit(self._manifest_ready, (offsite, manifest))
 
         threading.Thread(target=worker, daemon=True,
                          name="collection-manifest").start()
 
-    def _on_manifest_ready(self, offsite):
+    def _apply_manifest_overrides(self, manifest) -> bool:
+        """Override the optional flag (and, for mods sharing a mod page, the
+        display name) on each mod using collection.json as the authoritative
+        source — the GraphQL mod list sometimes marks non-optional mods as
+        optional and always uses the MAIN mod's name for both the main mod and
+        its optional patch when both come from the same page (Tk parity).
+        Returns True if anything changed."""
+        info: "dict[int, tuple[bool, str]]" = {}   # file_id → (optional, name)
+        for cm in (manifest or {}).get("mods", []):
+            src = cm.get("source") or {}
+            fid = src.get("fileId")
+            if fid is not None:
+                info[int(fid)] = (bool(cm.get("optional", False)),
+                                  cm.get("name") or "")
+        if not info:
+            return False
+        mod_id_counts: "dict[int, int]" = {}
+        for m in self._mods:
+            if m.mod_id:
+                mod_id_counts[m.mod_id] = mod_id_counts.get(m.mod_id, 0) + 1
+        changed = False
+        for m in self._mods:
+            if m.file_id and m.file_id in info:
+                opt, cj_name = info[m.file_id]
+                if bool(getattr(m, "optional", False)) != opt:
+                    m.optional = opt
+                    changed = True
+                if cj_name and mod_id_counts.get(m.mod_id, 1) > 1 \
+                        and m.mod_name != cj_name:
+                    m.mod_name = cj_name
+                    changed = True
+        return changed
+
+    def _on_manifest_ready(self, payload):
+        offsite, manifest = payload
+        if manifest and self._apply_manifest_overrides(manifest):
+            self._fill_table()
+            self._fill_optional()
         if not offsite:
             self._offsite_wrap.setVisible(False)
             return
@@ -741,6 +803,12 @@ class CollectionDetailView(QWidget):
         the unticked optionals."""
         return [m for m in self._mods
                 if not (getattr(m, "optional", False) and m.file_id in skipped_fids)]
+
+    def skipped_optional_mods(self, skipped_fids):
+        """The full mod objects for the unticked optionals — the orchestrator
+        removes these from an existing profile on continue/append/update."""
+        return [m for m in self._mods
+                if getattr(m, "optional", False) and m.file_id in skipped_fids]
 
     @property
     def download_link_path(self):

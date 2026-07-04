@@ -18,6 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from Utils.app_log import app_log
+from Utils.atomic_write import write_atomic_text
+
 _SEPARATOR_SUFFIX = "_separator"
 
 
@@ -98,9 +101,9 @@ def read_modlist(modlist_path: Path) -> list[ModEntry]:
 def write_modlist(modlist_path: Path, entries: list[ModEntry]) -> None:
     """
     Write entries back to modlist.txt.
-    Creates parent directories if needed.
+    Creates parent directories if needed. Atomic (write-temp → rename) so a
+    concurrent reader never observes a truncated/partial modlist.
     """
-    modlist_path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     for e in entries:
         if e.is_separator:
@@ -112,8 +115,8 @@ def write_modlist(modlist_path: Path, entries: list[ModEntry]) -> None:
         else:
             prefix = "-"
         lines.append(f"{prefix}{e.name}")
-    modlist_path.write_text("\n".join(lines) + ("\n" if lines else ""),
-                            encoding="utf-8")
+    write_atomic_text(modlist_path,
+                      "\n".join(lines) + ("\n" if lines else ""))
 
 
 def prepend_mod(modlist_path: Path, mod_name: str, enabled: bool = True) -> None:
@@ -189,6 +192,7 @@ def sync_modlist_with_mods_folder(modlist_path: Path, mods_dir: Path) -> None:
     # Parse existing modlist lines, dropping entries whose folder is gone.
     existing_lines: list[str] = []
     existing_names: set[str] = set()
+    dropped: list[str] = []
     if modlist_path.exists():
         for line in modlist_path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
@@ -200,12 +204,35 @@ def sync_modlist_with_mods_folder(modlist_path: Path, mods_dir: Path) -> None:
                 if name.endswith("_separator") or name in on_disk:
                     existing_lines.append(stripped)
                     existing_names.add(name)
+                else:
+                    dropped.append(name)
             else:
                 existing_lines.append(stripped)
+
+    # Safety: dropping an entry also loses its enabled bit — unrecoverable. A
+    # few missing folders is a real manual delete; MOST of the modlist missing
+    # from mods_dir means mods_dir itself resolved to the wrong folder (e.g.
+    # the shared mods/ while a profile-specific-mods profile is active,
+    # because a background worker left game._active_profile_dir stale). Never
+    # rewrite the modlist from a view of the wrong staging folder.
+    existing_mod_count = len(dropped) + sum(
+        1 for l in existing_lines
+        if l[0] in ("+", "-", "*") and not l[1:].endswith("_separator"))
+    if len(dropped) >= 5 and len(dropped) * 2 >= existing_mod_count:
+        app_log(f"Modlist sync ABORTED: {len(dropped)} of {existing_mod_count} "
+                f"mod entr(y/ies) have no folder under '{mods_dir}' — staging "
+                f"path desync suspected; modlist.txt left untouched.")
+        return
 
     new_mods = sorted(on_disk - existing_names)
     new_lines = [f"-{name}" for name in new_mods]
 
+    if new_mods or dropped:
+        app_log(f"Modlist sync: +{len(new_mods)} added (disabled), "
+                f"-{len(dropped)} removed"
+                + (f" ({', '.join(dropped[:5])}…)" if len(dropped) > 5
+                   else (f" ({', '.join(dropped)})" if dropped else "")))
+
     all_lines = new_lines + existing_lines
-    modlist_path.write_text(
-        "\n".join(all_lines) + ("\n" if all_lines else ""), encoding="utf-8")
+    write_atomic_text(modlist_path,
+                      "\n".join(all_lines) + ("\n" if all_lines else ""))

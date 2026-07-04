@@ -16,9 +16,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from Utils.app_log import app_log
 from Utils.plugins import (
     read_plugins, read_loadorder, write_plugins, write_loadorder, PluginEntry,
 )
+
+# Most plugins the phantom-prune may remove from plugins.txt/loadorder.txt in
+# one pass. Pruning exists to clean up after a REMOVED mod (a handful of
+# plugins); anything bigger is treated as a broken resolution, not real data.
+_PRUNE_MAX = 10
 
 # Flag bits for the plugin Flags column (drawn left→right in this order).
 PF_MISSING = 1 << 0    # missing masters (red warning)
@@ -286,6 +292,16 @@ def load_plugins(game, profile: str) -> list[PluginRow]:
     filemap_ok = (staging is not None
                   and (staging.parent / "filemap.txt").is_file()
                   and bool(resolved))
+    # SAFETY 2: never prune while the game object points at a DIFFERENT
+    # profile than the one being loaded. Background workers (deploy pipeline,
+    # collection install/cleanup) swap game._active_profile_dir and can leave
+    # it stale/None; every path above then resolved against the WRONG
+    # staging/filemap and an unresolved plugin means nothing. (2026-07-04
+    # incident: a stale active dir made this prune wipe all 461 collection
+    # plugins from plugins.txt + loadorder.txt.)
+    active = getattr(game, "_active_profile_dir", None)
+    if active is None or Path(active).resolve() != p.parent.resolve():
+        filemap_ok = False
     if filemap_ok:
         kept: list[PluginEntry] = []
         pruned: list[str] = []
@@ -298,7 +314,17 @@ def load_plugins(game, profile: str) -> list[PluginRow]:
                 kept.append(e)
             else:
                 pruned.append(e.name)
-        if pruned:
+        # SAFETY 3: a genuine stale entry is one removed mod's worth of
+        # plugins. A mass miss means the resolution itself is wrong (desync
+        # not caught above, or filemap.txt read mid-rewrite) — keep the
+        # entries and let a later healthy reload prune them one by one.
+        if pruned and len(pruned) > _PRUNE_MAX:
+            app_log(f"Plugins: NOT pruning {len(pruned)} unresolved plugin(s) "
+                    f"(> {_PRUNE_MAX}) — wrong-staging/partial-filemap "
+                    f"resolution suspected; plugins.txt left untouched.")
+        elif pruned:
+            app_log(f"Plugins: pruned {len(pruned)} stale entr(y/ies) with no "
+                    f"on-disk file: {', '.join(pruned)}")
             _prune_phantom_plugins(p, star, set(n.lower() for n in pruned))
             ordered = kept
 

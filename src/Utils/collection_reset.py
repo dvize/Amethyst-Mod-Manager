@@ -426,7 +426,7 @@ def _apply_collection_groups(profile_dir: Path, collection_schema: dict, log_fn)
 # ---------------------------------------------------------------------------
 
 def reset_collection_load_order(profile_dir: Path, manifest: dict,
-                                log_fn=None) -> dict:
+                                log_fn=None, game=None) -> dict:
     """Re-apply *manifest*'s intended order to the profile's modlist.txt +
     plugins.txt + loadorder.txt + userlist.yaml.
 
@@ -434,6 +434,11 @@ def reset_collection_load_order(profile_dir: Path, manifest: dict,
     ``{"error": <reason>}``). Unmatched mods (bundled carry-overs / user-added
     patches) go at the TOP (= highest priority in this manager). Vanilla plugins
     already in loadorder.txt are preserved above the collection's plugins.
+
+    When *game* is provided the plugin write reuses the install path's
+    ``_write_collection_plugins`` (build filemap → recover staged-but-unlisted
+    plugins → LOOT sort) so the reset matches a subsequent manual sort instead of
+    dropping unlisted plugins and writing the raw manifest order.
     """
     log = log_fn or (lambda _m: None)
     if not manifest:
@@ -494,9 +499,34 @@ def reset_collection_load_order(profile_dir: Path, manifest: dict,
         except Exception as exc:
             log(f"Reset load order: failed to write modlist.txt: {exc}")
 
-    # Re-write plugins.txt and loadorder.txt from the manifest.
+    # Re-write plugins.txt and loadorder.txt.
     schema_plugins: list = manifest.get("plugins", [])
-    if schema_plugins:
+    if schema_plugins and game is not None:
+        # Reuse the install path: build the filemap for the just-written modlist
+        # so LOOT (and staged-plugin recovery) see the true conflict winners,
+        # then LOOT-sort exactly as a fresh install / manual sort would. This
+        # keeps the reset from dropping unlisted plugins or writing the raw
+        # (unsorted) manifest order — see project_qt_collection_loot_sort.
+        try:
+            from Utils.collection_install import (
+                _write_collection_plugins, _loot_available)
+            if getattr(game, "loot_sort_enabled", False) and _loot_available():
+                try:
+                    from Utils.deploy_pipeline import _build_filemap_for_game
+                    _build_filemap_for_game(game, profile_dir.name, log_fn=log)
+                except Exception as exc:
+                    log(f"Reset load order: filemap rebuild before LOOT failed: {exc}")
+            _write_collection_plugins(
+                game, profile_dir, profile_dir / "plugins.txt", manifest,
+                overwrite_existing=None, _is_append_run=False,
+                log=log, _set_status=lambda _m: None)
+            from Utils.plugins import invalidate_plugins_cache
+            invalidate_plugins_cache(profile_dir / "plugins.txt")
+            invalidate_plugins_cache(profile_dir / "loadorder.txt")
+        except Exception as exc:
+            log(f"Reset load order: failed to write plugins.txt: {exc}")
+    elif schema_plugins:
+        # Fallback (no game handle): raw manifest write + group rules only.
         try:
             lines = []
             loadorder_lines = []
@@ -528,6 +558,9 @@ def reset_collection_load_order(profile_dir: Path, manifest: dict,
             log(f"Reset load order: failed to write plugins.txt: {exc}")
 
     # Re-apply LOOT groups and plugin-group assignments from the manifest.
-    _apply_collection_groups(profile_dir, manifest, log)
+    # (When game is set, _write_collection_plugins already applied them; the
+    # reset fallback path and the modlist-only case still need this.)
+    if game is None or not schema_plugins:
+        _apply_collection_groups(profile_dir, manifest, log)
 
     return {"ordered": len(ordered), "unordered": len(unordered)}

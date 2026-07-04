@@ -22,9 +22,12 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional
+
+from Utils.extract_budget import get_uncompressed_size
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int, Optional[str]], None]
@@ -448,22 +451,32 @@ def stage_file_list(game, extract_dir: str, *, is_root_install: bool = False,
 
 
 # ---------------------------------------------------------------- temp location
-def _uncompressed_size(path: str) -> int:
-    """Best-effort uncompressed size in bytes. ZIP reads central-directory sizes;
-    otherwise a 15× compressed-size estimate (handles texture packs)."""
-    try:
-        compressed = os.path.getsize(path)
-    except OSError:
-        compressed = 0
-    if path.lower().endswith(".zip"):
-        try:
-            with zipfile.ZipFile(path, "r") as zf:
-                total = sum(m.file_size for m in zf.infolist())
-            if total > 0:
-                return total
-        except Exception:
-            pass
-    return compressed * 15
+# Guards /tmp space accounting so parallel extractions (collection installs run
+# several workers at once) don't all claim the same free space before any of
+# them has started writing — Tk parity (gui/install_mod.py _tmp_space_reserved).
+_tmp_space_lock = threading.Lock()
+_tmp_space_reserved: int = 0   # bytes claimed by in-flight /tmp extractions
+
+
+def _release_tmp_reservation(nbytes: int) -> None:
+    global _tmp_space_reserved
+    if nbytes:
+        with _tmp_space_lock:
+            _tmp_space_reserved = max(0, _tmp_space_reserved - nbytes)
+
+
+def _is_disk_full_error(text: "str | None") -> bool:
+    """True if *text* (tool stderr / exception text) reports out-of-space.
+
+    Covers ENOSPC ("No space left") and the tmpfs size-cap case, which the
+    kernel reports as EDQUOT — surfaced by 7z/tar as "Disk Quota Exceeded"."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(s in low for s in (
+        "disk quota exceeded", "quota exceeded",
+        "no space left", "enospc", "edquot",
+    ))
 
 
 def _is_small_fs(path: str, limit_gib: int = 8) -> bool:
@@ -484,18 +497,30 @@ def _free_bytes(path: str) -> int:
 
 
 def _choose_extract_parent(archive_path: str, staging_root: Path,
-                           log_fn: LogFn) -> Path | None:
-    """Pick a temp-dir PARENT that can hold the extraction. Default /tmp is often
-    a small tmpfs ramdisk (Steam Deck: ~1GB) — if the archive won't fit there
-    with headroom, extract NEXT TO the staging folder (real disk) instead. This
-    mirrors the Tk app's reroute logic — without it large mods fail with
-    'No space left on device'. Returns the parent dir, or None to use /tmp."""
-    need = _uncompressed_size(archive_path)
+                           log_fn: LogFn) -> "tuple[Path | None, int]":
+    """Pick a temp-dir PARENT that can hold the extraction. Default /tmp is a
+    RAM-backed tmpfs (Steam Deck: roughly half of RAM) — if the archive won't
+    fit there with headroom, extract NEXT TO the staging folder (real disk)
+    instead. This mirrors the Tk app's reroute logic — without it large mods
+    fail with 'No space left on device'.
+
+    Returns ``(parent, tmp_reserved_bytes)``: *parent* None = use /tmp, in
+    which case *tmp_reserved_bytes* has been claimed from the shared /tmp
+    reservation pool so concurrent extractions don't jointly overflow it —
+    release it with :func:`_release_tmp_reservation` once the extract dir is
+    deleted."""
+    global _tmp_space_reserved
+    # Real metadata size where available (`7z l` probe / zip headers), 15×
+    # fallback otherwise — a compressed-size multiple alone undershoots extreme
+    # texture packs (a 120 MB .7z that unpacks to 3.6 GB is 30×).
+    need = get_uncompressed_size(archive_path)
     headroom = 512 * 1024 * 1024
     tmp = tempfile.gettempdir()
-    if need + headroom < _free_bytes(tmp):
-        return None   # /tmp has room
-    # /tmp too small (commonly a ramdisk) → use the staging filesystem (real disk).
+    with _tmp_space_lock:
+        if need + headroom + _tmp_space_reserved < _free_bytes(tmp):
+            _tmp_space_reserved += need
+            return None, need   # /tmp has room — claimed
+    # /tmp too small (a RAM-backed tmpfs) → use the staging filesystem (real disk).
     disk_parent = staging_root.parent if staging_root else None
     if disk_parent is not None:
         try:
@@ -503,13 +528,24 @@ def _choose_extract_parent(archive_path: str, staging_root: Path,
             if need + headroom < _free_bytes(str(disk_parent)):
                 log_fn(f"Extracting to disk ({disk_parent}) — /tmp too small for "
                        f"~{need // (1024 * 1024)} MB.")
-                return disk_parent
+                return disk_parent, 0
             log_fn(f"Warning: extract target {disk_parent} may also be low on "
                    "space.")
-            return disk_parent
+            return disk_parent, 0
         except OSError:
             pass
-    return None
+    return None, 0
+
+
+def _log_extract_location(extract_dir: Path, log_fn: LogFn) -> None:
+    """Record where the archive unpacks and how much room is there, so
+    disk-full failures are diagnosable from the log (Tk parity)."""
+    try:
+        free_gb = _free_bytes(str(extract_dir)) / (1024 ** 3)
+        loc = "ramdisk" if _is_small_fs(str(extract_dir)) else "disk"
+        log_fn(f"Extracting to {extract_dir} ({loc}, {free_gb:.1f} GB free)")
+    except OSError:
+        log_fn(f"Extracting to {extract_dir}")
 
 
 # ---------------------------------------------------------------- extraction
@@ -572,7 +608,7 @@ def _debackslash_extracted_tree(extract_dir: str, log_fn: LogFn) -> int:
 
 
 def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
-                     cancel=None) -> bool:
+                     cancel=None, error_sink: "list[str] | None" = None) -> bool:
     """Extract *archive_path* into *dest_dir*. Native 7z → bsdtar → py7zr →
     Python zipfile/tarfile, mirroring gui.install_mod's fallback chain. After a
     successful native/zip extraction, backslash-named members are normalised
@@ -580,8 +616,16 @@ def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
 
     *cancel* — optional ``threading.Event``; when set, the running native
     extractor (7z/bsdtar) is terminated and this returns False so the caller can
-    clean up the partial extract dir (used by the collection-install pause)."""
+    clean up the partial extract dir (used by the collection-install pause).
+
+    *error_sink* — optional list; each extractor's failure text is appended so
+    the caller can classify the overall failure (e.g. disk-full → retry on a
+    bigger filesystem)."""
     ext = Path(archive_path).suffix.lower()
+
+    def _note(err) -> None:
+        if error_sink is not None:
+            error_sink.append(str(err))
 
     # tar.* and plain .tar → tarfile directly.
     if ext in (".tar", ".gz", ".bz2", ".xz", ".tgz") or \
@@ -592,6 +636,7 @@ def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
             log_fn("Extracted with tarfile.")
             return True
         except Exception as exc:
+            _note(exc)
             log_fn(f"tarfile failed ({exc}).")
             # fall through to the generic extractors
 
@@ -619,6 +664,7 @@ def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
         if rc == 0:
             log_fn("Extracted with 7z.")
             return _ok()
+        _note(err)
         log_fn(f"7z failed ({err.strip()}), trying bsdtar…")
     if _cancelled():
         return False
@@ -631,6 +677,7 @@ def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
         if rc == 0 and any(os.scandir(dest_dir)):
             log_fn("Extracted with bsdtar.")
             return _ok()
+        _note(err)
         log_fn(f"bsdtar failed ({err.strip()}), trying py7zr…")
     if _cancelled():
         return False
@@ -641,6 +688,7 @@ def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
         log_fn("Extracted with py7zr.")
         return _ok()
     except Exception as exc:
+        _note(exc)
         log_fn(f"py7zr failed ({exc}), trying zipfile…")
     if _cancelled():
         return False
@@ -650,6 +698,7 @@ def _extract_archive(archive_path: str, dest_dir: str, log_fn: LogFn,
         log_fn("Extracted with zipfile.")
         return _ok()
     except Exception as exc:
+        _note(exc)
         log_fn(f"zipfile failed ({exc}).")
     return False
 
@@ -776,6 +825,9 @@ class PreparedInstall:
         # keep its modlist position + carry its endorsed flag onto the new install.
         self._preserve_position = False
         self._preserved_endorsed = False
+        # Bytes claimed from the shared /tmp reservation pool while extract_dir
+        # lives there (0 when extracted to disk) — released by cleanup().
+        self._tmp_reserved = 0
 
     def is_fomod(self) -> bool:
         return self.fomod_base is not None and self.fomod_config is not None
@@ -791,6 +843,8 @@ class PreparedInstall:
 
     def cleanup(self):
         shutil.rmtree(self.extract_dir, ignore_errors=True)
+        _release_tmp_reservation(self._tmp_reserved)
+        self._tmp_reserved = 0
 
 
 def prepare_archive(archive_path: str, game, profile_dir: Path, *,
@@ -819,17 +873,48 @@ def prepare_archive(archive_path: str, game, profile_dir: Path, *,
             progress_fn(done, total, phase)
 
     _p(0, 0, "Extracting")
-    # Pick a temp parent big enough — /tmp is a small ramdisk on the Deck, so a
-    # large mod must extract to the staging disk instead (Tk parity).
-    parent = _choose_extract_parent(str(archive), Path(staging_root), log_fn)
+    # Pick a temp parent big enough — /tmp is a RAM-backed tmpfs on the Deck, so
+    # a large mod must extract to the staging disk instead (Tk parity).
+    parent, tmp_reserved = _choose_extract_parent(str(archive),
+                                                  Path(staging_root), log_fn)
     extract_dir = Path(tempfile.mkdtemp(prefix="mm_install_",
                                         dir=str(parent) if parent else None))
-    if not _extract_archive(str(archive), str(extract_dir), log_fn, cancel=cancel):
+    _log_extract_location(extract_dir, log_fn)
+    extract_errors: list[str] = []
+    extracted = _extract_archive(str(archive), str(extract_dir), log_fn,
+                                 cancel=cancel, error_sink=extract_errors)
+    if not extracted and (cancel is None or not cancel.is_set()):
+        # The size estimate can undershoot (a solid .7z with no `7z` binary to
+        # probe falls back to 15× compressed — extreme texture packs reach 30×),
+        # so the pre-check can pass and the extraction still fill a small
+        # RAM-backed /tmp. Retry ONCE on the staging disk — Tk parity
+        # (gui/install_mod.py's disk-full reroute).
+        disk_parent = Path(staging_root).parent
+        if (any(_is_disk_full_error(e) for e in extract_errors)
+                and _is_small_fs(str(extract_dir))
+                and not _is_small_fs(str(disk_parent))):
+            log_fn("Extraction filled the temp ramdisk — retrying on disk…")
+            try:
+                disk_parent.mkdir(parents=True, exist_ok=True)
+                new_dir = Path(tempfile.mkdtemp(prefix="mm_install_",
+                                                dir=str(disk_parent)))
+            except OSError:
+                new_dir = None
+            if new_dir is not None:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+                _release_tmp_reservation(tmp_reserved)
+                tmp_reserved = 0
+                extract_dir = new_dir
+                _log_extract_location(extract_dir, log_fn)
+                extracted = _extract_archive(str(archive), str(extract_dir),
+                                             log_fn, cancel=cancel)
+    if not extracted:
         if cancel is not None and cancel.is_set():
             log_fn("Install: extraction cancelled — removing temp files.")
         else:
             log_fn("Install failed: could not extract the archive.")
         shutil.rmtree(extract_dir, ignore_errors=True)
+        _release_tmp_reservation(tmp_reserved)
         return None
 
     # A `.fomod`-wrapper archive needs a second extraction pass before FOMOD
@@ -849,6 +934,7 @@ def prepare_archive(archive_path: str, game, profile_dir: Path, *,
                 log_fn("Install failed: could not extract the inner .fomod archive.")
             shutil.rmtree(inner_dir, ignore_errors=True)
             shutil.rmtree(extract_dir, ignore_errors=True)
+            _release_tmp_reservation(tmp_reserved)
             return None
 
     src_root = _single_root_unwrap(extract_dir)
@@ -878,6 +964,7 @@ def prepare_archive(archive_path: str, game, profile_dir: Path, *,
                                extract_dir, src_root, fomod_base, config,
                                prebuilt_meta=prebuilt_meta,
                                on_need_prefix=on_need_prefix)
+    prepared._tmp_reserved = tmp_reserved
     if fomod_base is not None:
         prepared.saved_fomod_selections = _read_saved_fomod_selections(
             game, mod_name, log_fn)

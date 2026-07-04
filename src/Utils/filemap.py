@@ -46,7 +46,7 @@ import msgpack
 if TYPE_CHECKING:
     from typing import Callable
 
-from Utils.atomic_write import atomic_writer
+from Utils.atomic_write import atomic_writer, write_atomic_text
 from Utils.modlist import read_modlist
 from Utils import perftrace
 
@@ -873,8 +873,9 @@ def _write_filemap(
     filemap: dict[str, tuple[str, str]],
     disabled_lower: dict[str, frozenset[str]],
 ) -> int:
-    """Sort and write filemap.txt, returning the number of lines written."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    """Sort and write filemap.txt, returning the number of lines written.
+    Atomic (write-temp → rename) — concurrent readers (plugin resolution,
+    Data tab, deploy) must never observe a partially-written filemap."""
     sorted_keys = sorted(filemap)
     parts: list[str] = []
     for rel_key in sorted_keys:
@@ -888,8 +889,7 @@ def _write_filemap(
         parts.append(mod_name)
         parts.append("\n")
     output = "".join(parts)
-    with output_path.open("w", encoding="utf-8") as f:
-        f.write(output)
+    write_atomic_text(output_path, output)
     return output.count("\n")
 
 
