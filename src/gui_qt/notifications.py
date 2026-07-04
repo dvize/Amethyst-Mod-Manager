@@ -65,7 +65,9 @@ class ProgressPopup(QFrame):
         host.installEventFilter(self)
 
     def set_progress(self, done: int, total: int, phase: str | None = None,
-                     title: str | None = None):
+                     title: str | None = None, bytes_mode: bool = False):
+        """*bytes_mode* formats the counter as human-readable file sizes
+        ("12.3 MB / 340.0 MB") instead of raw counts — used for downloads."""
         if title:
             self._title.setText(title)
         if phase is not None:
@@ -73,7 +75,12 @@ class ProgressPopup(QFrame):
         if total > 0:
             self._bar.setRange(0, total)
             self._bar.setValue(min(done, total))
-            self._count.setText(self.tr("{0} / {1}").format(done, total))
+            if bytes_mode:
+                from Utils.cache_tools import format_size
+                self._count.setText(self.tr("{0} / {1}").format(
+                    format_size(min(done, total)), format_size(total)))
+            else:
+                self._count.setText(self.tr("{0} / {1}").format(done, total))
         else:
             # Indeterminate (busy) — Qt animates a range of 0,0.
             self._bar.setRange(0, 0)

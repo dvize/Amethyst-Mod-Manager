@@ -133,6 +133,7 @@ class MainWindow(QMainWindow):
     _qu_downloaded = Signal(object, object)       # (dl_items list, failed list)
     _req_install_files = Signal(object, object)   # (ctx dict, files|None)
     _req_install_dl = Signal(object, object)      # (archive|None, meta|None)
+    _req_install_prog = Signal(object, int, int)  # (name, downloaded, total)
     # Collection reset-load-order worker → UI thread (result dict).
     _reset_done = Signal(object)
     # Collection INSTALL worker → UI thread. Every callback is a single emit; the
@@ -322,6 +323,8 @@ class MainWindow(QMainWindow):
         self._req_installing = False
         self._req_install_files.connect(self._on_req_install_files)
         self._req_install_dl.connect(self._on_req_install_dl)
+        self._req_install_prog.connect(
+            lambda name, d, t: self._nexus_download_progress(name, d, t))
         self._reset_done.connect(self._on_reset_done)
         self._reset_running = False
         # Collection install state + Signal→UI-thread wiring.
@@ -1712,6 +1715,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"[nexus] switched to game '{matched[0]}'")
 
         self._notify(self.tr("Downloading mod from Nexus…"), "info")
+        self._nexus_download_progress("", 0, 0)   # show popup immediately
 
         import threading
 
@@ -1729,10 +1733,13 @@ class MainWindow(QMainWindow):
                     f"[nexus] could not fetch mod info ({exc}) — meta partial")
             dest_name = matched[0] if matched else (self._gs.game_name or "")
             dest = get_download_cache_dir_for_game(dest_name)
+            dl_label = getattr(file_info, "file_name", "") or ""
             downloader = NexusDownloader(api, download_dir=dest)
             result = downloader.download_from_nxm(
                 link, dest_dir=dest,
-                known_file_name=getattr(file_info, "file_name", "") or "")
+                known_file_name=dl_label,
+                progress_cb=lambda d, t: safe_emit(
+                    self._req_install_prog, dl_label, int(d), int(t)))
             safe_emit(self._nxm_download_done,
                       (result, mod_info, file_info))
 
@@ -1742,6 +1749,7 @@ class MainWindow(QMainWindow):
         """UI thread: an NXM download finished. Install it (via the shared
         install pipeline) with a prebuilt meta from the link data."""
         result, mod_info, file_info = payload
+        self._nexus_download_progress("", 0, -1)   # hide the download popup
         if not (result.success and result.file_path):
             self._append_log(f"[nexus] download failed — {result.error}")
             self._notify(self.tr("Nexus download failed — {0}").format(result.error), "error")
@@ -1835,7 +1843,8 @@ class MainWindow(QMainWindow):
         from gui_qt.nexus_browser_view import NexusBrowserView
         view = NexusBrowserView(api, domain, game,
                                 install_fn=self._install_paths,
-                                log_fn=self._append_log)
+                                log_fn=self._append_log,
+                                progress_fn=self._nexus_download_progress)
         self._nexus_view = view
         # Drop the reference when the tab/window is gone so we stop refreshing it.
         view.destroyed.connect(lambda *_: setattr(self, "_nexus_view", None))
@@ -3976,6 +3985,20 @@ class MainWindow(QMainWindow):
     # pick MAIN (or file chooser if several) → download → hand to _install_paths.
     # All worker stages hop back to the UI thread via Signals (NOT QThread).
 
+    def _nexus_download_progress(self, name: str, downloaded: int, total: int):
+        """Drive the shared progress popup for a Nexus download. UI thread only.
+        total<0 hides the popup (download finished/cancelled)."""
+        self._ensure_feedback()
+        if self._progress_popup is None:
+            return
+        if total < 0:
+            self._progress_popup.clear()
+            return
+        phase = self.tr("Downloading {0}…").format(name) if name else self.tr("Downloading…")
+        self._progress_popup.set_progress(
+            downloaded, total, phase, title=self.tr("Nexus Download"),
+            bytes_mode=True)
+
     def _install_nexus_mod_by_id(self, mod_id: int, domain: str, name: str):
         if self._req_installing:
             self._notify(self.tr("An install is already in progress."), "info")
@@ -4040,7 +4063,9 @@ class MainWindow(QMainWindow):
 
     def _start_req_download(self, ctx, f):
         domain, mod_id, name = ctx["domain"], ctx["mod_id"], ctx["name"]
-        self._append_log(f"[nexus] downloading {f.file_name or name}…")
+        dl_label = f.file_name or name
+        self._append_log(f"[nexus] downloading {dl_label}…")
+        self._nexus_download_progress(dl_label, 0, 0)   # show popup immediately
 
         class _Info:
             pass
@@ -4063,7 +4088,9 @@ class MainWindow(QMainWindow):
                     self._nexus_api, download_dir=dest).download_file(
                     game_domain=domain, mod_id=mod_id, file_id=f.file_id,
                     dest_dir=dest, known_file_name=f.file_name,
-                    expected_size_bytes=size, progress_cb=lambda d, t: None)
+                    expected_size_bytes=size,
+                    progress_cb=lambda d, t: self._req_install_prog.emit(
+                        dl_label, int(d), int(t)))
                 if result.success and result.file_path is not None:
                     archive = str(result.file_path)
                     try:
@@ -4084,6 +4111,7 @@ class MainWindow(QMainWindow):
 
     def _on_req_install_dl(self, archive, meta):
         self._req_installing = False
+        self._nexus_download_progress("", 0, -1)   # hide the download popup
         if not archive:
             return
         self._append_log(f"[nexus] downloaded → {archive}; installing…")

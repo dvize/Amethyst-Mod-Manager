@@ -62,15 +62,19 @@ class NexusBrowserView(QWidget):
     _premium_checked = Signal(object, object)       # (entry, is_premium|None)
     _files_ready = Signal(object, object)           # (entry, list[NexusModFile])
     _download_done = Signal(object, object)         # (archive_path|None, meta|None)
+    _download_progress = Signal(object, int, int)   # (name, downloaded, total)
 
     def __init__(self, api, domain, game, install_fn=None, log_fn=None,
-                 parent=None):
+                 progress_fn=None, parent=None):
         super().__init__(parent)
         self._api = api
         self._domain = domain or ""
         self._game = game
         self._install_fn = install_fn or (lambda paths, metas=None: None)
         self._log = log_fn or (lambda m: None)
+        # progress_fn(name, downloaded, total) drives a host progress popup;
+        # total<=0 means "finished/hide". Defaults to a no-op.
+        self._progress_fn = progress_fn or (lambda name, d, t: None)
 
         # state
         self._section = "Browse"
@@ -93,6 +97,7 @@ class NexusBrowserView(QWidget):
         self._premium_checked.connect(self._on_premium_checked)
         self._files_ready.connect(self._on_files_ready)
         self._download_done.connect(self._on_download_done)
+        self._download_progress.connect(self._on_download_progress)
         self._installing = False        # serialise one Nexus install at a time
 
         self._build()
@@ -802,7 +807,11 @@ class NexusBrowserView(QWidget):
     def _start_download(self, entry, file):
         domain = getattr(entry, "domain_name", "") or self._domain
         name = entry.name or f"Mod {entry.mod_id}"
-        self._log(f"Nexus: downloading {file.file_name or name}…")
+        dl_label = file.file_name or name
+        self._log(f"Nexus: downloading {dl_label}…")
+        # Show the popup immediately (indeterminate) so there's feedback even
+        # before the first progress callback arrives.
+        self._progress_fn(dl_label, 0, 0)
 
         def worker():
             archive = None
@@ -818,7 +827,9 @@ class NexusBrowserView(QWidget):
                 result = NexusDownloader(self._api, download_dir=dest).download_file(
                     game_domain=domain, mod_id=entry.mod_id, file_id=file.file_id,
                     dest_dir=dest, known_file_name=file.file_name,
-                    expected_size_bytes=size, progress_cb=lambda d, t: None)
+                    expected_size_bytes=size,
+                    progress_cb=lambda d, t: safe_emit(
+                        self._download_progress, dl_label, int(d), int(t)))
                 if result.success and result.file_path is not None:
                     archive = str(result.file_path)
                     # Build the meta from the KNOWN mod_id/file_id (the archive
@@ -841,10 +852,16 @@ class NexusBrowserView(QWidget):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_download_progress(self, name, downloaded, total):
+        """UI thread: forward download bytes to the host progress popup."""
+        self._progress_fn(name, downloaded, total)
+
     def _on_download_done(self, archive, meta):
         """UI thread: hand the downloaded archive (+ its prebuilt meta) to the
         app's install queue."""
         self._installing = False
+        # Hide the download popup (the install queue shows its own progress).
+        self._progress_fn("", 0, -1)
         if not archive:
             return
         self._log(f"Nexus: downloaded → {archive}; installing…")
