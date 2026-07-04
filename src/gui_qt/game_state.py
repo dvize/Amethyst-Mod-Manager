@@ -351,3 +351,12 @@ class GameState:
         if g is not None and self.profile:
             g.set_active_profile_dir(
                 g.get_profile_root() / "profiles" / self.profile)
+            # Re-resolve paths so this profile's game/prefix/deploy-mode
+            # overrides take effect — or fall back to the default profile's
+            # values when it has none (Tk parity: top_bar re-ran load_paths on
+            # every profile switch). Without this the previous profile's paths
+            # stay live on the game object.
+            try:
+                g.load_paths()
+            except Exception:
+                pass

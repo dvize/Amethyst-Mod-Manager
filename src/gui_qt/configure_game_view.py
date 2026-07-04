@@ -159,13 +159,22 @@ class ConfigureGameView(QWidget):
         hb.addWidget(title)
         hb.addStretch(1)
         active = getattr(self._game, "_active_profile_dir", None)
-        if active is not None and active.name != "default":
-            scope = f"Settings saved to profile: {active.name} (this profile only)"
+        self._profile_dir = (active if active is not None
+                             and active.name != "default" else None)
+        if self._profile_dir is not None:
+            scope = self.tr("Settings saved to profile: {0} (this profile only)").format(active.name)
         else:
-            scope = "Editing shared settings (default profile)"
+            scope = self.tr("Editing shared settings (default profile)")
         scope_lbl = QLabel(scope)
         scope_lbl.setStyleSheet(f"color:{self._c('TEXT_WARN')};")
         hb.addWidget(scope_lbl)
+        if self._profile_dir is not None and self._profile_has_overrides():
+            self._unpin_btn = self._small_btn(
+                self.tr("Use Shared Settings"), self._on_clear_overrides)
+            self._unpin_btn.setToolTip(self.tr(
+                "This profile has its own saved paths/options. Remove them so "
+                "it follows the shared (default profile) settings again."))
+            hb.addWidget(self._unpin_btn)
         outer.addWidget(header)
 
         # Body — four distinct panels in a 2×2 grid: (top-left) image,
@@ -494,6 +503,68 @@ class ConfigureGameView(QWidget):
         cb = self._opt_checks.get(key)
         if cb is not None:
             cb.setChecked(bool(value))
+
+    # ---- per-profile overrides ---------------------------------------------
+    def _overridable_keys(self) -> list[str]:
+        """Every profile_settings key this game may pin as a per-profile
+        override (paths + deploy mode + overridable options)."""
+        g = self._game
+        keys = ["game_path", "prefix_path", "deploy_mode"]
+        keys += list(getattr(g, "profile_overridable_paths_extras", ()) or ())
+        keys += list(getattr(g, "profile_overridable_settings", ()) or ())
+        return keys
+
+    def _profile_has_overrides(self) -> bool:
+        try:
+            from Utils.profile_state import read_profile_settings
+            pset = read_profile_settings(self._profile_dir)
+        except Exception:
+            return False
+        return any(k in pset for k in self._overridable_keys())
+
+    def _on_clear_overrides(self):
+        """Un-pin this profile's saved overrides so it follows the default
+        profile's settings again (an improvement over Tk, where a pinned
+        override could never be released)."""
+        g = self._game
+        # Clearing a game/prefix override changes the effective paths, which
+        # would strand deployed files — same guard as saving a path change.
+        if g.is_configured() and g.get_deploy_active():
+            self._game_status.setText(
+                self.tr("Cannot reset to shared settings while mods are deployed. "
+                        "Restore the game first."))
+            self._game_status.setStyleSheet(f"color:{self._c('TEXT_ERR')};")
+            return
+        from gui_qt.confirm_overlay import ConfirmOverlay
+        ConfirmOverlay.show_over(
+            self, self.tr("Use Shared Settings?"),
+            self.tr("Remove this profile's own paths and options so it follows "
+                    "the shared (default profile) settings again?\n\n"
+                    "The default profile's settings are not affected."),
+            lambda ok: self._clear_overrides() if ok else None,
+            confirm_label=self.tr("Reset"), cancel_label=self.tr("Cancel"),
+            danger=True)
+
+    def _clear_overrides(self):
+        from Utils.profile_state import merge_profile_settings
+        try:
+            merge_profile_settings(
+                self._profile_dir, {k: None for k in self._overridable_keys()})
+        except Exception as exc:
+            print(f"[gui_qt] clear profile overrides failed: {exc}", flush=True)
+            return
+        try:
+            self._game.load_paths()
+        except Exception:
+            pass
+        # Re-fill the form from the now-shared values.
+        self._found_path = None
+        self._found_prefix = None
+        self._prepopulate()
+        self._unpin_btn.hide()
+        self._game_status.setText(
+            self.tr("Profile now follows the shared (default profile) settings."))
+        self._game_status.setStyleSheet(f"color:{self._c('TEXT_OK')};")
 
     def _select_plugins_txt_default(self):
         """Tick the radio matching the game's current plugins.txt filename."""

@@ -740,6 +740,22 @@ The md5 cache is preserved. Archives will be re-downloaded as needed.</translati
         <translation>{0} Game — {1}</translation>
     </message>
     <message>
+        <source>Settings saved to profile: {0} (this profile only)</source>
+        <translation>Settings saved to profile: {0} (this profile only)</translation>
+    </message>
+    <message>
+        <source>Editing shared settings (default profile)</source>
+        <translation>Editing shared settings (default profile)</translation>
+    </message>
+    <message>
+        <source>Use Shared Settings</source>
+        <translation>Use Shared Settings</translation>
+    </message>
+    <message>
+        <source>This profile has its own saved paths/options. Remove them so it follows the shared (default profile) settings again.</source>
+        <translation>This profile has its own saved paths/options. Remove them so it follows the shared (default profile) settings again.</translation>
+    </message>
+    <message>
         <source>Remove Instance</source>
         <translation>Remove Instance</translation>
     </message>
@@ -838,6 +854,30 @@ The md5 cache is preserved. Archives will be re-downloaded as needed.</translati
     <message>
         <source>Custom staging folder configured.</source>
         <translation>Custom staging folder configured.</translation>
+    </message>
+    <message>
+        <source>Cannot reset to shared settings while mods are deployed. Restore the game first.</source>
+        <translation>Cannot reset to shared settings while mods are deployed. Restore the game first.</translation>
+    </message>
+    <message>
+        <source>Use Shared Settings?</source>
+        <translation>Use Shared Settings?</translation>
+    </message>
+    <message>
+        <source>Remove this profile's own paths and options so it follows the shared (default profile) settings again?
+
+The default profile's settings are not affected.</source>
+        <translation>Remove this profile's own paths and options so it follows the shared (default profile) settings again?
+
+The default profile's settings are not affected.</translation>
+    </message>
+    <message>
+        <source>Reset</source>
+        <translation>Reset</translation>
+    </message>
+    <message>
+        <source>Profile now follows the shared (default profile) settings.</source>
+        <translation>Profile now follows the shared (default profile) settings.</translation>
     </message>
     <message>
         <source>Custom staging folder selected.</source>
