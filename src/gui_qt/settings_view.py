@@ -337,10 +337,16 @@ class SettingsView(QWidget):
     def _on_ui_scale_auto_toggled(self, on: bool):
         self._scale_slider.setEnabled(not on)
         if on:
+            # Enabling auto switches to the detected scale, which differs from
+            # whatever manual value is applied — needs a restart to take effect.
             self._safe_save(uc.save_ui_scale, "auto")
+            self._prompt_scale_restart()
         else:
+            # Disabling auto just re-enables the slider. The slider already shows
+            # the currently-applied scale, so nothing changes until the user
+            # actually moves it (which commits + prompts then). Persist the
+            # explicit value so a manual scale is recorded, but don't prompt.
             self._safe_save(uc.save_ui_scale, self._scale_slider.value() / 100.0)
-        self._prompt_scale_restart()
 
     def _on_scale_value_changed(self, pct: int):
         """Live label update on every tick. Commit immediately only when the
