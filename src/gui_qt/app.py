@@ -5494,8 +5494,10 @@ class MainWindow(QMainWindow):
             if not exe_path.is_file():
                 self._notify(self.tr("Executable not found: {0}").format(exe_path), "warning")
                 return
+            target = (exe_launch.launch_jar if exe_launch.is_jar(exe_path)
+                      else exe_launch.launch_exe_via_proton)
             threading.Thread(
-                target=exe_launch.launch_exe_via_proton,
+                target=target,
                 args=(exe_path, game), kwargs={"log_fn": self._append_log},
                 daemon=True,
             ).start()

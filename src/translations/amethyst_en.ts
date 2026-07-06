@@ -1790,8 +1790,20 @@ When ESLifier finishes, it writes its output as the
 <context>
     <name>ExeSettingsView</name>
     <message>
+        <source>Install Java into prefix</source>
+        <translation>Install Java into prefix</translation>
+    </message>
+    <message>
         <source>Configure: {0}</source>
         <translation>Configure: {0}</translation>
+    </message>
+    <message>
+        <source>Host (system java)</source>
+        <translation>Host (system java)</translation>
+    </message>
+    <message>
+        <source>Proton prefix (Windows Java)</source>
+        <translation>Proton prefix (Windows Java)</translation>
     </message>
     <message>
         <source>Insert game path</source>
@@ -1820,6 +1832,10 @@ When ESLifier finishes, it writes its output as the
     <message>
         <source>(no mods found)</source>
         <translation>(no mods found)</translation>
+    </message>
+    <message>
+        <source>Installing Java …</source>
+        <translation>Installing Java …</translation>
     </message>
 </context>
 <context>

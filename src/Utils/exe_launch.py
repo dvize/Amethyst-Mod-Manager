@@ -41,9 +41,17 @@ _LAUNCH_MODE_FILE = "exe_launch_mode.json"
 _CUSTOM_EXES_FILE = "custom_exes.json"
 
 EXE_PICKER_FILTERS = [
-    ("Executables (*.exe, *.bat)", ["*.exe", "*.bat"]),
+    ("Executables (*.exe, *.bat, *.jar)", ["*.exe", "*.bat", "*.jar"]),
     ("All files", ["*"]),
 ]
+
+# Java-runtime modes for .jar entries, persisted per-exe in exe_launch_mode.json.
+JAR_RUNTIME_HOST = "host"      # run with the host's `java` (no Proton) — default
+JAR_RUNTIME_PROTON = "proton"  # run a Windows Java inside the game's Proton prefix
+
+
+def is_jar(path) -> bool:
+    return str(path).lower().endswith(".jar")
 
 
 def _noop_log(_msg: str) -> None:
@@ -165,6 +173,18 @@ def save_launch_options(game, exe_name: str, options: str) -> None:
                            options if options else None)
 
 
+def load_jar_runtime(game, exe_name: str) -> str:
+    """Saved Java runtime for a .jar entry: 'host' (default) or 'proton'."""
+    val = _read_launch_mode_data(game).get(f"__jar_runtime_{exe_name}")
+    return val if val == JAR_RUNTIME_PROTON else JAR_RUNTIME_HOST
+
+
+def save_jar_runtime(game, exe_name: str, runtime: str) -> None:
+    _write_launch_mode_key(
+        game, f"__jar_runtime_{exe_name}",
+        runtime if runtime == JAR_RUNTIME_PROTON else None)
+
+
 # ---------------------------------------------------------------------------
 # exe_args.json — per-exe launch arguments
 # ---------------------------------------------------------------------------
@@ -225,13 +245,34 @@ def save_exe_args(game, exe_name: str, args_str: str) -> None:
 _ENV_VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
-def parse_launch_options(opts: str, command: list) -> tuple[dict, list]:
+def split_preserving_backslash(s: str) -> list:
+    """shlex.split but without treating ``\\`` as an escape character.
+
+    Steam-style options for a Windows target contain paths like
+    ``C:\\java8\\bin\\java.exe``; the default POSIX shlex would strip the
+    backslashes (turning it into ``C:java8binjava.exe``). We keep whitespace
+    splitting and quotes but disable escapes so Windows paths survive.
+    """
+    lex = shlex.shlex(s, posix=True)
+    lex.whitespace_split = True
+    lex.escape = ""  # don't treat backslash as an escape char
+    try:
+        return list(lex)
+    except ValueError:
+        return s.split()
+
+
+def parse_launch_options(opts: str, command: list,
+                         split_fn=shlex.split) -> tuple[dict, list]:
     """Parse Steam-style launch options into (env_vars, final_command).
 
     Tokens matching KEY=VALUE are extracted as environment variables.
     If ``%command%`` is present it is replaced by the actual *command* list
     (wrappers before it are prepended; tokens after it are appended).
     If ``%command%`` is absent the remaining tokens are appended as a suffix.
+
+    *split_fn* tokenises each side; pass ``split_preserving_backslash`` when the
+    options carry Windows paths (jar launches) so backslashes aren't eaten.
     """
     opts = (opts or "").strip()
     if not opts:
@@ -245,11 +286,11 @@ def parse_launch_options(opts: str, command: list) -> tuple[dict, list]:
         suffix_str = opts[idx + len("%command%"):]
 
         try:
-            prefix_tokens = shlex.split(prefix_str)
+            prefix_tokens = split_fn(prefix_str)
         except ValueError:
             prefix_tokens = prefix_str.split()
         try:
-            suffix_tokens = shlex.split(suffix_str)
+            suffix_tokens = split_fn(suffix_str)
         except ValueError:
             suffix_tokens = suffix_str.split()
 
@@ -272,7 +313,7 @@ def parse_launch_options(opts: str, command: list) -> tuple[dict, list]:
         return env_vars, wrappers + list(command) + suffix
     else:
         try:
-            tokens = shlex.split(opts)
+            tokens = split_fn(opts)
         except ValueError:
             tokens = opts.split()
 
@@ -1177,3 +1218,159 @@ def launch_exe_via_proton(exe_path: Path, game, log_fn=_noop_log) -> None:
         )
     except Exception as e:
         log_fn(f"Run EXE error: {e}")
+
+
+def resolve_jar_prefix_env(jar_path: Path, game, log_fn=_noop_log):
+    """Resolve (proton_script, compat_data, env) for running a .jar under Proton.
+
+    Follows the same rule as regular exes (launch_exe_via_proton): with no
+    Proton override the game's own prefix is used; with an override an isolated
+    ``prefix_<Proton>/`` is created next to the jar. Returns None on failure
+    (after logging why). First use of an isolated prefix runs wineboot — call
+    from a worker thread.
+    """
+    from Utils.steam_finder import (
+        find_any_installed_proton, list_installed_proton,
+    )
+    override = load_proton_override(game, jar_path.name)
+    if not override:
+        # Game prefix (no wineboot; already initialised by the game).
+        return get_game_prefix_env(
+            game, log_fn=lambda m: log_fn(f"Run JAR: {m}"),
+            allow_runner_fallback=True)
+
+    # Specific Proton → isolated prefix_<Proton>/ next to the jar.
+    proton_script = find_any_installed_proton(override)
+    if proton_script is None:
+        override_lower = override.lower()
+        for candidate in list_installed_proton():
+            if candidate.parent.name.lower().startswith(override_lower):
+                proton_script = candidate
+                break
+    if proton_script is None:
+        log_fn(f"Run JAR: Proton override '{override}' not found.")
+        return None
+    prefix_dir = jar_path.parent / f"prefix_{proton_script.parent.name}"
+    result = get_tool_prefix_env(
+        jar_path, override, prefix_dir=prefix_dir,
+        steam_id=effective_steam_id(game))
+    return result
+
+
+def launch_jar(jar_path: Path, game, log_fn=_noop_log) -> None:
+    """Launch a .jar via a user-supplied Java command. Call from a worker thread.
+
+    Java runtimes can't be run through ``proton run <jar>``, so the actual
+    command comes from the exe's Launch Options / Launch arguments, which the
+    user fills in themselves. ``%command%`` is substituted with the jar's path
+    so a typical invocation looks like ``java -jar %command%``.
+
+    Two runtime modes (per-exe, saved in exe_launch_mode.json):
+      * host   — the jar path is the native Unix path and the command runs
+                 directly on the host (its `java`); no Proton.
+      * proton — the jar path is the prefix's Z: Wine path and the whole
+                 command is wrapped in ``proton run`` so a Windows Java inside
+                 a Proton prefix runs it. Which prefix follows the exe's Proton
+                 override: none → the game's prefix; a specific version → an
+                 isolated ``prefix_<Proton>/`` next to the jar.
+    """
+    runtime = load_jar_runtime(game, jar_path.name)
+    launch_opts = load_launch_options(game, jar_path.name)
+    args_str = load_exe_args(game, jar_path.name)
+
+    if runtime == JAR_RUNTIME_PROTON:
+        result = resolve_jar_prefix_env(jar_path, game, log_fn=log_fn)
+        if result is None:
+            return
+        from Utils.steam_finder import proton_run_command
+        from Utils.wine_paths import to_wine_path
+        proton_script, compat_data, env = result
+        jar_token = to_wine_path(jar_path)
+        # Windows target: keep backslashes in paths and any file arguments the
+        # user added.
+        extra_args = split_preserving_backslash(args_str)
+        # Always launch the bundled Windows Java on the jar; the user doesn't
+        # have to type a command. We reference java.exe by its in-prefix C:
+        # path (C:\java8\bin\java.exe) rather than a Z: path — a Z: path into
+        # the prefix's own drive (and one with spaces, e.g. "Proton -
+        # Experimental") is what made the launch fail.
+        from Utils.jre_prefix import java_exe_in_prefix, JAVA_EXE_WIN
+        java_native = java_exe_in_prefix(compat_data)
+        if not java_native.is_file():
+            log_fn("Run JAR: no Java in this prefix — click 'Install Java into "
+                   "prefix' in the exe settings first (it installs into the "
+                   "prefix the Proton version selects).")
+            return
+        jvm_cmd = [JAVA_EXE_WIN, "-jar", jar_token]
+        # Launch Options are appended as extra flags. Steam-style %command% is
+        # still honoured (it stands for the whole java command) for power users;
+        # otherwise env vars are extracted and the rest appended after the jar.
+        if launch_opts:
+            env_updates, jvm_cmd = parse_launch_options(
+                launch_opts, jvm_cmd, split_fn=split_preserving_backslash)
+            if env_updates:
+                env.update(env_updates)
+        final_cmd = proton_run_command(
+            proton_script, "run", *jvm_cmd, env=env) + extra_args
+    else:  # host
+        env = os.environ.copy()
+        jar_token = str(jar_path)
+        try:
+            extra_args = shlex.split(args_str)
+        except ValueError as e:
+            log_fn(f"Run JAR: invalid arguments — {e}")
+            return
+        opts_for_cmd = launch_opts or "java -jar %command%"
+        env_updates, host_cmd = parse_launch_options(opts_for_cmd, [jar_token])
+        if env_updates:
+            env.update(env_updates)
+        if not host_cmd:
+            log_fn("Run JAR: launch options produced no command — add e.g. "
+                   "'java -jar %command%' in Launch Options.")
+            return
+        # Fail loudly when the launcher (java) isn't installed — otherwise the
+        # process errors out invisibly and nothing opens.
+        launcher = host_cmd[0]
+        if os.sep not in launcher and shutil.which(launcher) is None:
+            in_flatpak = Path("/.flatpak-info").exists()
+            if in_flatpak and shutil.which("flatpak-spawn"):
+                # The host may have java even if the sandbox doesn't — try it.
+                host_cmd = ["flatpak-spawn", "--host", *host_cmd]
+                log_fn(f"Run JAR: '{launcher}' not in sandbox — forwarding to host.")
+            else:
+                log_fn(f"Run JAR error: '{launcher}' not found. Install a Java "
+                       "runtime (e.g. `sudo pacman -S jre-openjdk` / your "
+                       "distro's JRE) or set the full path in Launch Options.")
+                return
+        final_cmd = host_cmd + extra_args
+
+    log_fn(f"Run JAR: launching {jar_path.name} ({runtime}) ...")
+    log_fn(f"Run JAR:   cmd: {' '.join(final_cmd)}")
+    try:
+        proc = subprocess.Popen(
+            final_cmd,
+            env=env,
+            cwd=str(jar_path.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            universal_newlines=True,
+        )
+    except Exception as e:
+        log_fn(f"Run JAR error: {e}")
+        return
+
+    # Stream the launcher's output to the log so failures (missing java.exe in
+    # the prefix, a jar that crashes on start) are visible instead of silent.
+    def _pump():
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line:
+                log_fn(f"Run JAR: {line}")
+        rc = proc.wait()
+        if rc != 0:
+            log_fn(f"Run JAR: {jar_path.name} exited with code {rc}")
+
+    import threading
+    threading.Thread(target=_pump, daemon=True).start()

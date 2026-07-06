@@ -17,7 +17,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QComboBox, QLineEdit, QPlainTextEdit, QMenu, QScrollArea,
@@ -31,6 +31,9 @@ from Utils.wine_paths import to_wine_path
 
 class ExeSettingsView(QWidget):
     """Scoped-tab body for configuring one custom exe."""
+
+    # Emitted from the Java-install worker to re-enable the button on the UI thread.
+    _install_java_done = Signal()
 
     def __init__(self, game, exe_path: Path, on_close, log_fn=None):
         super().__init__()
@@ -47,6 +50,12 @@ class ExeSettingsView(QWidget):
         self.setObjectName("ExeSettingsView")
         self._build()
         self._load_saved()
+        self._install_java_done.connect(self._on_install_java_done)
+
+    def _on_install_java_done(self):
+        if hasattr(self, "_install_java_btn"):
+            self._install_java_btn.setEnabled(True)
+            self._install_java_btn.setText(self.tr("Install Java into prefix"))
 
     # ---- layout -----------------------------------------------------------
     def _build(self):
@@ -95,6 +104,39 @@ class ExeSettingsView(QWidget):
             h.setStyleSheet(f"color:{_c(p,'TEXT_DIM')}; font-size:12px;")
             h.setWordWrap(True)
             return h
+
+        self._is_jar = exe_launch.is_jar(self._exe_path)
+
+        # -- Java runtime (.jar only) ----------------------------------------
+        if self._is_jar:
+            sec_jar, sj = section("Java runtime")
+            sj.addWidget(hint(
+                "How to run this .jar:\n"
+                "Host: run with your system's java (no Proton). Set the Java "
+                "command in Launch Options, e.g. 'java -jar %command%' "
+                "(%command% is the jar path).\n"
+                "Proton prefix: click 'Install Java into prefix' once, then it "
+                "runs automatically as 'java.exe -jar <jar>' — anything you put "
+                "in Launch Options / Launch arguments is appended as extra "
+                "flags. Which prefix follows the Proton version below "
+                "('Game default' = the game's prefix; a specific version = an "
+                "isolated prefix next to the jar)."))
+            self._jar_runtime_combo = QComboBox()
+            self._jar_runtime_combo.addItem(self.tr("Host (system java)"),
+                                            exe_launch.JAR_RUNTIME_HOST)
+            self._jar_runtime_combo.addItem(self.tr("Proton prefix (Windows Java)"),
+                                            exe_launch.JAR_RUNTIME_PROTON)
+            no_wheel(self._jar_runtime_combo)
+            jr_row = QHBoxLayout(); jr_row.setSpacing(8)
+            jr_row.addWidget(self._jar_runtime_combo)
+            self._install_java_btn = QPushButton(self.tr("Install Java into prefix"))
+            self._install_java_btn.setObjectName("FormButton")
+            self._install_java_btn.setCursor(Qt.PointingHandCursor)
+            self._install_java_btn.clicked.connect(self._install_java_into_prefix)
+            jr_row.addWidget(self._install_java_btn)
+            jr_row.addStretch(1)
+            sj.addLayout(jr_row)
+            bv.addWidget(sec_jar)
 
         # -- Launch arguments ------------------------------------------------
         sec_args, sa = section("Launch arguments")
@@ -197,6 +239,11 @@ class ExeSettingsView(QWidget):
         self._options_edit.setText(exe_launch.load_launch_options(game, name))
         saved = exe_launch.load_proton_override(game, name) or ""
         self._proton_combo.setCurrentText(self._best_proton_match(saved))
+        if self._is_jar:
+            runtime = exe_launch.load_jar_runtime(game, name)
+            idx = self._jar_runtime_combo.findData(runtime)
+            if idx >= 0:
+                self._jar_runtime_combo.setCurrentIndex(idx)
 
     def _best_proton_match(self, name: str) -> str:
         """Exact match first, then prefix match ("Proton 10" → "Proton 10.0")."""
@@ -218,6 +265,9 @@ class ExeSettingsView(QWidget):
             game, name, "" if selected == "Game default" else selected)
         exe_launch.save_launch_options(game, name,
                                        self._options_edit.text().strip())
+        if self._is_jar:
+            exe_launch.save_jar_runtime(
+                game, name, self._jar_runtime_combo.currentData())
         self._log(f"[exe] settings saved for {name}")
         self._on_close(False)
 
@@ -334,6 +384,39 @@ class ExeSettingsView(QWidget):
 
         threading.Thread(target=worker, daemon=True,
                          name="exe-prefix-winetricks").start()
+
+    def _install_java_into_prefix(self):
+        """Install a Windows JRE (with JavaFX) into the jar's target prefix.
+
+        The target follows the Proton combo (game default → game prefix; a
+        specific version → isolated prefix_<Proton>/ next to the jar), so we
+        persist the current override first, then let resolve_jar_prefix_env
+        pick the same prefix a Proton-mode launch would use.
+        """
+        game, jar_path, log = self._game, self._exe_path, self._log
+        # Persist the chosen Proton override so the worker resolves the same
+        # prefix the launch will use (Game default → game prefix).
+        selected = self._proton_combo.currentText()
+        exe_launch.save_proton_override(
+            game, jar_path.name, "" if selected == "Game default" else selected)
+        self._install_java_btn.setEnabled(False)
+        self._install_java_btn.setText(self.tr("Installing Java …"))
+
+        def worker():
+            try:
+                result = exe_launch.resolve_jar_prefix_env(jar_path, game, log_fn=log)
+                if result is None:
+                    log("Java: could not resolve a prefix — pick a Proton "
+                        "version or deploy/launch the game once first.")
+                    return
+                _script, compat_data, _env = result
+                from Utils.jre_prefix import install_windows_jre
+                install_windows_jre(compat_data, log_fn=log)
+            finally:
+                self._install_java_done.emit()
+
+        threading.Thread(target=worker, daemon=True,
+                         name="jar-install-java").start()
 
     def _open_prefix_folder(self):
         selected = self._selected_proton()
