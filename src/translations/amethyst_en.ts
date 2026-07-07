@@ -3356,18 +3356,6 @@ Remove the appended-collection entry?</translation>
         <translation>Cyber Engine Tweaks requires Hardlink mode</translation>
     </message>
     <message>
-        <source>Cyber Engine Tweaks is enabled, but the deploy mode is set to Symlink.
-
-CET will not load from a symlinked cyber_engine_tweaks.asi — switch the deploy mode to Hardlink for CET to work.
-
-Deploy anyway?</source>
-        <translation>Cyber Engine Tweaks is enabled, but the deploy mode is set to Symlink.
-
-CET will not load from a symlinked cyber_engine_tweaks.asi — switch the deploy mode to Hardlink for CET to work.
-
-Deploy anyway?</translation>
-    </message>
-    <message>
         <source>Deploy anyway</source>
         <translation>Deploy anyway</translation>
     </message>
@@ -3510,6 +3498,22 @@ Deploy anyway?</translation>
     <message>
         <source>Install queued — {0} will install after the current {1} finishes.</source>
         <translation>Install queued — {0} will install after the current {1} finishes.</translation>
+    </message>
+    <message>
+        <source>Cyber Engine Tweaks is enabled, but cyber_engine_tweaks.asi will be symlinked.
+
+CET will not load from a symlinked asi. This happens when the deploy mode is Symlink, or when it is Hardlink but the game folder and mod staging folder are on different drives (hardlinks fall back to symlinks across drives).
+
+Use Hardlink mode with both folders on the same drive for CET to work.
+
+Deploy anyway?</source>
+        <translation>Cyber Engine Tweaks is enabled, but cyber_engine_tweaks.asi will be symlinked.
+
+CET will not load from a symlinked asi. This happens when the deploy mode is Symlink, or when it is Hardlink but the game folder and mod staging folder are on different drives (hardlinks fall back to symlinks across drives).
+
+Use Hardlink mode with both folders on the same drive for CET to work.
+
+Deploy anyway?</translation>
     </message>
     <message>
         <source>LOOT Groups</source>

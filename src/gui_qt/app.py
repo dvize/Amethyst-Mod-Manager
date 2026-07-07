@@ -6660,15 +6660,18 @@ class MainWindow(QMainWindow):
             self,
             self.tr("Cyber Engine Tweaks requires Hardlink mode"),
             self.tr(
-                "Cyber Engine Tweaks is enabled, but the deploy mode is set to "
-                "Symlink.\n\nCET will not load from a symlinked "
-                "cyber_engine_tweaks.asi — switch the deploy mode to Hardlink "
-                "for CET to work.\n\nDeploy anyway?"
+                "Cyber Engine Tweaks is enabled, but cyber_engine_tweaks.asi "
+                "will be symlinked.\n\nCET will not load from a symlinked "
+                "asi. This happens when the deploy mode is Symlink, or when it "
+                "is Hardlink but the game folder and mod staging folder are on "
+                "different drives (hardlinks fall back to symlinks across "
+                "drives).\n\nUse Hardlink mode with both folders on the same "
+                "drive for CET to work.\n\nDeploy anyway?"
             ),
             _done,
             confirm_label=self.tr("Deploy anyway"),
             cancel_label=self.tr("Cancel"),
-            card_h=280,
+            card_h=340,
         )
 
     def _install_next(self):
