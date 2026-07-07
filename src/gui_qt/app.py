@@ -3426,6 +3426,9 @@ class MainWindow(QMainWindow):
             self._profile_selector.set_items(profs, current=profile_name)
             self._gs.set_profile(profile_name)
             self._profile_selector.set_current(profile_name)
+            # Rebuild pinned actions so "Remove current profile…" shows for the
+            # freshly-created (removable) collection profile.
+            self._refresh_profile_actions()
         except Exception as exc:
             self._append_log(f"[collection] profile switch failed: {exc}")
         self._reload_modlist(rescan_index=rescan_index)
@@ -5321,6 +5324,10 @@ class MainWindow(QMainWindow):
         refresh the selector list (Remove-eligibility, etc.)."""
         self._profile_selector.set_items(self._gs.profiles(),
                                          current=self._gs.profile)
+        # Lock state feeds the "Remove current profile…" gate — rebuild the
+        # pinned actions so unlocking the active profile reveals Remove (and
+        # locking it hides Remove) without reopening the dropdown.
+        self._refresh_profile_actions()
 
     def _on_profile_renamed(self, old: str, new: str):
         profs = self._gs.profiles()
@@ -5332,6 +5339,9 @@ class MainWindow(QMainWindow):
             self._reload_plugins()
         else:
             self._profile_selector.set_items(profs, current=self._gs.profile)
+        # The active profile (or its name) may have changed — rebuild the pinned
+        # actions so Remove-eligibility tracks the current profile.
+        self._refresh_profile_actions()
         self._update_deployed_profile_highlight()
 
     def _on_profile_removed(self, name: str):
@@ -5346,6 +5356,9 @@ class MainWindow(QMainWindow):
             self._reload_plugins()
         else:
             self._profile_selector.set_items(profs, current=self._gs.profile)
+        # Fall-back to default (or any other switch) changes Remove-eligibility —
+        # rebuild the pinned actions so Remove hides on the locked default.
+        self._refresh_profile_actions()
         self._update_deployed_profile_highlight()
 
     def _on_new_profile_create(self, name: str, profile_specific_mods: bool):
@@ -5380,6 +5393,9 @@ class MainWindow(QMainWindow):
         self._profile_selector.set_items(profs, current=name)
         self._gs.set_profile(name)
         self._profile_selector.set_current(name)
+        # Rebuild the pinned actions so "Remove current profile…" appears now
+        # that the active profile is a fresh (unlocked, removable) one.
+        self._refresh_profile_actions()
         self._reload_modlist()
         self._reload_plugins()
         self._update_deployed_profile_highlight()
