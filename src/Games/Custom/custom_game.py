@@ -305,6 +305,16 @@ class StandardCustomGame(BaseGame):
         return v if v in ("upper", "lower", "force_lower", "force_upper") else "upper"
 
     @property
+    def filemap_casing_pins(self) -> dict[str, str]:
+        raw = self._defn.get("filemap_casing_pins")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k).lower(): str(v)
+            for k, v in raw.items() if isinstance(v, str) and v
+        }
+
+    @property
     def mod_folder_strip_prefixes_post(self) -> set[str]:
         return _defn_to_set(self._defn, "mod_folder_strip_prefixes_post")
 
@@ -710,6 +720,16 @@ class Ue5CustomGame(UE5Game):
     def filemap_casing(self) -> str:
         v = self._defn.get("filemap_casing", "upper")
         return v if v in ("upper", "lower", "force_lower", "force_upper") else "upper"
+
+    @property
+    def filemap_casing_pins(self) -> dict[str, str]:
+        raw = self._defn.get("filemap_casing_pins")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k).lower(): str(v)
+            for k, v in raw.items() if isinstance(v, str) and v
+        }
 
     @property
     def mod_folder_strip_prefixes_post(self) -> set[str]:

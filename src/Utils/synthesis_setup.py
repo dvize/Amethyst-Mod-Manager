@@ -983,80 +983,19 @@ def symlink_mygames(game: "BaseGame", log: LogFn) -> Path | None:
 
 
 def deploy_active_profile(game: "BaseGame", profile: str, log: LogFn) -> bool:
-    """Run restore + filemap rebuild + deploy for the active profile."""
-    from Utils.filemap import build_filemap
-    from Utils.deploy import (
-        LinkMode, deploy_root_folder, restore_root_folder,
-        load_per_mod_strip_prefixes,
-    )
-    from Utils.profile_state import read_excluded_mod_files
-    from Utils.wine_dll_config import deploy_game_wine_dll_overrides
+    """Deploy *profile* exactly as pressing the Deploy button does.
 
-    game_root = game.get_game_path()
+    Delegates to the shared ``run_deploy_pipeline`` (the canonical deploy path)
+    so the pre-launch deploy stays in lock-step with the Deploy button:
+    incremental fast path, deferred runtime snapshot, mount checks, per-profile
+    ``load_paths`` on the profile switch, root-flagged mods, etc. — none of which
+    the old bespoke copy did.  Called from the synthesis wizard's launch worker
+    thread.
+    """
+    from Utils.deploy_pipeline import run_deploy_pipeline
+
     log(f"Deploying profile '{profile}' before launch …")
-
-    try:
-        profile_root = game.get_profile_root()
-        last_deployed = game.get_last_deployed_profile()
-        if last_deployed:
-            game.set_active_profile_dir(profile_root / "profiles" / last_deployed)
-
-        if getattr(game, "restore_before_deploy", True) and hasattr(game, "restore"):
-            try:
-                game.restore(log_fn=log)
-            except RuntimeError:
-                pass
-
-        restore_rf_dir = game.get_effective_root_folder_path()
-        if restore_rf_dir.is_dir() and game_root:
-            restore_root_folder(restore_rf_dir, game_root, log_fn=log)
-
-        game.set_active_profile_dir(profile_root / "profiles" / profile)
-
-        staging = game.get_effective_mod_staging_path()
-        modlist_path = profile_root / "profiles" / profile / "modlist.txt"
-        filemap_out = game.get_effective_filemap_path()
-        if modlist_path.is_file():
-            try:
-                _exc_raw = read_excluded_mod_files(modlist_path.parent, None)
-                _exc = ({k: set(v) for k, v in _exc_raw.items()}
-                        if _exc_raw else None)
-                build_filemap(
-                    modlist_path, staging, filemap_out,
-                    strip_prefixes=game.mod_folder_strip_prefixes or None,
-                    per_mod_strip_prefixes=load_per_mod_strip_prefixes(modlist_path.parent),
-                    allowed_extensions=game.mod_install_extensions or None,
-                    root_deploy_folders=game.mod_root_deploy_folders or None,
-                    excluded_mod_files=_exc,
-                    conflict_ignore_filenames=getattr(game, "conflict_ignore_filenames", None) or None,
-                    exclude_dirs=getattr(game, "filemap_exclude_dirs", None) or None,
-                )
-            except Exception as fm_err:
-                log(f"Filemap rebuild warning: {fm_err}")
-
-        deploy_mode = (game.get_deploy_mode() if hasattr(game, "get_deploy_mode")
-                       else LinkMode.HARDLINK)
-        game.deploy(log_fn=log, profile=profile, mode=deploy_mode)
-        game.save_last_deployed_profile(profile)
-
-        _pfx = game.get_prefix_path()
-        if _pfx and _pfx.is_dir():
-            deploy_game_wine_dll_overrides(
-                game.name, _pfx, game.wine_dll_overrides, log_fn=log)
-
-        target_rf_dir = game.get_effective_root_folder_path()
-        rf_allowed = getattr(game, "root_folder_deploy_enabled", True)
-        if rf_allowed and target_rf_dir.is_dir() and game_root:
-            deploy_root_folder(target_rf_dir, game_root, mode=deploy_mode, log_fn=log)
-
-        if hasattr(game, "swap_launcher"):
-            game.swap_launcher(log)
-
-        log("Deploy complete.")
-        return True
-    except Exception as exc:
-        log(f"Deploy error: {exc}")
-        return False
+    return run_deploy_pipeline(game, profile, log_fn=log)
 
 
 def launch_synthesis(game: "BaseGame", proton_script: Path, profile: str,

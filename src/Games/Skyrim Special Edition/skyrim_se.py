@@ -145,7 +145,14 @@ class SkyrimSE(Fallout_3):
     @property
     def reshade_arch(self) -> int:
         return 64
-    
+
+    @property
+    def filemap_casing_pins(self) -> dict[str, str]:
+        return {
+            "hudmoviebaseinstance":    "HUDMovieBaseInstance",
+            "compassshoutmeterholder": "CompassShoutMeterHolder",
+        }
+
     @property
     def custom_routing_rules(self) -> list:
         from Utils.deploy import CustomRule

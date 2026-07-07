@@ -147,7 +147,7 @@ class _IncrementalState:
         "filemap_root", "sorted_keys_root", "lines_root",
         "dirty", "last_disabled_frozen",
         "casing_strategy", "dir_refcount", "ctx_variants", "canonical",
-        "dir_rewrite", "casing_ties_present",
+        "dir_rewrite", "casing_ties_present", "casing_pins",
     )
 
     def __init__(self):
@@ -187,6 +187,9 @@ class _IncrementalState:
         self.canonical: dict[tuple[str, str], str] = {}
         self.dir_rewrite: dict[str, "str | None"] = {}
         self.casing_ties_present = False
+        # Per-folder casing pins (lowercase segment → exact casing) applied
+        # after canonical normalization; empty = no pins.  See _pin_rel_str.
+        self.casing_pins: dict[str, str] = {}
 
     def clone(self) -> "_IncrementalState":
         """Deep-enough copy for a dry-run delta (verify mode).
@@ -226,6 +229,7 @@ class _IncrementalState:
         st.canonical = dict(self.canonical)
         st.dir_rewrite = dict(self.dir_rewrite)
         st.casing_ties_present = self.casing_ties_present
+        st.casing_pins = self.casing_pins  # immutable per build; share
         return st
 
 
@@ -298,6 +302,7 @@ def _build_incr_fingerprint(
     excluded_mod_files,
     normalize_folder_case: bool,
     filemap_casing: str,
+    filemap_casing_pins,
     conflict_key_fn,
     root_folder_mods,
     utf8_bad: frozenset,
@@ -326,6 +331,7 @@ def _build_incr_fingerprint(
             for m, v in (excluded_mod_files or {}).items()
         )),
         normalize_folder_case, filemap_casing,
+        tuple(sorted((filemap_casing_pins or {}).items())),
         conflict_key_fn is None,
         frozenset(root_folder_mods or ()),
         utf8_bad,
@@ -387,6 +393,7 @@ def _make_incr_state(
     disabled_frozen: frozenset,
     casing_strategy, dir_refcount, ctx_variants, canonical, dir_rewrite,
     casing_ties: bool,
+    casing_pins: dict[str, str],
 ) -> _IncrementalState:
     """Assemble a fresh _IncrementalState from full-merge intermediates."""
     st = _IncrementalState()
@@ -414,6 +421,7 @@ def _make_incr_state(
     st.canonical = canonical
     st.dir_rewrite = dir_rewrite
     st.casing_ties_present = casing_ties
+    st.casing_pins = casing_pins
     return st
 
 
@@ -573,11 +581,16 @@ def _normalize_one_rel_str(st: _IncrementalState, raw: str) -> str:
     d = raw[:slash]
     nd = st.dir_rewrite.get(d, _MEMO_MISS)
     if nd is _MEMO_MISS:
+        pins = st.casing_pins
         parent = ""
         parts: list[str] = []
         changed = False
         for seg in d.split("/"):
             c = st.canonical.get((parent, seg.lower()), seg)
+            # Pins win over the canonical pick (segment-name match, any depth).
+            pinned = pins.get(seg.lower()) if pins else None
+            if pinned is not None:
+                c = pinned
             if c != seg:
                 changed = True
             parts.append(c)
@@ -702,6 +715,7 @@ def _try_incremental(
             "exclude_dirs", "conflict_ignore_filenames",
             "excluded_loose_filenames", "allowed_top_level_folders",
             "excluded_mod_files", "normalize_folder_case", "filemap_casing",
+            "filemap_casing_pins",
             "no_conflict_key_fn", "root_folder_mods", "utf8_bad",
         )
         _bad = [
@@ -886,8 +900,12 @@ def _try_incremental(
                     rel_str = _normalize_one_rel_str(st, raw)
                 elif force_strategy is not None:
                     rel_str = _force_case_one(raw, force_strategy)
+                    if st.casing_pins:
+                        rel_str = _pin_rel_str(rel_str, st.casing_pins)
                 else:
                     rel_str = raw
+                    if st.casing_pins:
+                        rel_str = _pin_rel_str(rel_str, st.casing_pins)
                 fmap_ns[rel_key] = (rel_str, winner)
                 if entry_old is None:
                     inserted.append(rel_key)
@@ -1499,6 +1517,91 @@ def _apply_force_casing(
                 files[rel_key] = _force_case_one(rel_str, strategy)
 
 
+def _apply_casing_pins(
+    *all_files_list: dict[str, dict[str, str]],
+    pins: dict[str, str],
+) -> None:
+    """Force specific folder segments to a pinned exact casing, in place.
+
+    *pins* maps a lowercase folder-segment name to the exact casing it must
+    deploy as (e.g. ``{"compassshoutmeterholder": "CompassShoutMeterHolder"}``).
+    Any folder segment whose lowercased name is a key is rewritten to the
+    pinned value, at any depth.  Only the named segment is touched — folders
+    nested inside it are left to the normal strategy — and the final segment
+    (the filename) is never rewritten.
+
+    Pins win over ``filemap_casing`` / ``_normalize_folder_cases`` because this
+    runs last, so a mod that reads its own data folder by a hardcoded
+    case-sensitive path always sees the casing it expects, regardless of what
+    casing any other mod ships for the same folder name.  Applied to the
+    output dicts only (both full-rebuild and incremental paths converge here),
+    so the two code paths can never disagree on a pinned folder.
+    """
+    if not pins:
+        return
+    for all_files in all_files_list:
+        if not all_files:
+            continue
+        for files in all_files.values():
+            for rel_key in files:
+                rel_str = files[rel_key]
+                slash = rel_str.rfind("/")
+                if slash < 0:
+                    continue  # loose file — no folder segments to pin
+                parts = rel_str.split("/")
+                changed = False
+                for i in range(len(parts) - 1):  # skip the filename
+                    pinned = pins.get(parts[i].lower())
+                    if pinned is not None and pinned != parts[i]:
+                        parts[i] = pinned
+                        changed = True
+                if changed:
+                    files[rel_key] = "/".join(parts)
+
+
+def _pin_rel_str(rel_str: str, pins: dict[str, str]) -> str:
+    """Return *rel_str* with any pinned folder segment forced to its casing.
+
+    Segment-name match (any depth); the final segment (filename) is never
+    touched.  Returns the input unchanged when nothing is pinned.
+    """
+    slash = rel_str.rfind("/")
+    if slash < 0:
+        return rel_str  # loose file — no folder segments to pin
+    parts = rel_str.split("/")
+    changed = False
+    for i in range(len(parts) - 1):  # skip the filename
+        pinned = pins.get(parts[i].lower())
+        if pinned is not None and pinned != parts[i]:
+            parts[i] = pinned
+            changed = True
+    return "/".join(parts) if changed else rel_str
+
+
+def _apply_casing_pins_tuplemap(
+    pins: dict[str, str],
+    *tuple_maps: dict[str, tuple[str, str]],
+) -> None:
+    """Apply casing pins to ``{rel_key: (rel_str, mod_name)}`` maps, in place.
+
+    Same pinning rule as :func:`_apply_casing_pins`, but for the winner-map
+    shape used at write time (both the full-rebuild and incremental paths
+    converge on this shape just before ``_write_filemap``).  Applying it at
+    both write sites keeps a pinned folder identical regardless of which path
+    produced the map — pins are deterministic and path-independent, so the two
+    can never disagree.
+    """
+    if not pins:
+        return
+    for tmap in tuple_maps:
+        if not tmap:
+            continue
+        for rel_key, (rel_str, mod_name) in tmap.items():
+            new_rs = _pin_rel_str(rel_str, pins)
+            if new_rs != rel_str:
+                tmap[rel_key] = (new_rs, mod_name)
+
+
 # ---------------------------------------------------------------------------
 # Mod index — persistent cache of each mod's file list
 # ---------------------------------------------------------------------------
@@ -2018,6 +2121,7 @@ def build_filemap(
     excluded_mod_files: dict[str, set[str]] | None = None,
     normalize_folder_case: bool = True,
     filemap_casing: str = FILEMAP_CASING_UPPER,
+    filemap_casing_pins: dict[str, str] | None = None,
     conflict_key_fn: "Callable[[str, str], str] | None" = None,
     exclude_dirs: frozenset[str] | None = None,
     log_fn: "Callable[[str], None] | None" = None,
@@ -2062,6 +2166,12 @@ def build_filemap(
     Returns:
         (count, conflict_map, overrides, overridden_by)
     """
+    # Normalize pin keys to lowercase once (segment-name match is case-insensitive).
+    _pins: dict[str, str] = (
+        {k.lower(): v for k, v in filemap_casing_pins.items()}
+        if filemap_casing_pins else {}
+    )
+
     entries = read_modlist(modlist_path)
 
     # Only enabled, non-separator mods
@@ -2112,7 +2222,7 @@ def build_filemap(
                 exclude_dirs, conflict_ignore_filenames,
                 excluded_loose_filenames, allowed_top_level_folders,
                 excluded_mod_files, normalize_folder_case, filemap_casing,
-                conflict_key_fn, root_folder_mods, _utf8_bad,
+                _pins, conflict_key_fn, root_folder_mods, _utf8_bad,
             )
     if not _incr_on:
         _drop_incr_state(_output_key)
@@ -2366,11 +2476,23 @@ def build_filemap(
                 filemap_root[_rk] = (_rs, _mn)
     perftrace.mark("filemap: normalize folder casing", time.perf_counter() - _norm_t0)
 
+    # Casing pins win over the strategy above — applied last, and regardless of
+    # normalize_folder_case, so a mod that reads its own data folder by a
+    # hardcoded case-sensitive path always sees the casing it shipped.  The
+    # incremental fast path applies the same pins in _normalize_one_rel_str, so
+    # both paths produce identical output for a pinned folder.
+    if _pins:
+        _apply_casing_pins_tuplemap(_pins, filemap, filemap_root)
+
     # Skip-if-unchanged: fingerprint the winner map + disabled state.
     # If identical to the last write for this output path, skip the expensive
     # sort + string build + disk write (and post_build_filemap re-read).
     # disabled_plugins is rare but must be included since it affects written lines.
-    _winner_snapshot = (frozenset(filemap_winner.items()), _disabled_frozen, frozenset(filemap_root.items()))
+    # Snapshot the full normal-namespace map (rel_key → rel_str+mod), not just
+    # the winner (rel_key → mod): folder-casing changes — from the strategy or a
+    # casing pin — alter the written rel_str without changing the winner, and
+    # the skip-if-unchanged check must still detect them.
+    _winner_snapshot = (frozenset(filemap.items()), _disabled_frozen, frozenset(filemap_root.items()))
     with _filemap_winner_cache_lock:
         _unchanged = _filemap_winner_cache.get(_output_key) == _winner_snapshot
 
@@ -2384,7 +2506,7 @@ def build_filemap(
             filemap_root, skeys_r, lines_r,
             _disabled_frozen,
             _cas_strategy, _cas_refcount, _cas_ctxv, _cas_canon, _cas_drw,
-            _cas_ties,
+            _cas_ties, _pins,
         ))
         _incr_stats["full"] += 1
         if _cas_ties and log_fn is not None:

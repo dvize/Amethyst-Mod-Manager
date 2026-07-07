@@ -579,6 +579,31 @@ class BaseGame(ABC):
         return "upper"
 
     @property
+    def filemap_casing_pins(self) -> "dict[str, str]":
+        """
+        Per-folder casing overrides that win over ``filemap_casing``.
+
+        Some mods read their own data folders by a hardcoded, case-sensitive
+        path string, so the merged deploy MUST use the exact casing that mod
+        shipped — the ``filemap_casing`` heuristic only preserves it by
+        coincidence (e.g. when the required casing happens to be the most-
+        uppercase variant) and can be knocked over the moment another mod
+        ships a differently-cased variant of the same folder name.
+
+        A pin makes that guarantee explicit.  Keyed by the *lowercase* folder
+        segment name, valued by the exact casing to deploy.  Any folder with
+        that name (at any depth) is rewritten to the pinned casing regardless
+        of strategy or what mods ship.  Only the named segment is affected;
+        folders nested inside it still follow the normal strategy.
+
+        Returns an empty dict by default (no pins).  Example (Skyrim SE):
+        ``{"compassshoutmeterholder": "CompassShoutMeterHolder"}`` keeps
+        Compass Navigation Overhaul from crashing when the folder would
+        otherwise deploy lowercased.
+        """
+        return {}
+
+    @property
     def mod_staging_requires_subdir(self) -> bool:
         """
         When True, each mod's staging folder must contain a named subdirectory
