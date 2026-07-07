@@ -600,6 +600,29 @@ def link_game_documents(game, pfx: Path, subpath, log_fn=_noop_log) -> None:
         log_fn(f"Documents/{sub} link failed: {exc}")
 
 
+def enable_show_dotfiles(proton_script: Path, env: dict,
+                         log_fn=_noop_log) -> None:
+    """Set Wine's ``ShowDotFiles=Y`` in the prefix behind *proton_script*/*env*.
+
+    Enables browsing of Unix dot-dirs (e.g. under Z:) from Wine file dialogs so
+    tools can reach mod-manager data. Idempotent — ``reg add /f`` overwrites any
+    existing value — so it's safe to call on every prefix resolution, not just
+    on first creation; that also repairs prefixes made before this behaviour.
+    """
+    from Utils.steam_finder import proton_run_command
+    try:
+        subprocess.run(
+            proton_run_command(proton_script, "run", "reg", "add",
+                               r"HKCU\Software\Wine", "/v", "ShowDotFiles",
+                               "/t", "REG_SZ", "/d", "Y", "/f", env=env),
+            env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except Exception as exc:
+        log_fn(f"ShowDotFiles: could not enable ({exc}).")
+
+
 def get_tool_prefix_env(
     exe_path: Path, proton_name: str, prefix_dir: Path | None = None,
     steam_id: str | None = None,
@@ -649,19 +672,11 @@ def get_tool_prefix_env(
             )
         except Exception:
             pass
-        # Enable "Show dotfiles" so tools can browse Unix dot-dirs under Z:.
-        try:
-            subprocess.run(
-                proton_run_command(proton_script, "run", "reg", "add",
-                                   r"HKCU\Software\Wine", "/v", "ShowDotFiles",
-                                   "/t", "REG_SZ", "/d", "Y", "/f",
-                                   env=env),
-                env=env,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=30,
-            )
-        except Exception:
-            pass
+
+    # Enable "Show dotfiles" so tools can browse Unix dot-dirs under Z:.
+    # Applied on every resolution (idempotent) — always ensures the property is
+    # set, and repairs prefixes created before this behaviour existed.
+    enable_show_dotfiles(proton_script, env)
 
     return proton_script, prefix_dir, env
 
@@ -1006,6 +1021,33 @@ def launch_winetricks_in_prefix(wineprefix: Path, log_fn=_noop_log) -> None:
         )
     except Exception as e:
         log_fn(f"Prefix tools error: {e}")
+
+
+def launch_wine_tool_in_prefix(proton_script: Path, prefix_dir: Path, env: dict,
+                               tool: str, log_fn=_noop_log) -> bool:
+    """Launch a bundled wine tool (``winecfg`` / ``regedit``) inside an isolated
+    tool prefix. Returns False if the launch failed.
+
+    *proton_script*/*env* come from ``get_tool_prefix_env`` (env already carries
+    STEAM_COMPAT_DATA_PATH); *prefix_dir* is that same isolated prefix. Mirrors
+    proton_tools.wine_tool_command: uses Proton's ``runinprefix`` verb (running
+    the raw ``files/bin/wine`` binary core-dumps on modern GE-Proton) and, inside
+    our own Flatpak sandbox, forwards the launch to the host.
+    """
+    from Utils.proton_tools import _host_forward
+    from Utils.steam_finder import proton_run_command
+
+    env["WINEPREFIX"] = str(prefix_dir / "pfx")
+    cmd = proton_run_command(proton_script, "runinprefix", tool, env=env)
+    cmd = _host_forward(cmd, env, lambda m: log_fn(f"Prefix tools: {m}"))
+    log_fn(f"Prefix tools: launching {tool} …")
+    try:
+        subprocess.Popen(cmd, env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        log_fn(f"Prefix tools error: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
