@@ -2111,13 +2111,27 @@ class MainWindow(QMainWindow):
         captured rate limits the footer can read."""
         if getattr(self, "_nexus_api", None) is not None:
             return self._nexus_api
-        from Nexus.nexus_oauth import load_oauth_tokens
+        from Nexus.nexus_oauth import load_oauth_tokens, clear_oauth_tokens, OAuthRefreshError
         from Nexus.nexus_api import NexusAPI
         tokens = load_oauth_tokens()
         if tokens is None:
             return None
         try:
             self._nexus_api = NexusAPI.from_oauth(tokens)
+        except OAuthRefreshError as exc:
+            self._append_log(f"[nexus] api init failed: {exc}")
+            # A dead (rotated-out / revoked) refresh token wedges every future
+            # launch — clear it so the next attempt starts from a clean login.
+            # A transient network failure leaves the token in place to retry.
+            if exc.token_revoked:
+                clear_oauth_tokens()
+                self._append_log("[nexus] cleared expired login — please log in again")
+                self._notify(
+                    self.tr("Your Nexus session expired — please log in again "
+                            "(Nexus ▸ Login to Nexus)."),
+                    "warning",
+                )
+            return None
         except Exception as exc:
             self._append_log(f"[nexus] api init failed: {exc}")
             return None
@@ -10283,6 +10297,14 @@ def run() -> int:
         _splash = None
 
     win = MainWindow(app, splash=_splash)
+    # Route stderr + uncaught tracebacks into the log panel now that the log
+    # sink (set_app_log) is wired by MainWindow.__init__. Best-effort — a
+    # failure here must never block startup.
+    try:
+        from Utils.stderr_capture import install as _install_stderr_capture
+        _install_stderr_capture()
+    except Exception:
+        pass
     # Show the window immediately so its layout gets a real size (the deferred
     # singleShot(0) setup in __init__ reads live widget heights), but at zero
     # opacity so nothing is visibly rendered behind the splash while it loads.
