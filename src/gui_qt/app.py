@@ -262,6 +262,8 @@ class MainWindow(QMainWindow):
     _qu_resolved = Signal(object, object)         # (queue list, skipped list)
     _qu_downloaded = Signal(object, object)       # (dl_items list, failed list)
     _qu_dl_progress = Signal("qlonglong", "qlonglong")  # aggregate (cur_bytes, total_bytes; 64-bit: >2GB)
+    _reinstall_downloaded = Signal(object, object)  # (dl_items list, failed list)
+    _reinstall_dl_progress = Signal("qlonglong", "qlonglong")  # aggregate bytes (64-bit)
     _req_install_files = Signal(object, object)   # (ctx dict, files|None)
     _req_install_dl = Signal(object, object, object)  # (archive|None, meta|None, dl_key)
     _req_install_prog = Signal(object, object, "qlonglong", "qlonglong")  # (dl_key, name, downloaded, total bytes; 64-bit: >2GB)
@@ -471,6 +473,8 @@ class MainWindow(QMainWindow):
         self._qu_resolved.connect(self._on_qu_resolved)
         self._qu_downloaded.connect(self._on_qu_downloaded)
         self._qu_dl_progress.connect(self._on_qu_dl_progress)
+        self._reinstall_downloaded.connect(self._on_reinstall_downloaded)
+        self._reinstall_dl_progress.connect(self._on_reinstall_dl_progress)
         self._endorse_done.connect(self._on_endorse_done)
         self._amm_endorse_done.connect(self._on_amm_endorse_done)
         self._copy_done.connect(self._on_copy_done)
@@ -4004,31 +4008,223 @@ class MainWindow(QMainWindow):
         if not names:
             return
 
-        from gui_qt.modlist_menu import _installation_archive
+        from gui_qt.modlist_menu import _installation_archive, _read_mod_meta
         preferred: dict[str, str] = {}   # archive path → forced folder name
         paths: list[str] = []
-        missing: list[str] = []
+        redownload: list[tuple] = []     # (mod_name, domain, mod_id, file_id, filename)
+        missing: list[str] = []          # no archive AND no Nexus info to redownload
         for nm in names:
             arc = _installation_archive(self._modlist_view, nm)
-            if arc is None:
-                missing.append(nm)
-                self._append_log(f"[reinstall] {nm} — install archive not found, "
-                                 "skipped.")
+            if arc is not None:
+                paths.append(str(arc))
+                preferred[str(arc)] = nm
                 continue
-            paths.append(str(arc))
-            preferred[str(arc)] = nm
+            # Archive gone — fall back to a Nexus redownload if this mod carries
+            # a modid + fileid (and a resolvable game domain) in its meta.ini.
+            meta = _read_mod_meta(self._modlist_view, nm)
+            mod_id = int(getattr(meta, "mod_id", 0) or 0) if meta is not None else 0
+            file_id = int(getattr(meta, "file_id", 0) or 0) if meta is not None else 0
+            from Nexus.nexus_meta import normalise_game_domain
+            domain = normalise_game_domain(
+                getattr(meta, "game_domain", "") or "") if meta is not None else ""
+            if not domain:
+                domain = getattr(game, "nexus_game_domain", "") or ""
+            if mod_id > 0 and file_id > 0 and domain:
+                redownload.append((nm, domain, mod_id, file_id,
+                                   getattr(meta, "installation_file", "") or ""))
+            else:
+                missing.append(nm)
+                self._append_log(f"[reinstall] {nm} — install archive not found and "
+                                 "no Nexus mod/file id to redownload, skipped.")
 
-        if not paths:
+        if not paths and not redownload:
             self._notify(self.tr("No install archive found for the selected mod(s)."),
                          "warning")
             return
         if missing:
             self._notify(
                 self.tr("Reinstalling {0} mod(s); {1} skipped "
-                "(no archive found).").format(len(paths), len(missing)), "info")
-        # clear_archives=False: reinstall CONSUMES an existing archive the user
-        # kept — deleting it would make the next reinstall impossible.
-        self._install_paths(paths, preferred_names=preferred,
+                "(no archive found).").format(
+                    len(paths) + len(redownload), len(missing)), "info")
+
+        # Redownload-only reinstalls go through the Nexus path (premium download
+        # or browser fallback). If some mods still have their archive, install
+        # those now and redownload the rest afterwards.
+        if paths:
+            # clear_archives=False: reinstall CONSUMES an existing archive the
+            # user kept — deleting it would make the next reinstall impossible.
+            self._install_paths(paths, preferred_names=preferred,
+                                clear_archives=False)
+        if redownload:
+            self._redownload_and_reinstall(redownload)
+
+    def _redownload_and_reinstall(self, items):
+        """Reinstall mods whose install archive is gone by redownloading the
+        exact recorded file from Nexus (modid + fileid from meta.ini), then
+        installing via _install_paths with the mod's folder name forced (silent
+        Replace-All). Premium users get a direct download; non-premium users get
+        each mod's Nexus files page opened in the browser (site 'Download with
+        Mod Manager' flow). `items` = [(mod_name, domain, mod_id, file_id,
+        filename), …]."""
+        api = self._ensure_nexus_api()
+        if api is None:
+            self._notify(
+                self.tr("Log in first: Nexus ▸ Login to Nexus ▸ Login via SSO."),
+                "warning")
+            return
+        game = self._gs.game
+        is_premium = False
+        try:
+            is_premium = bool(api.validate().is_premium)
+        except Exception:
+            pass
+
+        if not is_premium:
+            # Non-premium: open each mod's files page so the user can download
+            # it manually (the nxm:// handler routes it back into Downloads).
+            from Utils.xdg import open_url
+            for nm, domain, mod_id, file_id, _fn in items:
+                open_url(
+                    f"https://www.nexusmods.com/{domain}/mods/{mod_id}"
+                    f"?tab=files&file_id={file_id}", log_fn=self._append_log)
+                self._append_log(
+                    f"[reinstall] {nm} — archive missing and Nexus Premium "
+                    "required for direct download; opened the files page.")
+            self._notify(
+                self.tr("Premium required to redownload. Opened {0} mod page(s) "
+                "in your browser — download, then reinstall.").format(len(items)),
+                "info")
+            return
+
+        self._append_log(
+            f"[reinstall] redownloading {len(items)} missing archive(s)…")
+        self._notify(
+            self.tr("Reinstall — redownloading {0} mod(s)…").format(len(items)),
+            "info")
+
+        from Utils.ui_config import load_collection_settings
+        try:
+            dl_workers = max(1, int(load_collection_settings().get("max_concurrent", 8)))
+        except Exception:
+            dl_workers = 8
+
+        import threading
+
+        # One shared progress card for the whole batch (aggregate bytes).
+        self._reinstall_dl_phase = self.tr(
+            "Redownloading {0} mod(s)…").format(len(items))
+        progress = {}                     # mod_name → [cur_bytes, total_bytes]
+        for nm, *_ in items:
+            progress[nm] = [0, 0]
+        progress_lock = threading.Lock()
+        last_emit = [0.0]
+
+        def _post_aggregate(force=False):
+            import time as _time
+            with progress_lock:
+                now = _time.monotonic()
+                if not force and now - last_emit[0] < 0.1:
+                    return
+                last_emit[0] = now
+                cur = sum(c for c, _t in progress.values())
+                tot = sum(t for _c, t in progress.values())
+            self._reinstall_dl_progress.emit(cur, tot)
+
+        _post_aggregate(force=True)
+
+        def _download_all():
+            import concurrent.futures as _cf
+            from Nexus.nexus_download import NexusDownloader
+            from Nexus.nexus_meta import build_meta_from_download
+            from Utils.config_paths import get_download_cache_dir_for_game
+            dest = get_download_cache_dir_for_game(getattr(game, "name", "") or "")
+            downloader = NexusDownloader(api, download_dir=dest)
+            dl_items = []          # (mod_name, archive_path, prebuilt_meta)
+            failed = []            # (mod_name, reason)
+            lock = threading.Lock()
+
+            def _one(item):
+                mod_name, domain, mod_id, file_id, filename = item
+                try:
+                    def _on_progress(cur, tot, _m=mod_name):
+                        with progress_lock:
+                            slot = progress[_m]
+                            slot[0] = int(cur)
+                            if tot:
+                                slot[1] = int(tot)
+                        _post_aggregate()
+
+                    result = downloader.download_file(
+                        game_domain=domain, mod_id=mod_id, file_id=file_id,
+                        dest_dir=dest, known_file_name=filename,
+                        progress_cb=_on_progress)
+                    if not (result.success and result.file_path):
+                        with lock:
+                            failed.append((mod_name,
+                                           f"download failed — {result.error}"))
+                        return
+                    with progress_lock:
+                        slot = progress[mod_name]
+                        slot[1] = slot[1] or slot[0]
+                        slot[0] = slot[1]
+                    _post_aggregate(force=True)
+                    prebuilt = None
+                    try:
+                        mod_info = api.get_mod(domain, mod_id)
+                    except Exception:
+                        mod_info = None
+                    try:
+                        prebuilt = build_meta_from_download(
+                            game_domain=domain, mod_id=mod_id, file_id=file_id,
+                            archive_name=result.file_name, mod_info=mod_info)
+                    except Exception as exc:
+                        self._op_log.emit(
+                            f"[reinstall] Warning — could not build metadata: {exc}")
+                    with lock:
+                        dl_items.append((mod_name, str(result.file_path), prebuilt))
+                except Exception as exc:
+                    with lock:
+                        failed.append((mod_name, f"download error ({exc})"))
+
+            with _cf.ThreadPoolExecutor(max_workers=dl_workers) as pool:
+                list(pool.map(_one, items))
+            self._reinstall_downloaded.emit(dl_items, failed)
+
+        threading.Thread(target=_download_all, daemon=True,
+                         name="reinstall-dl").start()
+
+    def _on_reinstall_dl_progress(self, cur: int, tot: int):
+        """UI thread: drive the shared reinstall redownload progress card."""
+        self._ensure_feedback()
+        if self._progress_popup is None:
+            return
+        self._progress_popup.set_progress(
+            cur, tot, getattr(self, "_reinstall_dl_phase", None),
+            title=self.tr("Reinstall"), bytes_mode=True, key="reinstall-dl")
+
+    def _on_reinstall_downloaded(self, dl_items, failed):
+        """UI thread: redownloads finished. Install the batch via _install_paths
+        with the folder name forced per archive (silent Replace-All)."""
+        if self._progress_popup is not None:
+            self._progress_popup.clear(key="reinstall-dl")
+        for name, reason in failed:
+            self._append_log(f"[reinstall] {name}: {reason}")
+        if not dl_items:
+            if failed:
+                self._notify(
+                    self.tr("Reinstall: {0} mod(s) couldn't be redownloaded — "
+                    "see the log.").format(len(failed)), "warning")
+            return
+        paths = [p for _n, p, _m in dl_items]
+        metas = {p: m for _n, p, m in dl_items if m is not None}
+        preferred = {p: n for n, p, _m in dl_items}
+        if failed:
+            self._notify(
+                self.tr("Redownloaded {0} mod(s); {1} failed — see the log.").format(
+                    len(dl_items), len(failed)), "warning")
+        # clear_archives=False: keep the freshly downloaded archive so the mod
+        # can be reinstalled again without another download.
+        self._install_paths(paths, metas=metas, preferred_names=preferred,
                             clear_archives=False)
 
     def _quick_update_mods(self, mod_names):

@@ -199,8 +199,10 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
         _nexus_multi = [nm for nm in _names if _has_nexus_page(view, nm)]
         _reqs_multi = [nm for nm in _names if _has_missing_reqs(view, nm)]
         _qu = [nm for nm in _names if _has_update_flag(view, nm)]
+        # Reinstall: archive on disk OR redownloadable from Nexus (mod/file id).
         _reinstall_multi = [nm for nm in _names
-                            if _installation_archive(view, nm) is not None]
+                            if _installation_archive(view, nm) is not None
+                            or _can_redownload(view, nm)]
         if _abstain_multi:
             act(_mtf("Abstain selected ({0})", len(_abstain_multi)),
                 lambda ns=_abstain_multi: _endorse(view, ns, False))
@@ -263,11 +265,15 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
         act(_mt("Bundle options…"), lambda: _open_bundle(view, name))
     if _staging_ok:
         act(_mt("Create empty mod below"), lambda: _create_empty_mod(view, model, row))
-    # Reinstall Mod — shown only when the install archive is still on disk
-    # (Tk: ctx_meta present + _find_installation_archive). Reinstalls from the
-    # recorded archive into the same folder (silent Replace-All).
+    # Reinstall Mod — from the recorded archive when it's still on disk (Tk:
+    # ctx_meta present + _find_installation_archive), reinstalling into the same
+    # folder (silent Replace-All). When the archive is gone but the mod carries
+    # a Nexus mod/file id, offer 'Reinstall (Redownload)' instead — the handler
+    # redownloads from Nexus (premium) or opens the files page (non-premium).
     if _installation_archive(view, name) is not None:
         act(_mt("Reinstall Mod"), lambda: _reinstall(view, [name]))
+    elif _can_redownload(view, name):
+        act(_mt("Reinstall (Redownload)"), lambda: _reinstall(view, [name]))
     act(_mt("Rename mod"), lambda: _rename(view, model, row), enabled=not locked)
     divider()
     # Group 2: files & install options
@@ -668,6 +674,27 @@ def _installation_archive(view, name: str):
         if cand.is_file():
             return cand
     return None
+
+
+def _can_redownload(view, name: str) -> bool:
+    """True if the mod carries a Nexus mod id + file id (and a resolvable game
+    domain) in its meta.ini, so its install archive can be redownloaded from
+    Nexus even when the on-disk archive is gone. Gates the 'Reinstall
+    (Redownload)' menu item (the handler premium-gates / falls back to the
+    browser)."""
+    meta = _read_mod_meta(view, name)
+    if meta is None:
+        return False
+    if int(getattr(meta, "mod_id", 0) or 0) <= 0:
+        return False
+    if int(getattr(meta, "file_id", 0) or 0) <= 0:
+        return False
+    from Nexus.nexus_meta import normalise_game_domain
+    domain = normalise_game_domain(getattr(meta, "game_domain", "") or "")
+    if not domain:
+        game = getattr(view, "game", None)
+        domain = getattr(game, "nexus_game_domain", "") or ""
+    return bool(domain)
 
 
 # ---- Root Folder install toggle -------------------------------------------
@@ -1223,6 +1250,7 @@ _TR_MARKERS = (
     QT_TRANSLATE_NOOP("ModListMenu", "Quick Update"),
     QT_TRANSLATE_NOOP("ModListMenu", "Quick Update ({0})"),
     QT_TRANSLATE_NOOP("ModListMenu", "Reinstall ({0})"),
+    QT_TRANSLATE_NOOP("ModListMenu", "Reinstall (Redownload)"),
     QT_TRANSLATE_NOOP("ModListMenu", "Reinstall Mod"),
     QT_TRANSLATE_NOOP("ModListMenu", "Remove mod"),
     QT_TRANSLATE_NOOP("ModListMenu", "Remove mod ({0})"),
