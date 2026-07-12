@@ -21,6 +21,20 @@ from gui_qt.modlist_delegate import ModRowDelegate, SEP_H
 from gui_qt import column_state
 from gui_qt.modlist_header import TkStyleHeader
 
+
+class _StayOpenMenu(QMenu):
+    """A QMenu that stays open when a checkable action is toggled, so the user
+    can flip several column/filter options without re-opening it each time.
+    Non-checkable actions (and submenu navigation) behave normally."""
+
+    def mouseReleaseEvent(self, event):
+        act = self.activeAction()
+        if act is not None and act.isEnabled() and act.isCheckable():
+            act.trigger()          # flips the check + fires toggled
+            return                 # ...but DON'T let the menu close
+        super().mouseReleaseEvent(event)
+
+
 # Per-column default width + minimum (design px), mirroring the Tk app's
 # _layout_columns data_defaults / data_mins. Name auto-fills the leftover.
 COL_DEFAULTS = {
@@ -284,8 +298,18 @@ class ModListView(QTreeView):
         btn.setGeometry(max(0, x), 0, self._COL_BTN_W, h.height())
         btn.raise_()
 
+    def _add_quick_filter_action(self, menu, key: str, label: str):
+        """Add one checkable quick-filter action to `menu`. Checked = the
+        filter is in include-mode (state 1); toggling drives the shared state."""
+        get = getattr(self, "quick_filter_state", None)
+        a = QAction(label, menu)
+        a.setCheckable(True)
+        a.setChecked(callable(get) and get(key) == 1)
+        a.toggled.connect(lambda checked, k=key: self._on_quick_filter(k, checked))
+        menu.addAction(a)
+
     def _show_column_menu(self):
-        menu = QMenu(self)
+        menu = _StayOpenMenu(self)
         for col, name in enumerate(COLUMNS):
             if col == COL_NAME:
                 continue   # Name is always shown
@@ -299,18 +323,26 @@ class ModListView(QTreeView):
         # from the Filters panel. These drive the same filter state, so the
         # panel checkboxes stay in sync (the window wires on_quick_filter).
         menu.addSeparator()
-        get = getattr(self, "quick_filter_state", None)
         for key, label in (
             ("filter_show_enabled", self.tr("Enabled")),
             ("filter_show_disabled", self.tr("Disabled")),
             ("filter_hide_separators", self.tr("Hide separators")),
         ):
-            a = QAction(label, menu)
-            a.setCheckable(True)
-            a.setChecked(callable(get) and get(key) == 1)
-            a.toggled.connect(
-                lambda checked, k=key: self._on_quick_filter(k, checked))
-            menu.addAction(a)
+            self._add_quick_filter_action(menu, key, label)
+        # The remaining "By status" filters live in a submenu so the top level
+        # stays short. Same include-mode semantics as the quick filters above.
+        from gui_qt.modlist_filter import STATUS_FILTERS
+        _QUICK = {"filter_show_enabled", "filter_show_disabled",
+                  "filter_hide_separators"}
+        more = _StayOpenMenu(self.tr("More status filters"), menu)
+        for key, label in STATUS_FILTERS:
+            if key in _QUICK:
+                continue
+            # STATUS_FILTERS labels are registered for translation under the
+            # FilterSidePanel context (see filter_panel._TR_MARKERS).
+            self._add_quick_filter_action(
+                more, key, QCoreApplication.translate("FilterSidePanel", label))
+        menu.addMenu(more)
         btn = self._col_menu_btn
         menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
