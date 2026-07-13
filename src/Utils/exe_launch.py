@@ -175,6 +175,17 @@ def save_launch_options(game, exe_name: str, options: str) -> None:
                            options if options else None)
 
 
+def load_deploy_on_run(game, exe_name: str) -> bool:
+    """Whether to deploy the modlist before running this exe (default False)."""
+    return bool(_read_launch_mode_data(game).get(f"__deploy_on_run_{exe_name}",
+                                                 False))
+
+
+def save_deploy_on_run(game, exe_name: str, enabled: bool) -> None:
+    _write_launch_mode_key(game, f"__deploy_on_run_{exe_name}",
+                           True if enabled else None)
+
+
 def load_jar_runtime(game, exe_name: str) -> str:
     """Saved Java runtime for a .jar entry: 'host' (default) or 'proton'."""
     val = _read_launch_mode_data(game).get(f"__jar_runtime_{exe_name}")

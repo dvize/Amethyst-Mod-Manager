@@ -6000,11 +6000,22 @@ class MainWindow(QMainWindow):
                 return
             target = (exe_launch.launch_jar if exe_launch.is_jar(exe_path)
                       else exe_launch.launch_exe_via_proton)
-            threading.Thread(
-                target=target,
-                args=(exe_path, game), kwargs={"log_fn": self._append_log},
-                daemon=True,
-            ).start()
+
+            def _launch_exe():
+                threading.Thread(
+                    target=target,
+                    args=(exe_path, game), kwargs={"log_fn": self._append_log},
+                    daemon=True,
+                ).start()
+
+            # Per-exe "deploy on run": deploy exactly like the Deploy button,
+            # then launch once the (final, non-coalesced) deploy succeeds.
+            if (exe_launch.load_deploy_on_run(game, exe_path.name)
+                    and hasattr(game, "deploy")):
+                self._post_deploy_action = _launch_exe
+                self._on_deploy()
+            else:
+                _launch_exe()
             return
 
         # Game entry → optional deploy first, then Steam/Heroic/Proton routing.

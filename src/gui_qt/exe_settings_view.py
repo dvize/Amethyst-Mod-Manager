@@ -20,7 +20,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QComboBox, QLineEdit, QPlainTextEdit, QMenu, QScrollArea,
+    QComboBox, QLineEdit, QPlainTextEdit, QMenu, QScrollArea, QCheckBox,
 )
 
 from gui_qt.theme_qt import active_palette, _c, danger_close_button, button_qss
@@ -206,6 +206,18 @@ class ExeSettingsView(QWidget):
         so.addWidget(self._options_edit)
         bv.addWidget(sec_opts)
 
+        # -- Deploy on run -----------------------------------------------------
+        sec_deploy, sd = section(self.tr("Deploy on run"))
+        self._deploy_on_run_chk = QCheckBox(
+            self.tr("Deploy the modlist before running this exe"))
+        self._deploy_on_run_chk.setStyleSheet(
+            f"color:{_c(p,'TEXT_MAIN')};")
+        sd.addWidget(self._deploy_on_run_chk)
+        sd.addWidget(hint(self.tr(
+            "Runs the same deploy as the Deploy button, then launches this exe "
+            "once the deploy finishes.")))
+        bv.addWidget(sec_deploy)
+
         bv.addStretch(1)
         scroll.setWidget(body)
         v.addWidget(scroll, 1)
@@ -238,6 +250,8 @@ class ExeSettingsView(QWidget):
         self._options_edit.setText(exe_launch.load_launch_options(game, name))
         saved = exe_launch.load_proton_override(game, name) or ""
         self._proton_combo.setCurrentText(self._best_proton_match(saved))
+        self._deploy_on_run_chk.setChecked(
+            exe_launch.load_deploy_on_run(game, name))
         if self._is_jar:
             runtime = exe_launch.load_jar_runtime(game, name)
             idx = self._jar_runtime_combo.findData(runtime)
@@ -264,6 +278,8 @@ class ExeSettingsView(QWidget):
             game, name, "" if selected == "Game default" else selected)
         exe_launch.save_launch_options(game, name,
                                        self._options_edit.text().strip())
+        exe_launch.save_deploy_on_run(
+            game, name, self._deploy_on_run_chk.isChecked())
         if self._is_jar:
             exe_launch.save_jar_runtime(
                 game, name, self._jar_runtime_combo.currentData())
