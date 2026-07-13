@@ -851,7 +851,10 @@ class NexusBrowserView(QWidget):
         if self._section == "Tracked":
             menu.addAction(self.tr("Untrack"), lambda: self._user_action(
                 "untrack", entry))
-        elif self._section == "Endorsed":
+        else:
+            menu.addAction(self.tr("Track Mod"), lambda: self._user_action(
+                "track", entry))
+        if self._section == "Endorsed":
             menu.addAction(self.tr("Abstain"), lambda: self._user_action(
                 "abstain", entry))
         menu.exec(global_pos)
@@ -890,7 +893,10 @@ class NexusBrowserView(QWidget):
 
         def worker():
             try:
-                if kind == "untrack":
+                if kind == "track":
+                    self._api.track_mod(domain, mod_id)
+                    self._log(f"Nexus: tracking {entry.name}")
+                elif kind == "untrack":
                     self._api.untrack_mod(domain, mod_id)
                     self._log(f"Nexus: untracked {entry.name}")
                 elif kind == "abstain":
