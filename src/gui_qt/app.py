@@ -5292,28 +5292,26 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True, name="req-install-files").start()
 
     def _on_req_install_files(self, ctx, files):
-        """UI thread: pick which file to install (file chooser if >1 MAIN)."""
+        """UI thread: pick which file to install (chooser if >1 main/optional/misc)."""
         if files is None:           # non-premium / error path already handled
             self._req_installing = False
             return
-        mains = [f for f in files if f.category_name == "MAIN"] or list(files)
-        if not mains:
+        from gui_qt.nexus_file_chooser import NexusFileChooser, installable_files
+        picks = installable_files(files)
+        if not picks:
             self._notify(self.tr("No downloadable files for that mod."), "warning")
             self._req_installing = False
             return
-        mains.sort(key=lambda f: getattr(f, "uploaded_timestamp", 0), reverse=True)
-        if len(mains) > 1:
-            from gui_qt.nexus_file_chooser import NexusFileChooser
-
+        if len(picks) > 1:
             def _picked(chosen):
                 if chosen is None:
                     self._req_installing = False
                     return
                 self._start_req_download(ctx, chosen)
 
-            NexusFileChooser.show_over(self, ctx["name"], mains, _picked)
+            NexusFileChooser.show_over(self, ctx["name"], picks, _picked)
         else:
-            self._start_req_download(ctx, mains[0])
+            self._start_req_download(ctx, picks[0])
 
     def _start_req_download(self, ctx, f):
         domain, mod_id, name = ctx["domain"], ctx["mod_id"], ctx["name"]

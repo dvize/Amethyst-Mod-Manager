@@ -900,6 +900,14 @@ The md5 cache is preserved. Archives will be re-downloaded as needed.</translati
         <translation>Collections</translation>
     </message>
     <message>
+        <source>Most downloaded</source>
+        <translation>Most downloaded</translation>
+    </message>
+    <message>
+        <source>Sort: </source>
+        <translation>Sort: </translation>
+    </message>
+    <message>
         <source>Open on Nexus</source>
         <translation>Open on Nexus</translation>
     </message>
@@ -2778,6 +2786,10 @@ Click Done to clean up the extracted files and close.</translation>
         <translation>By category</translation>
     </message>
     <message>
+        <source>By author</source>
+        <translation>By author</translation>
+    </message>
+    <message>
         <source>By file type</source>
         <translation>By file type</translation>
     </message>
@@ -4125,6 +4137,30 @@ Download and install them manually — the links are in the collection page's "O
         <translation>Reinstalling {0} mod(s); {1} skipped (no archive found).</translation>
     </message>
     <message>
+        <source>Premium required to redownload. Opened {0} mod page(s) in your browser — download, then reinstall.</source>
+        <translation>Premium required to redownload. Opened {0} mod page(s) in your browser — download, then reinstall.</translation>
+    </message>
+    <message>
+        <source>Reinstall — redownloading {0} mod(s)…</source>
+        <translation>Reinstall — redownloading {0} mod(s)…</translation>
+    </message>
+    <message>
+        <source>Redownloading {0} mod(s)…</source>
+        <translation>Redownloading {0} mod(s)…</translation>
+    </message>
+    <message>
+        <source>Reinstall</source>
+        <translation>Reinstall</translation>
+    </message>
+    <message>
+        <source>Reinstall: {0} mod(s) couldn't be redownloaded — see the log.</source>
+        <translation>Reinstall: {0} mod(s) couldn't be redownloaded — see the log.</translation>
+    </message>
+    <message>
+        <source>Redownloaded {0} mod(s); {1} failed — see the log.</source>
+        <translation>Redownloaded {0} mod(s); {1} failed — see the log.</translation>
+    </message>
+    <message>
         <source>A Quick Update is already running.</source>
         <translation>A Quick Update is already running.</translation>
     </message>
@@ -5272,6 +5308,10 @@ How would you like to handle the existing mod?</translation>
         <translation>Reinstall ({0})</translation>
     </message>
     <message>
+        <source>Reinstall (Redownload)</source>
+        <translation>Reinstall (Redownload)</translation>
+    </message>
+    <message>
         <source>Reinstall Mod</source>
         <translation>Reinstall Mod</translation>
     </message>
@@ -5375,6 +5415,10 @@ How would you like to handle the existing mod?</translation>
         <translation>Version</translation>
     </message>
     <message>
+        <source>Author</source>
+        <translation>Author</translation>
+    </message>
+    <message>
         <source>Priority</source>
         <translation>Priority</translation>
     </message>
@@ -5400,6 +5444,10 @@ How would you like to handle the existing mod?</translation>
     <message>
         <source>Hide separators</source>
         <translation>Hide separators</translation>
+    </message>
+    <message>
+        <source>More status filters</source>
+        <translation>More status filters</translation>
     </message>
 </context>
 <context>
@@ -5767,12 +5815,24 @@ or an encrypted file when no keyring is available).</translation>
         <translation>Loading…</translation>
     </message>
     <message>
+        <source>Name</source>
+        <translation>Name</translation>
+    </message>
+    <message>
+        <source>Author</source>
+        <translation>Author</translation>
+    </message>
+    <message>
         <source>Search mods…</source>
         <translation>Search mods…</translation>
     </message>
     <message>
         <source>Search</source>
         <translation>Search</translation>
+    </message>
+    <message>
+        <source>Clear</source>
+        <translation>Clear</translation>
     </message>
     <message>
         <source>◂ Prev</source>
@@ -5791,6 +5851,10 @@ or an encrypted file when no keyring is available).</translation>
         <translation>No categories</translation>
     </message>
     <message>
+        <source>Search by author…</source>
+        <translation>Search by author…</translation>
+    </message>
+    <message>
         <source>No Nexus domain for this game.</source>
         <translation>No Nexus domain for this game.</translation>
     </message>
@@ -5801,6 +5865,10 @@ or an encrypted file when no keyring is available).</translation>
     <message>
         <source>Install</source>
         <translation>Install</translation>
+    </message>
+    <message>
+        <source>Mods by this author</source>
+        <translation>Mods by this author</translation>
     </message>
     <message>
         <source>Untrack</source>
@@ -6683,6 +6751,10 @@ Drag a plugin from the left pane to add a rule.</translation>
     <message>
         <source>Show / hide columns</source>
         <translation>Show / hide columns</translation>
+    </message>
+    <message>
+        <source>Filters</source>
+        <translation>Filters</translation>
     </message>
 </context>
 <context>

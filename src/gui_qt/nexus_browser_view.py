@@ -88,6 +88,11 @@ class NexusBrowserView(QWidget):
         self._sort_key = "downloads"
         self._time_days = None
         self._query = ""
+        self._search_mode = "Name"      # "Name" | "Author" (Browse search bar)
+        # When an author browse is launched from a card's right-click, we search
+        # by the uploader's stable account id (reliable) rather than the typed
+        # name. Non-zero id here → the Author-mode worker uses the id path.
+        self._uploader_id = 0
         self._selected_categories: list[str] = []
         self._show_adult = self._load_show_adult()
         self._page_size_choice = self._load_page_size()
@@ -284,6 +289,17 @@ class NexusBrowserView(QWidget):
         ft.setContentsMargins(10, 6, 10, 6)
         ft.setSpacing(6)
 
+        # Search-field mode: the labels are translated for display, but we map
+        # each back to a canonical English key ("Name"/"Author") so the worker's
+        # comparisons don't break under translation.
+        self._mode_label_name = self.tr("Name")
+        self._mode_label_author = self.tr("Author")
+        self._mode_sel = SelectorButton(
+            items=[self._mode_label_name, self._mode_label_author],
+            current=self._mode_label_name, min_width=110,
+            on_select=self._on_search_mode_changed)
+        ft.addWidget(self._mode_sel)
+
         self._search = QLineEdit()
         self._search.setPlaceholderText(self.tr("Search mods…"))
         self._search.setClearButtonEnabled(True)
@@ -297,6 +313,13 @@ class NexusBrowserView(QWidget):
         sbtn.setCursor(Qt.PointingHandCursor)
         sbtn.clicked.connect(self._do_search_now)
         ft.addWidget(sbtn)
+
+        cbtn = QToolButton()
+        cbtn.setText(self.tr("Clear"))
+        cbtn.setObjectName("ActionButton")
+        cbtn.setCursor(Qt.PointingHandCursor)
+        cbtn.clicked.connect(self._clear_search)
+        ft.addWidget(cbtn)
 
         ft.addStretch(1)
 
@@ -344,6 +367,7 @@ class NexusBrowserView(QWidget):
         self._search.blockSignals(True)
         self._search.clear()
         self._search.blockSignals(False)
+        self._reset_search_mode()
         self._update_section_buttons()
         self._update_browse_controls_visibility()
         self._reload()
@@ -357,6 +381,7 @@ class NexusBrowserView(QWidget):
         paged = self._section in ("Browse", "Trending")
         self._sort_sel.setVisible(browse)
         self._time_sel.setVisible(browse)
+        self._mode_sel.setVisible(browse)
         for w in (self._prev_btn, self._next_btn, self._page_edit,
                   self._perpage_sel):
             w.setVisible(paged)
@@ -454,6 +479,48 @@ class NexusBrowserView(QWidget):
         self._rebuild_cards()       # filter is applied at card-build time
 
     # -- search -------------------------------------------------------------
+    def _on_search_mode_changed(self, label: str):
+        # Map the (possibly translated) label back to a canonical key.
+        mode = "Author" if label == self._mode_label_author else "Name"
+        if mode == self._search_mode:
+            return
+        self._search_mode = mode
+        # Switching mode is a fresh, name-based query — drop any pinned uploader
+        # id from a prior right-click "Mods by this author".
+        self._uploader_id = 0
+        self._search.setPlaceholderText(
+            self.tr("Search by author…") if mode == "Author"
+            else self.tr("Search mods…"))
+        # Re-run the current query under the new mode. _do_search_now would
+        # short-circuit (query unchanged), so reload directly when there's text.
+        q = self._search.text().strip()
+        if q and (q.isdigit() or len(q) >= 2):
+            self._query = q
+            self._page = 0
+            self._set_section_for_search()
+            self._reload()
+
+    def _clear_search(self):
+        """Empty the search field, switch back to Name mode (if the dropdown was
+        on Author), and — if a search was active — return to the default
+        (unfiltered) listing for the current section."""
+        self._search.blockSignals(True)
+        self._search.clear()
+        self._search.blockSignals(False)
+        self._reset_search_mode()   # → Name mode + clears the pinned uploader id
+        if self._query:
+            self._query = ""
+            self._page = 0
+            self._reload()
+
+    def _reset_search_mode(self):
+        """Return the search bar to Name mode (used when switching sections)."""
+        self._uploader_id = 0
+        if self._search_mode != "Name":
+            self._search_mode = "Name"
+            self._search.setPlaceholderText(self.tr("Search mods…"))
+        self._mode_sel.set_current(self._mode_label_name)
+
     def _on_search_text(self, text: str):
         t = getattr(self, "_search_timer", None)
         if t is None:
@@ -472,6 +539,8 @@ class NexusBrowserView(QWidget):
             return
         if q == self._query:
             return
+        # A manually edited query is name-based — drop any pinned uploader id.
+        self._uploader_id = 0
         self._query = q
         self._page = 0
         self._set_section_for_search()
@@ -568,6 +637,8 @@ class NexusBrowserView(QWidget):
         sort_key = self._sort_key
         time_days = self._time_days
         query = self._query
+        mode = self._search_mode
+        uploader_id = self._uploader_id
         cats = list(self._selected_categories) or None
         domain = self._domain
 
@@ -576,13 +647,27 @@ class NexusBrowserView(QWidget):
             status = ""
             try:
                 if section == "Browse" and query:
-                    if query.isdigit():
+                    if mode == "Author":
+                        if uploader_id:
+                            # Right-click path: reliable stable-id lookup.
+                            entries = self._api.search_mods_by_uploader_id(
+                                domain, uploader_id, count=size,
+                                offset=page * size, category_names=cats,
+                                sort_key=sort_key)
+                        else:
+                            # Typed author search: match uploader by name.
+                            entries = self._api.search_mods_by_author(
+                                domain, query, count=size, offset=page * size,
+                                category_names=cats, sort_key=sort_key)
+                        status = f"Mods by '{query}': page {page + 1} ({len(entries)} result(s))"
+                    elif query.isdigit():
                         entries = self._api.search_mod_by_id(domain, int(query))
+                        status = f"Search '{query}': page {page + 1} ({len(entries)} result(s))"
                     else:
                         entries = self._api.search_mods(
                             domain, query, count=size, offset=page * size,
                             category_names=cats, sort_key=sort_key)
-                    status = f"Search '{query}': page {page + 1} ({len(entries)} result(s))"
+                        status = f"Search '{query}': page {page + 1} ({len(entries)} result(s))"
                 elif section == "Browse":
                     entries = self._api.get_top_mods(
                         domain, count=size, offset=page * size,
@@ -752,6 +837,17 @@ class NexusBrowserView(QWidget):
         menu = QMenu(self)
         menu.addAction(self.tr("Open on Nexus"), lambda: self._on_view(entry))
         menu.addAction(self.tr("Install"), lambda: self._on_install(entry))
+        # Browse by the uploader's stable account id (reliable — survives a
+        # rename and can't be spoofed via the free-text `author` field). Fall
+        # back to the display name / author only for a label when no id is
+        # available (e.g. a REST-sourced entry without uploader.memberId).
+        uploader_id = int(getattr(entry, "uploader_id", 0) or 0)
+        uploader_name = (getattr(entry, "uploaded_by", "") or "").strip() \
+            or (getattr(entry, "author", "") or "").strip()
+        if uploader_id or uploader_name:
+            menu.addAction(
+                self.tr("Mods by this author"),
+                lambda: self._browse_author(uploader_name, uploader_id))
         if self._section == "Tracked":
             menu.addAction(self.tr("Untrack"), lambda: self._user_action(
                 "untrack", entry))
@@ -759,6 +855,34 @@ class NexusBrowserView(QWidget):
             menu.addAction(self.tr("Abstain"), lambda: self._user_action(
                 "abstain", entry))
         menu.exec(global_pos)
+
+    def _browse_author(self, author: str, uploader_id: int = 0):
+        """List all mods by an uploader in the Browse section. Triggered from a
+        card's right-click menu. When *uploader_id* is given, search uses the
+        stable account id; *author* is only the human-readable label shown in
+        the search field."""
+        author = (author or "").strip()
+        uploader_id = int(uploader_id or 0)
+        if not author and not uploader_id:
+            return
+        # Switch to Browse first — _set_section clears the query and resets the
+        # mode (incl. the pinned uploader id), so do it before we set up below.
+        if self._section != "Browse":
+            self._set_section("Browse")
+        # Enter Author mode and run the search. Pin the uploader id so the worker
+        # takes the reliable id path rather than the typed-name path.
+        self._search_mode = "Author"
+        self._uploader_id = uploader_id
+        self._mode_sel.set_current(self._mode_label_author)
+        self._search.setPlaceholderText(self.tr("Search by author…"))
+        self._search.blockSignals(True)
+        self._search.setText(author)
+        self._search.blockSignals(False)
+        # Use a non-empty query so the worker enters the search branch even when
+        # only an id is known (fall back to the id string as a last resort).
+        self._query = author or str(uploader_id)
+        self._page = 0
+        self._reload()
 
     def _user_action(self, kind: str, entry):
         domain = getattr(entry, "domain_name", "") or self._domain
@@ -811,16 +935,14 @@ class NexusBrowserView(QWidget):
             unpack=True, error_result=(entry, []))
 
     def _on_files_ready(self, entry, files):
-        """UI thread: pick the file to install. >1 MAIN → in-window chooser."""
-        mains = [f for f in files if f.category_name == "MAIN"] or list(files)
-        if not mains:
+        """UI thread: pick the file to install. Main/optional/misc; >1 → chooser."""
+        from gui_qt.nexus_file_chooser import NexusFileChooser, installable_files
+        picks = installable_files(files)
+        if not picks:
             self._log("Nexus: no downloadable files found.")
             self._installing = False
             return
-        mains.sort(key=lambda f: getattr(f, "uploaded_timestamp", 0), reverse=True)
-        if len(mains) > 1:
-            from gui_qt.nexus_file_chooser import NexusFileChooser
-
+        if len(picks) > 1:
             def _picked(chosen):
                 if chosen is None:
                     self._log("Nexus: install cancelled.")
@@ -829,9 +951,9 @@ class NexusBrowserView(QWidget):
                 self._start_download(entry, chosen)
 
             NexusFileChooser.show_over(
-                self, entry.name or f"Mod {entry.mod_id}", mains, _picked)
+                self, entry.name or f"Mod {entry.mod_id}", picks, _picked)
         else:
-            self._start_download(entry, mains[0])
+            self._start_download(entry, picks[0])
 
     def _start_download(self, entry, file):
         domain = getattr(entry, "domain_name", "") or self._domain

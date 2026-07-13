@@ -134,7 +134,8 @@ class NexusModInfo:
     available: bool = True
     contains_adult_content: bool = False
     status: str = ""
-    uploaded_by: str = ""
+    uploaded_by: str = ""       # uploader's display name (GraphQL uploader.name)
+    uploader_id: int = 0        # uploader's stable account id (GraphQL uploader.memberId)
     category_name: str = ""
     created_at: str = ""        # ISO-8601 string (GraphQL createdAt), "" if absent
     updated_at: str = ""        # ISO-8601 string (GraphQL updatedAt), "" if absent
@@ -874,7 +875,7 @@ class NexusAPI:
                     createdAt
                     updatedAt
                     fileSize
-                    uploader { name }
+                    uploader { name memberId }
                     modCategory { name }
                 }
             }
@@ -913,6 +914,7 @@ class NexusAPI:
                     version=n.get("version", "") or "",
                     author=n.get("author", "") or "",
                     uploaded_by=(n.get("uploader") or {}).get("name", "") or "",
+                    uploader_id=int((n.get("uploader") or {}).get("memberId", 0) or 0),
                     category_id=0,
                     game_id=0,
                     domain_name=game_domain,
@@ -1341,7 +1343,7 @@ class NexusAPI:
                     summary
                     version
                     author
-                    uploader { name }
+                    uploader { name memberId }
                     modCategory { categoryId name }
                     game { domainName }
                 }
@@ -1382,6 +1384,7 @@ class NexusAPI:
                 version=n.get("version", "") or "",
                 author=n.get("author", "") or "",
                 uploaded_by=(n.get("uploader") or {}).get("name", "") or "",
+                uploader_id=int((n.get("uploader") or {}).get("memberId", 0) or 0),
                 category_id=cat_id,
                 category_name=cat_name,
                 game_id=0,
@@ -1423,7 +1426,7 @@ class NexusAPI:
                     summary
                     updatedAt
                     viewerUpdateAvailable
-                    uploader { name }
+                    uploader { name memberId }
                     modCategory { categoryId name }
                     modRequirements {
                         nexusRequirements {
@@ -1513,6 +1516,7 @@ class NexusAPI:
                         category_id=cat_id,
                         category_name=cat_name,
                         uploaded_by=(n.get("uploader") or {}).get("name", "") or "",
+                        uploader_id=int((n.get("uploader") or {}).get("memberId", 0) or 0),
                         files=[],  # Mod has no files field in GraphQL; REST used for file checks
                     )
             except Exception as exc:
@@ -1645,7 +1649,7 @@ class NexusAPI:
                     summary
                     version
                     author
-                    uploader { name }
+                    uploader { name memberId }
                     endorsements
                     downloads
                     pictureUrl
@@ -1692,6 +1696,7 @@ class NexusAPI:
                         version=n.get("version", "") or "",
                         author=n.get("author", "") or "",
                         uploaded_by=(n.get("uploader") or {}).get("name", "") or "",
+                        uploader_id=int((n.get("uploader") or {}).get("memberId", 0) or 0),
                         category_id=0,
                         game_id=0,
                         domain_name=domain,
@@ -1841,7 +1846,7 @@ class NexusAPI:
                     createdAt
                     updatedAt
                     fileSize
-                    uploader {{ name }}
+                    uploader {{ name memberId }}
                     modCategory {{ name }}
                 }}
             }}
@@ -1881,6 +1886,7 @@ class NexusAPI:
                     version=n.get("version", "") or "",
                     author=n.get("author", "") or "",
                     uploaded_by=(n.get("uploader") or {}).get("name", "") or "",
+                    uploader_id=int((n.get("uploader") or {}).get("memberId", 0) or 0),
                     category_id=0,
                     game_id=0,
                     domain_name=game_domain,
@@ -1910,28 +1916,94 @@ class NexusAPI:
         Results are sorted by `sort_key` descending (see get_top_mods for the
         valid values); invalid keys fall back to "downloads".
         """
+        return self._search_mods_by_field(
+            "name", game_domain, query_text, count=count, offset=offset,
+            category_names=category_names, sort_key=sort_key)
+
+    def search_mods_by_uploader_id(
+        self, game_domain: str, uploader_id: int, count: int = 10, offset: int = 0,
+        category_names: list[str] | None = None,
+        sort_key: str = "downloads",
+    ) -> list[NexusModInfo]:
+        """
+        List a game's mods by the uploader's stable account id (GraphQL
+        `uploaderId`). This is the RELIABLE "mods by this person" filter: the id
+        never changes even when the account is renamed, and unlike the mod's
+        free-text `author` field the uploader can't set it to anything.
+
+        The GraphQL schema exposes `uploaderId` as a BaseFilterValue (EQUALS
+        only — no WILDCARD), and the value must be passed as a *string*.
+        """
+        if not uploader_id:
+            return []
+        # uploaderId is EQUALS-only and the server rejects an int value — coerce
+        # to a string. No min-length guard: it's an exact numeric id, not text.
+        cond = {"uploaderId": [{"value": str(uploader_id)}]}
+        return self._search_mods_filtered(
+            game_domain, cond, count=count, offset=offset,
+            category_names=category_names, sort_key=sort_key)
+
+    def search_mods_by_author(
+        self, game_domain: str, author: str, count: int = 10, offset: int = 0,
+        category_names: list[str] | None = None,
+        sort_key: str = "downloads",
+    ) -> list[NexusModInfo]:
+        """
+        Search a game's mods by the uploader's display name (GraphQL `uploader`
+        field). Used by the browser's author search bar, where the user types a
+        name (we have no id to match on).
+
+        NB: this matches the uploader's *current* name (EQUALS, not the mod's
+        free-text `author` field). For a stable "this exact person's mods" query
+        prefer search_mods_by_uploader_id().
+        """
+        if len((author or "").strip()) < 2:
+            return []
+        cond = {"uploader": [{"value": author}]}
+        return self._search_mods_filtered(
+            game_domain, cond, count=count, offset=offset,
+            category_names=category_names, sort_key=sort_key)
+
+    def _search_mods_by_field(
+        self, field: str, game_domain: str, value: str, count: int = 10,
+        offset: int = 0, category_names: list[str] | None = None,
+        sort_key: str = "downloads",
+    ) -> list[NexusModInfo]:
+        """
+        WILDCARD text search on a single field (used by search_mods for `name`).
+
+        The `name` WILDCARD operator does substring matching on the raw value —
+        the `nameStemmed` filter only matches whole (stemmed) words, so a
+        trailing partial word like "disp" in "sse disp" never matches "SSE
+        Display Tweaks". NB: do NOT add `*`/`%` wildcard chars around the value —
+        the operator already matches substrings, and supplying them makes it
+        match nothing. WILDCARD needs ≥2 chars, so short values short-circuit.
+        """
+        if len((value or "").strip()) < 2:
+            return []
+        return self._search_mods_filtered(
+            game_domain, {field: {"value": value, "op": "WILDCARD"}},
+            count=count, offset=offset, category_names=category_names,
+            sort_key=sort_key)
+
+    def _search_mods_filtered(
+        self, game_domain: str, cond: dict, count: int = 10,
+        offset: int = 0, category_names: list[str] | None = None,
+        sort_key: str = "downloads",
+    ) -> list[NexusModInfo]:
+        """
+        Shared GraphQL mod search: run the SearchMods query with *cond* (a
+        prebuilt ModsFilter condition) AND-ed onto the domain/category filter.
+        Keeps the query + node parsing in one place for all the search variants.
+        """
         if sort_key not in self._TOP_MODS_SORT_KEYS:
             sort_key = "downloads"
-        # The `name` WILDCARD operator (below) is rejected by the Nexus GraphQL
-        # server for values shorter than 2 characters ("Wildcard value must have
-        # 2 or more characters"). Short-circuit rather than issue a doomed query.
-        if len((query_text or "").strip()) < 2:
-            return []
         base_filter = self._build_mods_filter(game_domain, category_names)
-        # Inject the name search into the filter.
-        #
-        # The `nameStemmed` filter only matches whole (stemmed) words, so a
-        # trailing partial word like "disp" in "sse disp" never matches
-        # "SSE Display Tweaks". The `name` WILDCARD operator does substring
-        # matching on the raw query instead, so partial words are honoured.
-        # NB: do NOT add `*`/`%` wildcard chars around the value — the operator
-        # already matches substrings, and supplying them makes it match nothing.
-        name_cond = {"name": {"value": query_text, "op": "WILDCARD"}}
         if "filter" in base_filter:
-            # nested AND structure — append name condition
-            base_filter["filter"].append(name_cond)
+            # nested AND structure — append the condition
+            base_filter["filter"].append(cond)
         else:
-            base_filter.update(name_cond)
+            base_filter.update(cond)
         query = f"""
         query SearchMods($filter: ModsFilter, $count: Int, $offset: Int) {{
             mods(
@@ -1954,7 +2026,7 @@ class NexusAPI:
                     createdAt
                     updatedAt
                     fileSize
-                    uploader {{ name }}
+                    uploader {{ name memberId }}
                     modCategory {{ name }}
                 }}
             }}
@@ -1993,6 +2065,7 @@ class NexusAPI:
                     version=n.get("version", "") or "",
                     author=n.get("author", "") or "",
                     uploaded_by=(n.get("uploader") or {}).get("name", "") or "",
+                    uploader_id=int((n.get("uploader") or {}).get("memberId", 0) or 0),
                     category_id=0,
                     game_id=0,
                     domain_name=game_domain,
