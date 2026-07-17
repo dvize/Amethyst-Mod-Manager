@@ -14,8 +14,10 @@ from PySide6.QtGui import QAction
 from PySide6.QtCore import QCoreApplication, QT_TRANSLATE_NOOP
 
 from gui_qt.confirm_overlay import ConfirmOverlay
-from gui_qt.modlist_model import COL_NAME
+from gui_qt.modlist_model import COL_NAME, _PINNED_NAMES
 from gui_qt.text_input_overlay import TextInputOverlay
+
+from Utils.modlist import ModEntry, _SEPARATOR_SUFFIX
 
 
 def _mt(label: str) -> str:
@@ -242,6 +244,8 @@ def _build_mod_menu(view, model, row, entry, sel_mods, multi, act, stub, divider
         if len(sel_mods) >= 2:
             act(_mtf("Sort Alphabetically ({0})", n),
                 lambda: _sort_selected_alphabetically(view, model, sel_mods))
+            act(_mtf("Sort into Separators By Category ({0})", n),
+                lambda: _sort_into_category_separators(view, model, sel_mods))
         divider()
         # Group: notes
         act(_mtf("Add note ({0})", n), lambda: _open_note_editor(view, _names))
@@ -876,7 +880,7 @@ def _sort_selected_alphabetically(view, model, mod_rows):
     """Sort the SELECTED mods A→Z, writing them back into the same row slots the
     selection occupied (other rows + separators stay put). Port of Tk
     _sort_selected_alphabetically."""
-    from gui_qt.modlist_model import _PINNED_NAMES
+    
     sel = [model.entry(r) for r in mod_rows]
     sel = [e for e in sel
            if not e.is_separator and e.name not in _PINNED_NAMES]
@@ -909,6 +913,120 @@ def _sort_selected_alphabetically(view, model, mod_rows):
     # a sort that flipped no conflicting pair skips the conflict rebuild.
     new_order = [e.name for e in model.natural_entries() if not e.is_separator]
     ctx = model._move_ctx(old_order, new_order, [e.name for e in sel])
+    try:
+        model.save(edit_ctx=None if ctx is None else ("move",) + ctx)
+    except Exception:
+        pass
+
+
+def _sort_into_category_separators(view, model, mod_rows):
+    """Group the SELECTED mods under category-named separators. Reuses an
+    existing separator whose display name matches the category case-insensitively
+    (left in place; selected mods move under it), otherwise creates one at the
+    first selected mod's natural slot. Mods with no category land under
+    'Uncategorized'."""
+    UNCATEGORIZED = "Uncategorized"
+
+    sel_entries = []
+    for r in mod_rows:
+        e = model.entry(r)
+        if e is None or e.is_separator or e.name in _PINNED_NAMES:
+            continue
+        sel_entries.append(e)
+    if not sel_entries:
+        return
+
+    model_cats = getattr(model, "_categories", None) or {}
+
+    def _category_of(name: str) -> str:
+        cat = (model_cats.get(name) or "").strip()
+        if not cat:
+            meta = _read_mod_meta(view, name)
+            cat = getattr(meta, "category_name", "") if meta is not None else ""
+            cat = (cat or "").strip()
+        return cat or UNCATEGORIZED
+
+    cats_raw: dict[str, str] = {}
+    for e in sel_entries:
+        cats_raw.setdefault(e.name, _category_of(e.name))
+
+    existing = {}
+    for e in model.natural_entries():
+        if e.is_separator and e.name not in _PINNED_NAMES:
+            existing.setdefault(e.display_name.casefold(), e)
+
+    canon: dict[str, str] = {}
+    for cat in cats_raw.values():
+        k = cat.casefold()
+        if k not in canon:
+            ex = existing.get(k)
+            canon[k] = ex.display_name if ex is not None else cat
+    cats = {nm: canon[cat.casefold()] for nm, cat in cats_raw.items()}
+
+    moved_ids = {id(e) for e in sel_entries}
+    sep_for_cat: dict[str, ModEntry] = {}
+
+    def _resolve(cat: str) -> ModEntry:
+        if cat not in sep_for_cat:
+            ex = existing.get(cat.casefold())
+            if ex is not None:
+                sep_for_cat[cat] = ex
+            else:
+                sep_for_cat[cat] = ModEntry(
+                    cat + _SEPARATOR_SUFFIX, True, False, True)
+        return sep_for_cat[cat]
+
+    used_cats = list(dict.fromkeys(cats[e.name] for e in sel_entries))
+    for c in used_cats:
+        _resolve(c)
+
+    existing_ids = {id(e) for e in existing.values()}
+    reused_sep_ids = {id(sep_for_cat[c]) for c in used_cats
+                      if id(sep_for_cat[c]) in existing_ids}
+    cat_by_sep_id = {id(sep_for_cat[c]): c for c in used_cats}
+
+    handled: set[str] = set()
+    body: list = []
+
+    def _append_selected(cat: str):
+        for e in sel_entries:
+            if cats[e.name] == cat:
+                body.append(e)
+
+    def _emit_new(cat: str):
+        if cat in handled:
+            return
+        handled.add(cat)
+        body.append(sep_for_cat[cat])
+        _append_selected(cat)
+
+    old_order = [e.name for e in model.natural_entries() if not e.is_separator]
+    for e in model.natural_entries():
+        if e.name in _PINNED_NAMES:
+            continue
+        if id(e) in reused_sep_ids:
+            body.append(e)
+            cat = cat_by_sep_id[id(e)]
+            if cat not in handled:
+                handled.add(cat)
+                _append_selected(cat)
+            continue
+        if id(e) in moved_ids:
+            cat = cats[e.name]
+            if id(sep_for_cat[cat]) in reused_sep_ids:
+                continue
+            _emit_new(cat)
+            continue
+        body.append(e)
+    for c in used_cats:
+        if c in handled:
+            continue
+        if id(sep_for_cat[c]) not in reused_sep_ids:
+            _emit_new(c)
+
+    model.set_entries(body)
+    new_order = [e.name for e in model.natural_entries() if not e.is_separator]
+    ctx = model._move_ctx(old_order, new_order, [e.name for e in sel_entries])
     try:
         model.save(edit_ctx=None if ctx is None else ("move",) + ctx)
     except Exception:
@@ -1287,6 +1405,7 @@ _TR_MARKERS = (
     QT_TRANSLATE_NOOP("ModListMenu", "Priority for {0}:"),
     QT_TRANSLATE_NOOP("ModListMenu", "Show Conflicts"),
     QT_TRANSLATE_NOOP("ModListMenu", "Sort Alphabetically ({0})"),
+    QT_TRANSLATE_NOOP("ModListMenu", "Sort into Separators By Category ({0})"),
     QT_TRANSLATE_NOOP("ModListMenu", "Unlock Separator"),
     QT_TRANSLATE_NOOP("ModListMenu", "Unlock Separators"),
     QT_TRANSLATE_NOOP("ModListMenu", "{0} ({1})"),
