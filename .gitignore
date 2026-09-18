@@ -27,3 +27,7 @@ src/appimage/dist/
 /native/amethyst_filegraph/target/
 /assets
 result
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
