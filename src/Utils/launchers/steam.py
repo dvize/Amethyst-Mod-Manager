@@ -16,6 +16,8 @@ import stat
 import threading
 from pathlib import Path
 
+from Utils.launchers.nixos import wrap_nixos_command
+
 # ---------------------------------------------------------------------------
 # Known Steam base directories for different install methods
 # ---------------------------------------------------------------------------
@@ -90,6 +92,13 @@ def _own_process_in_steam_flatpak() -> bool:
 def _in_flatpak_sandbox() -> bool:
     """True when this process runs inside any Flatpak sandbox."""
     return os.path.exists("/.flatpak-info")
+
+
+def _host_tool_path(path: "str | Path") -> str:
+    value = str(path)
+    if _in_flatpak_sandbox() and value.startswith("/run/host/"):
+        return value[len("/run/host"):]
+    return value
 
 
 def steam_client_installed() -> bool:
@@ -504,7 +513,7 @@ def find_steam_runtime_entry_point(proton_script: "Path") -> "Path | None":
 def _wrap_in_steam_runtime(cmd: list[str], proton_script: "Path",
                            args: "tuple[str, ...]",
                            env: "dict | None") -> list[str]:
-    """Prefix *cmd* with the Steam Linux Runtime entry point for game launches.
+    """Prefix *cmd* with the Steam Linux Runtime entry point.
 
     Steam never runs Proton bare: it wraps the call in
     ``SteamLinuxRuntime_*/_v2-entry-point``, whose pressure-vessel container
@@ -514,15 +523,14 @@ def _wrap_in_steam_runtime(cmd: list[str], proton_script: "Path",
     (missing audio, missing libs) that sent non-Steam prefixes to umu-run,
     which builds this very container itself.
 
-    Only game launches on a Steam-managed prefix are wrapped: tool verbs keep
-    the bare call they have always used, and non-Steam prefixes never get here
-    (the caller routes those to umu). ``AMM_STEAM_RUNTIME=0`` disables it.
+    Any launch on a Steam-managed prefix is wrapped: non-Steam prefixes never
+	get here (the caller routes those to umu). ``AMM_STEAM_RUNTIME=0`` disables it.
     Mutates *env*, like the umu branch.
     """
     if os.environ.get("AMM_STEAM_RUNTIME") == "0":
         return cmd
     verb = str(args[0]) if args else ""
-    if verb != "waitforexitandrun":
+    if verb not in ("run", "runinprefix", "waitforexitandrun"):
         return cmd
     # Steam-managed prefixes always live at steamapps/compatdata/<appid>;
     # anything else is a non-Steam prefix whose launch belongs to umu.
@@ -537,8 +545,8 @@ def _wrap_in_steam_runtime(cmd: list[str], proton_script: "Path",
         # pressure-vessel need not bind a Proton that lives outside $HOME
         # (a compatibilitytools.d on a second drive).
         env.setdefault("STEAM_COMPAT_TOOL_PATHS",
-                       f"{proton_script.parent}:{entry.parent}")
-    return [str(entry), f"--verb={verb}", "--", *cmd]
+                       f"{_host_tool_path(proton_script.parent)}:{_host_tool_path(entry.parent)}")
+    return [_host_tool_path(entry), "--verb=waitforexitandrun", "--", *cmd]
 
 
 def _host_python() -> str:
@@ -626,11 +634,19 @@ def proton_run_command(
     # chdir into it.
     directory = str(host_cwd) if host_cwd is not None else "/"
 
+    if env and env.get("_AMM_BOTTLES_PREFIX"):
+        from Utils.launchers.bottles_runtime import bottles_tool_command
+        payload = list(map(str, args))
+        if payload and payload[0] in ("run", "runinprefix", "waitforexitandrun"):
+            payload.pop(0)
+        return bottles_tool_command(env["_AMM_BOTTLES_PREFIX"], payload, env,
+                                    cwd=host_cwd)
+
     script = Path(proton_script)
     if script.name in ("wine", "wine64"):
         payload = [a for a in map(str, args) if a not in
                    ("run", "runinprefix", "waitforexitandrun")]
-        cmd = [str(script), *payload]
+        cmd = wrap_nixos_command([_host_tool_path(script), *payload], env=env)
         if _in_flatpak_sandbox() and shutil.which("flatpak-spawn"):
             from Utils.flatpak.env import flatpak_forward_env_args
             fwd = flatpak_forward_env_args(env)
@@ -673,7 +689,7 @@ def proton_run_command(
                                    host_cwd=directory)
         _maybe_log_steamless_no_umu()
 
-    base = [_host_python(), str(proton_script), *map(str, args)]
+    base = [_host_python(), _host_tool_path(proton_script), *map(str, args)]
     if not (_proton_script_in_steam_flatpak(proton_script)
             and not _own_process_in_steam_flatpak()):
         # Game launches go through Steam's own runtime container (see
@@ -683,6 +699,7 @@ def proton_run_command(
         # left bare: that Proton already runs inside Steam's own sandbox,
         # where its runtime and libraries are the ones it expects.
         base = _wrap_in_steam_runtime(base, proton_script, args, env)
+        base = wrap_nixos_command(base, env=env)
         if _in_flatpak_sandbox() and shutil.which("flatpak-spawn"):
             from Utils.flatpak.env import flatpak_forward_env_args
             fwd = flatpak_forward_env_args(env)
@@ -1196,6 +1213,12 @@ def _all_proton_search_roots() -> list[Path]:
     for steam_root in _STEAM_CANDIDATES:
         _add(steam_root)
 
+    for system_root in ("/usr/share/steam", "/usr/local/share/steam"):
+        if _in_flatpak_sandbox():
+            _add(Path("/run/host") / system_root.lstrip("/"))
+        else:
+            _add(Path(system_root))
+
     for steam_root in _STEAM_CANDIDATES:
         vdf_path = steam_root / "steamapps" / _VDF_FILENAME
         if not vdf_path.is_file():
@@ -1486,6 +1509,16 @@ def find_proton_for_game(steam_id: str) -> Path | None:
                         p = entry / "proton"
                         if p.is_file():
                             return p
+                    p = entry / "proton"
+                    if not p.is_file():
+                        continue
+                    try:
+                        manifest = (entry / "compatibilitytool.vdf").read_text(
+                            encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    if re.search(r'"' + re.escape(tool_name) + r'"\s*\{', manifest):
+                        return p
 
     # --- Fallback: read compatdata/<steam_id>/config_info ----------------
     # When Steam uses the default Proton for a game it may not write an

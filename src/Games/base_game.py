@@ -15,6 +15,7 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -63,6 +64,7 @@ _LAUNCHER_ID_SETTERS = {
     "heroic_app_name": "set_heroic_app_name",
     "lutris_slug":     "set_lutris_slug",
     "faugus_gameid":   "set_faugus_gameid",
+    "bottles_program": "set_bottles_program",
     "shortcut_appid":  "set_shortcut_appid",
 }
 
@@ -75,7 +77,8 @@ def _ensure_lutris_prefix_compat(prefix_path: "Path | None") -> None:
         return
     try:
         from Utils.launchers.lutris import is_lutris_prefix, ensure_steamuser_compat
-        if is_lutris_prefix(prefix_path):
+        from Utils.launchers.bottles import is_bottles_prefix
+        if is_lutris_prefix(prefix_path) or is_bottles_prefix(prefix_path):
             ensure_steamuser_compat(prefix_path)
     except Exception:
         pass
@@ -144,6 +147,26 @@ class LaunchToggle:
 
 class BaseGame(ABC):
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        restore = cls.__dict__.get("restore")
+        if restore is None:
+            return
+
+        @wraps(restore)
+        def restore_with_routes(self, *args, **kwargs):
+            if getattr(self, "_restoring_vortex_routes", False):
+                return restore(self, *args, **kwargs)
+            from Utils.deployment.vortex_deploy import restore_routes
+            self._restoring_vortex_routes = True
+            try:
+                restore_routes(self, kwargs.get("log_fn", args[0] if args else None))
+                return restore(self, *args, **kwargs)
+            finally:
+                self._restoring_vortex_routes = False
+
+        cls.restore = restore_with_routes
+
     # -----------------------------------------------------------------------
     # Per-profile setting overrides
     # -----------------------------------------------------------------------
@@ -192,7 +215,7 @@ class BaseGame(ABC):
     # Opt-in for the incremental redeploy fast path (Utils/deployment/incremental.py).
     # Only safe for handlers whose deploy() is the plain standard sequence
     # (move_to_core → deploy_filemap → deploy_core) with a single Data-style
-    # target and idempotent post-deploy steps.  See Fallout_3 for the first
+    # target and idempotent post-deploy steps.  See BethesdaBase for the first
     # opted-in family.
     supports_incremental_deploy: bool = False
 
@@ -259,6 +282,7 @@ class BaseGame(ABC):
         "heroic_app_name",
         "lutris_slug",
         "faugus_gameid",
+        "bottles_program",
     )
 
     # User-set save folder, persisted in paths.json as "save_path_override".
@@ -311,6 +335,10 @@ class BaseGame(ABC):
         (e.g. Steam vs Epic/Heroic).  Checked after ``exe_name``.
         """
         return []
+
+    def detect_standalone_install(self) -> Path | None:
+        """Find a validated install using bounded local hints, without scanning drives."""
+        return None
 
     @property
     def auto_drive_scan(self) -> bool:
@@ -942,6 +970,21 @@ class BaseGame(ABC):
         """
         return {}
 
+    def framework_installed(self, label: str) -> "bool | None":
+        """Whether the framework *label* is installed, for one that lives
+        outside the game folder and the staged mods (a native Linux script
+        extender in ~/.local/share), or None to look for its files as usual.
+        """
+        return None
+
+    def requirement_replacement(self, mod_id: int) -> "dict | None":
+        """What stands in for the Nexus requirement *mod_id* on this setup, for
+        the missing-requirements view to show in its place: a dict with
+        "name", "notes", "url" and "wizard" (the id of a wizard tool its
+        Install button opens instead of a Nexus download), or None.
+        """
+        return None
+
     def add_deploy_warning(self, message: str) -> None:
         """Queue a user-facing warning for the GUI to toast after deploy."""
         if not hasattr(self, "_deploy_user_warnings"):
@@ -1465,20 +1508,21 @@ class BaseGame(ABC):
 
     @property
     def nexus_game_domains(self) -> tuple[str, ...]:
-        """Primary + additional Nexus domains, normalised and de-duplicated."""
+        """Primary + additional Nexus domains, preserving configured casing."""
         result: list[str] = []
         seen: set[str] = set()
         extras = self.additional_nexus_domains or []
         for raw in (self.nexus_game_domain, *extras):
-            domain = (raw or "").strip().lower()
-            if domain and domain not in seen:
-                seen.add(domain)
+            domain = (raw or "").strip()
+            if domain and domain.lower() not in seen:
+                seen.add(domain.lower())
                 result.append(domain)
         return tuple(result)
 
     def accepts_nexus_domain(self, domain: str) -> bool:
         """Whether *domain* is the game's primary or an additional domain."""
-        return (domain or "").strip().lower() in self.nexus_game_domains
+        return (domain or "").strip().lower() in {
+            value.lower() for value in self.nexus_game_domains}
 
     @property
     def wine_dll_overrides(self) -> dict[str, str]:
@@ -1576,6 +1620,10 @@ class BaseGame(ABC):
         Return an empty list (the default) to use normal routing for all files.
         """
         return []
+
+    @property
+    def vortex_mod_types(self) -> dict:
+        return {}
 
     @property
     def effective_custom_routing_rules(self) -> list:
@@ -1775,6 +1823,12 @@ class BaseGame(ABC):
         """Return the configured game path before profile overrides."""
         raw = self._read_global_paths().get("game_path", "")
         return Path(raw) if isinstance(raw, str) and raw else None
+
+    def get_root_deploy_path(self, profile_dir: Path | None = None) -> Path | None:
+        return self.get_game_path()
+
+    def get_wabbajack_game_path(self) -> Path | None:
+        return self.get_game_path()
 
     # Subpath that game_data_subpath() should report when the deploy dir is
     # NOT inside the game root. Only handlers that deploy outside the install
@@ -2094,7 +2148,7 @@ class BaseGame(ABC):
     def _deploy_state_file(self) -> Path:
         """Path to deploy_state.json for this game.
 
-        Stores the name of the last profile that was successfully deployed so
+        Stores the profile and paths of the latest deployment attempt so
         that restore() can direct runtime-generated files (ShaderCache, saves,
         etc.) to the correct overwrite folder even when the user has since
         switched to a different profile.
@@ -2102,7 +2156,7 @@ class BaseGame(ABC):
         return self._paths_file.parent / "deploy_state.json"
 
     def get_last_deployed_profile(self) -> str:
-        """Return the name of the last successfully deployed profile, or 'default'."""
+        """Return the profile to recover, or 'default' for legacy state."""
         try:
             data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
             return data.get("last_deployed") or "default"
@@ -2129,29 +2183,39 @@ class BaseGame(ABC):
         except (OSError, ValueError):
             return None
 
+    def get_deployment_context(self) -> dict:
+        try:
+            data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+            context = data.get("recovery_context")
+            if data.get("deploy_active") and isinstance(context, dict):
+                return context
+        except (OSError, ValueError):
+            pass
+        return {}
+
     def save_last_deployed_profile(self, profile_name: str,
                                    deploy_mode: str | None = None) -> None:
-        """Persist profile_name as the last successfully deployed profile.
+        """Record recovery paths before deployment can modify the installation."""
+        from Utils.atomic_write import write_atomic_text
+        from Utils.deployment.custom_rules import _root_record
 
-        deploy_mode - optional LinkMode name to record alongside it (passed by
-        the deploy pipeline; other callers leave the stored value untouched).
-        """
+        self._deploy_state_file.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._deploy_state_file.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                data = {}
-            data["last_deployed"] = profile_name
-            data["deploy_active"] = True
-            if deploy_mode is not None:
-                data["last_deploy_mode"] = deploy_mode
-            self._deploy_state_file.write_text(
-                json.dumps(data, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+            data = json.loads(self._deploy_state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data["last_deployed"] = profile_name
+        data["deploy_active"] = True
+        if deploy_mode is not None:
+            data["last_deploy_mode"] = deploy_mode
+        data["recovery_context"] = {
+            "profile_dir": str(self.get_profile_root() / "profiles" / profile_name),
+            "filemap_path": str(self.get_effective_filemap_path()),
+            "staging_root": _root_record(self.get_profile_root()),
+            "game_root": _root_record(self.get_game_path()),
+            "prefix_root": _root_record(self.get_prefix_path()),
+        }
+        write_atomic_text(self._deploy_state_file, json.dumps(data, indent=2))
 
     def clear_deploy_active(self) -> None:
         """Mark mods as no longer deployed to the game folder (e.g. after a restore)."""
@@ -2162,6 +2226,7 @@ class BaseGame(ABC):
             except (OSError, ValueError):
                 data = {}
             data["deploy_active"] = False
+            data.pop("recovery_context", None)
             self._deploy_state_file.write_text(
                 json.dumps(data, indent=2),
                 encoding="utf-8",
@@ -2351,6 +2416,14 @@ class BaseGame(ABC):
         library owns the app - without it a stale compatdata in another
         library can win.
         """
+        try:
+            from Utils.launchers.bottles import find_bottles_launch_info
+            saved = self.get_saved_launcher_id("bottles_program")
+            if saved:
+                program = find_bottles_launch_info([saved])
+                return program.prefix if program is not None else None
+        except Exception:
+            pass
         if self._shortcut_appid:
             # The shortcut's own compatdata is the only prefix this install
             # has; the handler's steam_id names the store release, whose
@@ -2385,6 +2458,16 @@ class BaseGame(ABC):
                 info = find_faugus_game_info_by_exe(exe)
                 if info is not None and info[1] is not None:
                     return info[1]
+        except Exception:
+            pass
+        try:
+            from Utils.launchers.bottles import find_bottles_game_info_by_exes
+            info = find_bottles_game_info_by_exes(
+                [getattr(self, "exe_name", None),
+                 *(getattr(self, "exe_name_alts", []) or [])],
+                game_path=getattr(self, "_game_path", None))
+            if info is not None:
+                return info[1]
         except Exception:
             pass
         try:
@@ -2796,9 +2879,17 @@ class BaseGame(ABC):
             pass
         self._persist_paths_value("faugus_gameid", gameid or "")
 
+    def set_bottles_program(self, program_id: str | None) -> None:
+        try:
+            self.save_paths()
+        except Exception:
+            pass
+        self._persist_paths_value("bottles_program", program_id or "")
+
     def set_launcher_ids(self, *, heroic_app_name: "str | None" = None,
                          lutris_slug: "str | None" = None,
                          faugus_gameid: "str | None" = None,
+                         bottles_program: "str | None" = None,
                          shortcut_appid: "str | None" = None) -> None:
         """Persist the whole launcher-identity set in one call.
 
@@ -2811,6 +2902,7 @@ class BaseGame(ABC):
         for key, value in (("heroic_app_name", heroic_app_name),
                            ("lutris_slug", lutris_slug),
                            ("faugus_gameid", faugus_gameid),
+                           ("bottles_program", bottles_program),
                            ("shortcut_appid", shortcut_appid)):
             if value is None:
                 continue

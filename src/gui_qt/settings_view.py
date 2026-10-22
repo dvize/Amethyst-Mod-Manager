@@ -190,6 +190,7 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
             "max_extract_workers": int(cs.get("max_extract_workers", uc._DEFAULT_MAX_EXTRACT_WORKERS)),
             "check_download_locations": bool(cs.get("check_download_locations", True)),
             "clear_archive_after_install": bool(cs.get("clear_archive_after_install", False)),
+            "download_order": cs.get("download_order", uc._DEFAULT_DOWNLOAD_ORDER),
         }
 
         _card, outer = self._make_card(
@@ -400,7 +401,7 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
         Buttons are collected rather than placed inline so they never split the
         run of options above them (the screenshot bug: "Edit custom
         install-name rules…" landed mid-list). :meth:`_finish_section` lays the
-        whole queue out as one left-aligned row at the bottom of the group.
+        whole queue out in left-aligned rows at the bottom of the group.
         """
         btn = QPushButton(label)
         btn.setCursor(Qt.PointingHandCursor)
@@ -410,29 +411,29 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
         self._pending_actions[id(grid)].append((btn, help, extra))
         return btn
 
-    def _finish_section(self, grid: QGridLayout) -> None:
-        """Flush queued action buttons into a footer row at the group's bottom.
+    def _finish_section(self, grid: QGridLayout, *, buttons_per_row: int | None = None) -> None:
+        """Flush queued action buttons into footer rows at the group's bottom.
 
         Call once per section, after every option row has been added.
         """
         pending = self._pending_actions.pop(id(grid), [])
         if not pending:
             return
-        row = self._next_row(grid)
-        wrap = QHBoxLayout()
-        # Top margin separates the action row from the options above it, so the
-        # footer reads as a distinct band rather than one more option.
-        wrap.setContentsMargins(0, 6, 0, 0)
-        wrap.setSpacing(8)
-        for btn, help, extra in pending:
-            wrap.addWidget(btn)
-            if help:
-                wrap.addWidget(self._help_marker(help))
-            if extra is not None:
-                wrap.addWidget(extra, 1)
-        wrap.addStretch(1)
-        holder = QWidget(); holder.setLayout(wrap)
-        grid.addWidget(holder, row, self.COL_LABEL, 1, 2)
+        count = buttons_per_row or len(pending)
+        for start in range(0, len(pending), count):
+            row = self._next_row(grid)
+            wrap = QHBoxLayout()
+            wrap.setContentsMargins(0, 6 if start == 0 else 0, 0, 0)
+            wrap.setSpacing(8)
+            for btn, help, extra in pending[start:start + count]:
+                wrap.addWidget(btn)
+                if help:
+                    wrap.addWidget(self._help_marker(help))
+                if extra is not None:
+                    wrap.addWidget(extra, 1)
+            wrap.addStretch(1)
+            holder = QWidget(); holder.setLayout(wrap)
+            grid.addWidget(holder, row, self.COL_LABEL, 1, 2)
 
     def _tip_text(self, text: str) -> str:
         return tip_text(text)
@@ -718,6 +719,14 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
              ("YYYY-MM-DD", "yyyy-mm-dd")],
             uc.load_date_format(), self._save_date_format,
             help=self.tr("Choose how dates are displayed throughout the manager."))
+
+        self._combo(
+            g, self.tr("Default priority mode"),
+            [(self.tr("Default"), "default"),
+             (self.tr("Reversed"), "reversed")],
+            uc.load_default_priority_mode(), self._save_default_priority_mode,
+            help=self.tr("Choose the mod list priority mode used at startup. "
+                         "Changes also apply to the current mod list."))
 
         note = QLabel(self.tr(
             "Language and UI scale changes take effect after restart."))
@@ -1089,6 +1098,12 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
         self._scale_slider.setEnabled(not is_auto)
         self._scale_val_lbl.setEnabled(not is_auto)
 
+    def _save_default_priority_mode(self, value: str):
+        uc.save_default_priority_mode(value)
+        view = getattr(self._window, "_modlist_view", None)
+        if view is not None:
+            view.apply_default_priority_mode()
+
     def _save_date_format(self, value: str):
         uc.save_date_format(value)
         win = self._window
@@ -1251,7 +1266,6 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
         self._slider(
             g, self.tr("Max concurrent downloads"), 1, uc._MAX_CONCURRENT_CEILING,
             self._cs["max_concurrent"], self._save_max_concurrent)
-
         # Download speed limit - global cap shared by all download threads.
         def _limit_text(v) -> str:
             return (self.tr("Unlimited") if int(v) == 0 else
@@ -1270,6 +1284,18 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
         lim_sld.valueChanged.connect(_fmt_limit)
         _fmt_limit(lim_sld.value())
 
+        self._download_order_combo = self._combo(
+            g, self.tr("Download order"),
+            [(self.tr("Balanced"), "balanced"),
+             (self.tr("Smallest to largest"), "smallest"),
+             (self.tr("Largest to smallest"), "largest")],
+            self._cs["download_order"], self._save_download_order,
+            help=self.tr("Choose the download order for collections and Wabbajack, "
+                 "including browser prompts for free Nexus users. Balanced overlaps "
+                 "small and large downloads. Files with unknown sizes come last. "
+                 "Collection installation phases are preserved. Applies when "
+                 "starting or resuming an install."))
+
         self._nexus_server_combo = self._combo(
             g, self.tr("Nexus download server"),
             [(self.tr("Automatic"), ""), (self.tr("Global CDN"), "Nexus CDN")]
@@ -1281,6 +1307,14 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
                  "downloads, including collections and Wabbajack. If the selected "
                  "server is unavailable or fails, other available servers are tried. "
                  "Pause and resume an active download to change its server."))
+
+        self._checkbox(
+            g, self.tr("Use NXM links for free Nexus downloads"),
+            uc.load_nexus_free_download_nxm, uc.save_nexus_free_download_nxm,
+            help=self.tr("Open free Nexus download pages using the NXM handler. "
+                 "Turn this off if the handler is not working: download the archive "
+                 "in your browser and Amethyst will detect it in your configured "
+                 "download folders. Applies to newly opened download pages."))
 
         self._checkbox(
             g, self.tr("Download only (don't install)"),
@@ -1365,12 +1399,6 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
     def _build_general(self):
         g = self._section(self.tr("General"))
         self._checkbox(
-            g, self.tr("Discord Rich Presence"),
-            uc.load_discord_presence, uc.save_discord_presence,
-            help=self.tr("Show Amethyst and the game you are modding on your "
-                         "Discord profile while the Discord desktop app is running."),
-            on_changed=self._window._discord_presence.set_enabled)
-        self._checkbox(
             g, self.tr("Normalise folder casing"),
             uc.load_normalize_folder_case, uc.save_normalize_folder_case,
             help=self.tr("Unify folder names to a single casing across mods. Disable on "
@@ -1389,6 +1417,16 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
             g, self.tr("Restore on close"),
             uc.load_restore_on_close, uc.save_restore_on_close,
             help=self.tr("Restore all deployed games to vanilla when the app is closed."))
+        self._action_row(
+            g, self.tr("Reset dismissed prompts…"),
+            self._on_reset_dismissed_notices,
+            help=self.tr(
+                "Bring back every notice you hid by ticking \"Don't show this "
+                "again\" - the launcher handoff notice, the Windows filesystem "
+                "warning and the rest."))
+        self._finish_section(g)
+
+        g = self._section(self.tr("Updates"))
         self._checkbox(
             g, self.tr("Use pre-release versions"),
             uc.load_allow_prerelease, uc.save_allow_prerelease,
@@ -1399,16 +1437,12 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
             g, self.tr("Notify about new versions on startup"),
             uc.load_update_notifications, uc.save_update_notifications,
             help=self.tr("Show a notification when a new version of Amethyst "
-                 "is available. Turning this off only mutes the notification "
-                 "- you can still update via your package manager or by "
-                 "toggling the pre-release setting."))
+                 "is available. You can still check for updates manually "
+                 "when this is turned off."))
         self._action_row(
-            g, self.tr("Reset dismissed prompts…"),
-            self._on_reset_dismissed_notices,
-            help=self.tr(
-                "Bring back every notice you hid by ticking \"Don't show this "
-                "again\" - the launcher handoff notice, the Windows filesystem "
-                "warning and the rest."))
+            g, self.tr("Check for updates"),
+            lambda: self._window._check_for_app_update(
+                force_fresh=True, notify_result=True))
 
         self._maybe_add_flatpak_enroll(g)
         self._finish_section(g)
@@ -1568,6 +1602,17 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
             help=self.tr("Path to the Faugus Launcher AppImage, so Play can "
                  "launch it directly. Only needed for AppImage installs - leave "
                  "blank for Flatpak or native Faugus."))
+        self._path_row(
+            g, self.tr("Bottles Data Location"),
+            uc.load_bottles_data_path, uc.save_bottles_data_path,
+            help=self.tr("Bottles data folder or custom bottles folder. "
+                         "Blank = auto-detect Flatpak, Cpak and AppImage locations."))
+        self._file_row(
+            g, self.tr("Bottles AppImage"),
+            uc.load_bottles_appimage_path, uc.save_bottles_appimage_path,
+            filters=[("AppImage", ["*.AppImage", "*.appimage"]), ("All files", ["*"])],
+            help=self.tr("Path to the Bottles AppImage, so Play can launch it "
+                         "directly. Leave blank for Flatpak or Cpak."))
         self._path_row(
             g, self.tr("Steam libraryfolders.vdf"),
             uc.load_steam_libraries_vdf_path, uc.save_steam_libraries_vdf_path,
@@ -1754,7 +1799,8 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
             self._cs["max_concurrent"],
             self._cs["check_download_locations"],
             self._cs["clear_archive_after_install"],
-            self._cs["max_extract_workers"])
+            self._cs["max_extract_workers"],
+            self._cs["download_order"])
 
     def _save_max_concurrent(self, value: int):
         self._cs["max_concurrent"] = int(value)
@@ -1762,6 +1808,10 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
 
     def _save_max_extract(self, value: int):
         self._cs["max_extract_workers"] = int(value)
+        self._persist_collection()
+
+    def _save_download_order(self, value: str):
+        self._cs["download_order"] = value
         self._persist_collection()
 
     def _save_speed_limit(self, value: int):
@@ -1793,7 +1843,8 @@ class SettingsView(ConnectionsSettingsMixin, OverlayBase):
     def _browse_into(self, edit: QLineEdit, save_fn, title: str):
         from Utils.ui.portal import pick_folder
         pick_folder(f"Select {title}",
-                    lambda path: self._folder_picked.emit((edit, save_fn, path)))
+                    lambda path: self._folder_picked.emit((edit, save_fn, path)),
+                    direct_access=save_fn is uc.save_default_staging_path)
 
     def _browse_file_into(self, edit: QLineEdit, save_fn, title: str,
                           filters=None):

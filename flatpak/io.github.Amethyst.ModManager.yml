@@ -45,6 +45,7 @@ build-options:
 #   (separate from a native/AppImage install's ~/.config/AmethystModManager).
 # - run/media, media, mnt: Steam libraries on SD cards and removable drives (Steam Deck, etc.)
 # - var/mnt: mount point on Fedora Atomic / Bazzite, where /mnt is a symlink to /var/mnt
+# - game: custom game libraries and mod staging
 # - ~/.var/app/com.valvesoftware.Steam: Steam Flatpak data (home excludes ~/.var/app)
 # - ~/.var/app/com.heroicgameslauncher.hgl: Heroic Flatpak
 # - ~/.var/app/net.lutris.Lutris: Lutris Flatpak (pga.db, game configs, wine runners)
@@ -58,29 +59,18 @@ finish-args:
   - --device=dri
   - --share=ipc
   - --filesystem=home
+  # Read system-installed Proton builds through /run/host/usr.
+  - --filesystem=host-os:ro
   - --filesystem=/run/media
   - --filesystem=/media
   - --filesystem=/mnt
   - --filesystem=/var/mnt
+  - --filesystem=/game
   - --filesystem=~/.var/app/com.valvesoftware.Steam
   - --filesystem=~/.var/app/com.heroicgameslauncher.hgl
   - --filesystem=~/.var/app/net.lutris.Lutris
   - --filesystem=~/.var/app/io.github.Faugus.faugus-launcher
-  # Discord Rich Presence sockets (used only when enabled in Settings).
-  - --filesystem=xdg-run/discord-ipc-0
-  - --filesystem=xdg-run/discord-ipc-1
-  - --filesystem=xdg-run/discord-ipc-2
-  - --filesystem=xdg-run/discord-ipc-3
-  - --filesystem=xdg-run/discord-ipc-4
-  - --filesystem=xdg-run/discord-ipc-5
-  - --filesystem=xdg-run/discord-ipc-6
-  - --filesystem=xdg-run/discord-ipc-7
-  - --filesystem=xdg-run/discord-ipc-8
-  - --filesystem=xdg-run/discord-ipc-9
-  - --filesystem=xdg-run/app/com.discordapp.Discord
-  - --filesystem=xdg-run/app/com.discordapp.DiscordCanary
-  - --filesystem=xdg-run/app/com.discordapp.DiscordPTB
-  - --filesystem=xdg-run/app/dev.vencord.Vesktop
+  - --filesystem=~/.var/app/com.usebottles.bottles
   - --talk-name=org.freedesktop.secrets
   - --talk-name=org.freedesktop.Flatpak
   # Wine (Synthesis prefix setup) installs its own seccomp filter and runs

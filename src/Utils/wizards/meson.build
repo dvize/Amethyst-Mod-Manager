@@ -1,5 +1,6 @@
 py.install_sources(
   '__init__.py',
+  '_selftest.py',
   'archives.py',
   'catalog.py',
   'cet.py',
@@ -12,5 +13,6 @@ py.install_sources(
   'textures.py',
   'witchybnd.py',
   'workshop.py',
+  'yeetpatch.py',
   subdir: 'Utils/wizards',
 )

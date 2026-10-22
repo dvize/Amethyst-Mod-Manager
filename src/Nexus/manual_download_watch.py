@@ -83,6 +83,15 @@ def _match_name(f) -> str:
     return (getattr(f, "name", "") or "").strip()
 
 
+def _find_archive(folder: Path, file, mod_id: int) -> "tuple[Path | None, bool]":
+    # KB-only metadata can differ from the archive by one rounding unit.
+    tolerance = 0 if getattr(file, "size_in_bytes", 0) else 1024
+    return _find_cached_archive(
+        folder, _match_name(file), _expected_size(file), mod_id,
+        int(getattr(file, "file_id", 0) or 0),
+        size_tolerance_bytes=tolerance)
+
+
 def find_existing_archive(mod_id: int, files: list) -> "tuple[Path, object] | None":
     """Return ``(path, file)`` for an already-complete cached archive matching
     any of *files*, or ``None`` if nothing is on disk yet.
@@ -97,9 +106,7 @@ def find_existing_archive(mod_id: int, files: list) -> "tuple[Path, object] | No
     mid = int(mod_id or 0)
     for folder in scan_download_dirs():
         for f in picks:
-            found, complete = _find_cached_archive(
-                folder, _match_name(f), _expected_size(f), mid,
-                int(getattr(f, "file_id", 0) or 0))
+            found, complete = _find_archive(folder, f, mid)
             if found is not None and complete:
                 return found, f
     return None
@@ -136,6 +143,7 @@ def start_manual_install(
     file's match name). Returns ``(watcher, already_downloaded)`` - the
     watcher is already started; keep it for cancel support."""
     from Nexus.nexus_meta import build_meta_from_download
+    from Utils.ui.config import load_nexus_free_download_nxm
 
     already = find_existing_archive(mod_id, files) is not None
     label = log_label or (_match_name(files[0]) if files else "")
@@ -144,8 +152,11 @@ def start_manual_install(
                "installing without opening the browser.")
     else:
         fid = int(getattr(files[0], "file_id", 0) or 0) if files else 0
-        open_url_fn(f"https://www.nexusmods.com/{game_domain}/mods/{mod_id}"
-                    f"?tab=files&file_id={fid}")
+        url = (f"https://www.nexusmods.com/{game_domain}/mods/{mod_id}"
+               f"?tab=files&file_id={fid}")
+        if load_nexus_free_download_nxm():
+            url += "&nmm=1"
+        open_url_fn(url)
         log_fn("Nexus: premium required for direct download - opened the "
                f"download page for '{label}'. It will install automatically "
                "once the browser download finishes.")
@@ -289,9 +300,7 @@ class ManualDownloadWatcher:
                 part_sz = self._partial_bytes(folder)
                 for f in files:
                     exp = _expected_size(f)
-                    found, complete = _find_cached_archive(
-                        folder, _match_name(f), exp, self._mod_id,
-                        int(getattr(f, "file_id", 0) or 0))
+                    found, complete = _find_archive(folder, f, self._mod_id)
                     if found is not None:
                         if complete:
                             if not self._stop.is_set():

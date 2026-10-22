@@ -23,14 +23,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Optional
-
-import requests
+from typing import TYPE_CHECKING, Callable, Optional
 
 # Game scope: None = apply to all games; str = Nexus game domain (e.g. "fallout4", "skyrimspecialedition")
 GameScope = Optional[str]
 
-from Nexus.nexus_api import NexusAPI, NexusModRequirement, NexusModUpdateInfo
+if TYPE_CHECKING:
+    from Nexus.nexus_api import NexusAPI, NexusModRequirement, NexusModUpdateInfo
 from Nexus.nexus_meta import (
     NexusModMeta, normalise_game_domain, parse_req_pairs, scan_installed_mods,
     write_meta)
@@ -45,6 +44,28 @@ REQUIREMENT_FILTER_URL = (
     "https://raw.githubusercontent.com/ChrisDKN/Amethyst-Mod-Manager/main/src/Nexus/updatefilter.txt"
 )
 _FETCH_TIMEOUT = 10
+
+# Requirements a game satisfies with something outside the mod list, such as
+# a native Linux script extender standing in for a Windows one:
+# {game domain: callable returning the Nexus mod ids it provides}.
+_EXTERNAL_PROVIDERS: dict[str, Callable[[], "set[int]"]] = {}
+_EXTERNAL_PROVIDER_NAME = "<installed outside the mod list>"
+
+
+def register_external_provider(game_domain: str,
+                               provider: Callable[[], "set[int]"]) -> None:
+    """Count *provider*'s mod ids as installed for *game_domain*."""
+    _EXTERNAL_PROVIDERS[normalise_game_domain(game_domain)] = provider
+
+
+def externally_provided(game_domain: str) -> "set[int]":
+    provider = _EXTERNAL_PROVIDERS.get(normalise_game_domain(game_domain))
+    if provider is None:
+        return set()
+    try:
+        return set(provider())
+    except Exception:
+        return set()
 
 
 @dataclass
@@ -177,6 +198,7 @@ def _load_requirement_filter() -> tuple[
 
     remote_text = ""
     try:
+        import requests
         resp = requests.get(REQUIREMENT_FILTER_URL, timeout=_FETCH_TIMEOUT, verify=resolve_ca_bundle() or True)
         if resp.ok:
             remote_text = resp.text
@@ -307,6 +329,9 @@ class RequirementIndex:
                 for identity in candidates:
                     self.dependents.setdefault(identity, set()).add(name)
             self.requirements[name] = reqs
+        for mid in externally_provided(self.game_domain):
+            self.providers.setdefault((self.game_domain, mid), set()).add(
+                _EXTERNAL_PROVIDER_NAME)
         self._recompute(self.metas)
         # Reconcile disk after a reload, including a superseded writer/profile.
         self.dirty.update(name for name, meta in self.metas.items()
@@ -567,6 +592,7 @@ def _check_missing_requirements_one_domain(
     # 2. Build set of all installed Nexus mod IDs
     installed_mod_ids: set[int] = {
         m.mod_id for m in all_installed if m.mod_id > 0}
+    installed_mod_ids |= externally_provided(game_domain)
 
     # External tools (never flag), requirement alternatives and requirement
     # substitutions; all three can be game-scoped
@@ -724,6 +750,7 @@ def check_requirements_from_gql(
     # trigger spurious "missing requirement" warnings.
     installed_mod_ids: set[int] = {
         m.mod_id for m in domain_installed if m.mod_id > 0}
+    installed_mod_ids |= externally_provided(wanted_domain)
 
     external_set, alternatives_dict, substitutions = _load_requirement_filter()
 

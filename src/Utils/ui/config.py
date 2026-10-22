@@ -755,12 +755,36 @@ def display_date_pattern(*, with_time: bool = False) -> str:
     return pattern + " %H:%M" if with_time else pattern
 
 
+def load_default_priority_mode() -> str:
+    try:
+        value = _read_ini(get_ui_config_path()).get(
+            _INI_SECTION, "default_priority_mode", fallback="default").strip().lower()
+    except (configparser.Error, OSError):
+        value = "default"
+    return value if value in ("default", "reversed") else "default"
+
+
+def save_default_priority_mode(value: str) -> None:
+    if value not in ("default", "reversed"):
+        raise ValueError(f"Unsupported priority mode: {value}")
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = _new_parser()
+    if path.is_file():
+        parser.read(path)
+    if _INI_SECTION not in parser:
+        parser[_INI_SECTION] = {}
+    parser[_INI_SECTION]["default_priority_mode"] = value
+    _write_ini(parser, path)
+
+
 # ---------------------------------------------------------------------------
 # Shortcut overrides. Defaults and validation live in the Qt module; this
 # layer only persists its portable keyboard and mouse binding strings.
 # ---------------------------------------------------------------------------
 _SHORTCUTS_SECTION = "shortcuts"
 _MOUSE_SHORTCUTS_SECTION = "mouse_shortcuts"
+_SHORTCUT_SETTINGS_SECTION = "shortcut_settings"
 
 
 def _load_shortcut_section(section: str) -> dict[str, str]:
@@ -788,6 +812,26 @@ def load_shortcut_overrides() -> dict[str, str]:
     overrides = _load_shortcut_section(_MOUSE_SHORTCUTS_SECTION)
     overrides.update(_load_shortcut_section(_SHORTCUTS_SECTION))
     return overrides
+
+
+def load_disabled_shortcut_inputs() -> set[str]:
+    values = _load_shortcut_section(_SHORTCUT_SETTINGS_SECTION)
+    return {kind for kind in ("keyboard", "mouse")
+            if values.get(f"disable_{kind}", "").lower()
+            in ("1", "true", "yes", "on")}
+
+
+def save_disabled_shortcut_inputs(disabled: set[str]) -> None:
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = _new_parser()
+    if path.is_file():
+        parser.read(path)
+    parser[_SHORTCUT_SETTINGS_SECTION] = {
+        f"disable_{kind}": "1" if kind in disabled else "0"
+        for kind in ("keyboard", "mouse")
+    }
+    _write_ini(parser, path)
 
 
 def save_shortcut_overrides(overrides: dict[str, str]) -> None:
@@ -1108,11 +1152,10 @@ def _clamp(value: float) -> float:
 # ---------------------------------------------------------------------------
 _COLLECTIONS_SECTION = "collections"
 
-# Download order is no longer configurable. Up to two collection download lanes
-# take the largest remaining archives while the others run smallest-first.
 # Defaults are 8/8; more concurrency past this gives little practical benefit.
 _DEFAULT_MAX_CONCURRENT = 8
 _DEFAULT_MAX_EXTRACT_WORKERS = 8
+_DEFAULT_DOWNLOAD_ORDER = "balanced"
 
 # Upper clamps for the user-configurable concurrency (Settings ▸ Downloads).
 _MAX_CONCURRENT_CEILING = 12
@@ -1127,18 +1170,14 @@ _FIRST_RUN_HIDDEN_COLUMNS = [2, 5, 8]  # category, installed, size
 
 
 def load_collection_settings() -> dict:
-    """Return collection settings dict with keys: max_concurrent, max_extract_workers, check_download_locations, clear_archive_after_install, download_order.
-
-    NB *download_order* is retained ONLY for the legacy Tk settings dialog
-    (gui/status_bar.py) - the Qt download scheduler ignores it (downloads always
-    use the double-ended big-first + small-first policy)."""
+    """Return shared collection and Wabbajack download settings."""
     path = get_ui_config_path()
     defaults = {
         "max_concurrent": _DEFAULT_MAX_CONCURRENT,
         "max_extract_workers": _DEFAULT_MAX_EXTRACT_WORKERS,
         "check_download_locations": True,
         "clear_archive_after_install": False,
-        "download_order": "largest",   # legacy Tk key; unused by Qt
+        "download_order": _DEFAULT_DOWNLOAD_ORDER,
     }
     if not path.is_file():
         return defaults
@@ -1153,9 +1192,9 @@ def load_collection_settings() -> dict:
         max_extract_workers = max(1, min(_MAX_EXTRACT_WORKERS_CEILING, max_extract_workers))
         check_download_locations = s.getboolean("check_download_locations", True)
         clear_archive_after_install = s.getboolean("clear_archive_after_install", False)
-        download_order = s.get("download_order", "largest").strip().lower()
-        if download_order not in ("largest", "smallest"):
-            download_order = "largest"
+        download_order = s.get("download_order", _DEFAULT_DOWNLOAD_ORDER).strip().lower()
+        if download_order not in ("balanced", "largest", "smallest"):
+            download_order = _DEFAULT_DOWNLOAD_ORDER
         return {
             "max_concurrent": max_concurrent,
             "max_extract_workers": max_extract_workers,
@@ -1231,6 +1270,26 @@ def save_nexus_download_server(value: str) -> None:
     _write_ini(parser, path)
 
 
+def load_nexus_free_download_nxm() -> bool:
+    try:
+        return _read_ini(get_ui_config_path()).getboolean(
+            _DOWNLOADS_SECTION, "nexus_free_download_nxm", fallback=True)
+    except Exception:
+        return True
+
+
+def save_nexus_free_download_nxm(value: bool) -> None:
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = _new_parser()
+    if path.is_file():
+        parser.read(path)
+    if _DOWNLOADS_SECTION not in parser:
+        parser[_DOWNLOADS_SECTION] = {}
+    parser[_DOWNLOADS_SECTION]["nexus_free_download_nxm"] = "true" if value else "false"
+    _write_ini(parser, path)
+
+
 def load_download_only() -> bool:
     """True = archives the app downloads are kept in the cache, not installed."""
     path = get_ui_config_path()
@@ -1261,13 +1320,7 @@ def save_collection_settings(max_concurrent: int,
                               clear_archive_after_install: bool = False,
                               max_extract_workers: int = _DEFAULT_MAX_EXTRACT_WORKERS,
                               download_order: str | None = None) -> None:
-    """Persist collection settings to amethyst.ini.
-
-    *download_order* is accepted for backward-compatibility (the Tk settings
-    dialog still passes it) but the Qt download scheduler ignores it - downloads
-    always use the double-ended (big-first + small-first) policy. When given, it
-    is still written through so the Tk UI round-trips.
-    """
+    """Persist shared collection and Wabbajack download settings."""
     path = get_ui_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     parser = _new_parser()
@@ -1764,26 +1817,6 @@ def save_allow_prerelease(value: bool) -> None:
     if _UPDATES_SECTION not in parser:
         parser[_UPDATES_SECTION] = {}
     parser[_UPDATES_SECTION]["allow_prerelease"] = "true" if value else "false"
-    _write_ini(parser, path)
-
-
-def load_discord_presence() -> bool:
-    try:
-        return _read_ini(get_ui_config_path()).getboolean(
-            "discord", "rich_presence", fallback=False)
-    except Exception:
-        return False
-
-
-def save_discord_presence(value: bool) -> None:
-    path = get_ui_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    parser = _new_parser()
-    if path.is_file():
-        parser.read(path)
-    if "discord" not in parser:
-        parser["discord"] = {}
-    parser["discord"]["rich_presence"] = "true" if value else "false"
     _write_ini(parser, path)
 
 
@@ -2505,6 +2538,56 @@ def save_faugus_appimage_path(value: str) -> None:
     _write_ini(parser, path)
 
 
+def load_bottles_data_path() -> str:
+    """Return the user-configured Bottles data directory path, or '' if unset."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return ""
+    try:
+        parser = _read_ini(path)
+        return parser.get(_PATHS_SECTION, "bottles_data_path", fallback="").strip()
+    except Exception:
+        return ""
+
+
+def save_bottles_data_path(value: str) -> None:
+    """Persist the Bottles data directory path to amethyst.ini. Pass '' to clear."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = _new_parser()
+    if path.is_file():
+        parser.read(path)
+    if _PATHS_SECTION not in parser:
+        parser[_PATHS_SECTION] = {}
+    parser[_PATHS_SECTION]["bottles_data_path"] = value.strip()
+    _write_ini(parser, path)
+
+
+def load_bottles_appimage_path() -> str:
+    """Return the user-configured Bottles AppImage path, or '' if unset."""
+    path = get_ui_config_path()
+    if not path.is_file():
+        return ""
+    try:
+        parser = _read_ini(path)
+        return parser.get(_PATHS_SECTION, "bottles_appimage_path", fallback="").strip()
+    except Exception:
+        return ""
+
+
+def save_bottles_appimage_path(value: str) -> None:
+    """Persist the Bottles AppImage path to amethyst.ini. Pass '' to clear."""
+    path = get_ui_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parser = _new_parser()
+    if path.is_file():
+        parser.read(path)
+    if _PATHS_SECTION not in parser:
+        parser[_PATHS_SECTION] = {}
+    parser[_PATHS_SECTION]["bottles_appimage_path"] = value.strip()
+    _write_ini(parser, path)
+
+
 def load_steam_libraries_vdf_path() -> str:
     """Return the user-configured path to Steam's libraryfolders.vdf, or '' if unset."""
     path = get_ui_config_path()
@@ -2548,6 +2631,19 @@ def load_default_staging_path() -> str:
 
 def save_default_staging_path(value: str) -> None:
     """Persist the default mod staging folder to amethyst.ini. Pass '' to clear."""
+    value = value.strip()
+    if value:
+        from Utils.environment.sandbox import (
+            document_portal_path_hint, flatpak_blocked_path_hint,
+        )
+        problem = document_portal_path_hint(value)
+        if problem:
+            raise ValueError(problem)
+        command = flatpak_blocked_path_hint(value)
+        if command:
+            raise ValueError(
+                "Flatpak needs direct access to this staging folder. "
+                f"Run this command, restart Amethyst, then select it again: {command}")
     path = get_ui_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     parser = _new_parser()
@@ -3097,11 +3193,10 @@ def load_theme_colors() -> dict[str, str]:
 #
 # Valid values are theme IDs (filenames) under src/themes/ (e.g. "dark",
 # "light"). ui_config doesn't validate against that list to avoid importing
-# the gui package; theme.py handles unknown IDs by falling back to dark.
+# the gui package; the Qt theme loader falls back to amethyst for unknown IDs.
 # ---------------------------------------------------------------------------
 _APPEARANCE_OPTION = "appearance_mode"
 _APPEARANCE_DEFAULT = "amethyst"
-_APPEARANCE_LEGACY_DEFAULT = "dark"
 # Theme ids are lowercase word chars/digits/dashes/underscores; user-authored
 # JSON themes add a single "custom:" namespace prefix (see themes.custom),
 # so a colon is permitted between the prefix and the slug.
@@ -3206,8 +3301,7 @@ def ensure_ini_version(log_fn=None) -> None:
     file exists stamping the current version. amethyst.ini only - other config
     (last_game.json, games/, profiles, caches) is left untouched.
 
-    Also pins appearance_mode=dark into any surviving ini that doesn't set it,
-    so the newer 'amethyst' default only reaches brand-new installs.
+    Saves the default theme when no appearance mode is set.
 
     Call this ONCE at the very start of startup, before anything reads the ini.
     Best-effort: any error falls back to wiping + rewriting so a corrupt/locked
@@ -3258,6 +3352,7 @@ def ensure_ini_version(log_fn=None) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             parser = _new_parser()
             parser[_META_SECTION] = {"version": str(_APP_INI_VERSION)}
+            parser[_INI_SECTION] = {_APPEARANCE_OPTION: _APPEARANCE_DEFAULT}
             _write_ini(parser, path)
             log_fn(f"Startup configuration: created schema {_APP_INI_VERSION} INI.")
         else:
@@ -3275,7 +3370,7 @@ def ensure_ini_version(log_fn=None) -> None:
             if not parser.has_option(_INI_SECTION, _APPEARANCE_OPTION):
                 if _INI_SECTION not in parser:
                     parser[_INI_SECTION] = {}
-                parser[_INI_SECTION][_APPEARANCE_OPTION] = _APPEARANCE_LEGACY_DEFAULT
+                parser[_INI_SECTION][_APPEARANCE_OPTION] = _APPEARANCE_DEFAULT
                 dirty = True
             if dirty:
                 _write_ini(parser, path)
@@ -3289,6 +3384,7 @@ def ensure_ini_version(log_fn=None) -> None:
         try:
             parser = _new_parser()
             parser[_META_SECTION] = {"version": str(_APP_INI_VERSION)}
+            parser[_INI_SECTION] = {_APPEARANCE_OPTION: _APPEARANCE_DEFAULT}
             _write_ini(parser, path)
             log_fn("Startup configuration: clean rewrite succeeded.")
         except Exception as rewrite_exc:

@@ -20,7 +20,7 @@ from Utils.diagnostics.privacy import redact_paths
 _MODULE_STARTUP_TIMING = _perftrace.startup_timeline()
 _startup_import_started = _startup_time.perf_counter()
 from PySide6.QtCore import Qt, QSize, Signal, QTimer, QT_TRANSLATE_NOOP
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QSurfaceFormat, QTextCursor
 from PySide6.QtWidgets import (
     QMainWindow, QToolButton, QWidget, QSplitter, QApplication,
     QLabel, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QTextBrowser,
@@ -347,9 +347,8 @@ class MainWindow(QMainWindow):
     _confirm_downgrade = Signal(object)        # (dict with holder/event/version/game)
     # Proton-tools installer worker → UI thread.
     _proton_done = Signal(str, bool)           # (title, success)
-    # GL capability probe worker → UI thread (see _start_gl_warmup).
-    _gl_probe_done = Signal(bool)              # (OpenGL widget path usable)
     _nif_archive_ready = Signal(int, object, object)  # gen, bytes|None, context
+    _downloads_nexus_ready = Signal(object, object, object)
     # Nexus validate() worker → UI thread (username or None).
     _nexus_validated = Signal(object)          # (username str | None)
     # Saved-login initialization worker → UI thread (result dict). Importing
@@ -382,8 +381,9 @@ class MainWindow(QMainWindow):
     # Check-for-updates worker → UI thread ((updates, missing) | None on error).
     _updates_ready = Signal(object)
     # App self-update check worker → UI thread
-    # ((current, latest, mode, is_prerelease, is_downgrade)).
+    # ((current, latest, mode, is_prerelease, is_downgrade, appimage_url)).
     _app_update_found = Signal(object)
+    _app_update_checked = Signal(str)
     # Endorse/abstain worker → UI thread ({"ok": n, "endorse": bool}).
     _endorse_done = Signal(object)
     # Track worker → UI thread ({"ok": n}).
@@ -404,12 +404,12 @@ class MainWindow(QMainWindow):
     _qu_resolved = Signal(object, object)         # (queue list, skipped list)
     _qu_downloaded = Signal(object, object)       # (dl_items list, failed list)
     _qu_dl_progress = Signal("qlonglong", "qlonglong")  # aggregate (cur_bytes, total_bytes; 64-bit: >2GB)
-    _reinstall_downloaded = Signal(object, object)  # (dl_items list, failed list)
+    _reinstall_downloaded = Signal(object, object, object, object)
     _reinstall_dl_progress = Signal("qlonglong", "qlonglong")  # aggregate bytes (64-bit)
     _thunderstore_reinstall_downloaded = Signal(object)
     # Non-premium reinstall: file metadata resolved → arm the manual flow.
     # ([(mod_name, domain, mod_id, file_id, NexusModFile-like), …]).
-    _reinstall_manual_ready = Signal(object)
+    _reinstall_manual_ready = Signal(object, object)
     # Non-premium reinstall: a browser download landed (or an existing archive
     # was found). Payload: (mod_name, archive_path, prebuilt_meta|None, dl_key,
     # installed Thunderstore meta|None).
@@ -421,6 +421,7 @@ class MainWindow(QMainWindow):
     # Collection reset-load-order worker → UI thread (result dict).
     _reset_done = Signal(object)
     _wabbajack_reset_done = Signal(object)
+    _wabbajack_cleanup_done = Signal()
     # Dev-mode manifest downloader worker → UI thread (list of result dicts).
     _manifest_dl_done = Signal(object)
     # Collection INSTALL worker → UI thread. Every callback is a single emit; the
@@ -440,6 +441,7 @@ class MainWindow(QMainWindow):
     _appended_col_toggled = Signal(object)
     _col_import_done = Signal(object)          # (profile_name, installed, total, skipped)
     _import_file_picked = Signal(object)       # portal picker result (Path|None) → UI thread
+    _r2_file_picked = Signal(object)
     _export_code_ready = Signal(object, int)   # (code str|None, mod_count) share-code build → UI thread
     _install_files_picked = Signal(object)     # portal picker result (list[Path]) → UI thread
     _custom_exe_picked = Signal(object)        # portal picker result (Path|None) → UI thread
@@ -519,6 +521,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._startup_timing = startup_timing
         self._startup_wait_for_conflicts = False
+        self._startup_plugins_pending = True
         self._startup_event_loop_seen = False
         if startup_timing is not None:
             startup_timing.record(
@@ -535,8 +538,7 @@ class MainWindow(QMainWindow):
         # timer, so measuring only _dismiss_splash() itself hides the time the
         # callback spends waiting in the event queue.
         self._splash_reveal_queued_at = None
-        self._gl_warmup = None            # 1px QOpenGLWidget, see _start_gl_warmup
-        self._gl_probing = False
+        self._gl_probe_started = False
         phase_started = _startup_time.perf_counter()
         self._pal = active_palette()
         self._gs = GameState()
@@ -545,13 +547,6 @@ class MainWindow(QMainWindow):
                 "Initialize window palette and game state",
                 phase_started=phase_started, category="UI")
         self._gs.load(timing=startup_timing)
-        from gui_qt.discord_presence import DiscordPresence
-        from Utils.ui.config import load_discord_presence
-        self._discord_presence = DiscordPresence(
-            lambda: self._gs.game.name if self._gs.game is not None else None,
-            self)
-        app.aboutToQuit.connect(self._discord_presence.stop)
-        self._discord_presence.set_enabled(load_discord_presence())
         phase_started = _startup_time.perf_counter()
         self._conflicts_ready.connect(self._on_conflicts_ready)
         self._conflicts_failed.connect(self._on_conflicts_failed)
@@ -568,6 +563,8 @@ class MainWindow(QMainWindow):
         self._filegraph_loading_focus = None
         self._framework_statuses_ready.connect(self._on_framework_statuses)
         self._nif_archive_ready.connect(self._on_nif_archive_ready)
+        self._downloads_nexus_ready.connect(self._on_downloads_nexus_ready)
+        self._downloads_nexus_job = None
         from gui_qt.worker import LatestWorker
         self._nif_archive_jobs = LatestWorker("nif-archive-read")
         self._nif_open_gen = 0
@@ -880,7 +877,8 @@ class MainWindow(QMainWindow):
                 "Populate game/profile selectors",
                 phase_started=phase_started, category="UI")
         self._reload_modlist(startup_timing=startup_timing)
-        self._reload_plugins(startup_stage="initial")
+        if not self._filegraph_loading:
+            self._reload_plugins(startup_stage="initial")
         self._update_deployed_profile_highlight()
         phase_started = _startup_time.perf_counter()
 
@@ -945,11 +943,13 @@ class MainWindow(QMainWindow):
             lambda key, name, d, t: self._nexus_download_progress(key, name, d, t))
         self._reset_done.connect(self._on_reset_done)
         self._wabbajack_reset_done.connect(self._on_wabbajack_reset_done)
+        self._wabbajack_cleanup_done.connect(self._refresh_installed_wabbajack)
         self._reset_running = False
         self._manifest_dl_done.connect(self._on_manifest_dl_done)
         self._manifest_dl_running = False
         # Collection install state + Signal→UI-thread wiring.
         self._col_install_running = False
+        self._col_r2_import = None
         self._col_install_overlay = None
         self._col_install_control = None
         self._col_install_slug = ""
@@ -971,6 +971,7 @@ class MainWindow(QMainWindow):
         self._appended_col_toggled.connect(self._on_appended_col_toggled)
         self._col_import_done.connect(self._on_import_bundle_done)
         self._import_file_picked.connect(self._on_import_file_picked)
+        self._r2_file_picked.connect(self._on_r2_file_picked)
         self._export_code_ready.connect(self._on_export_code_ready)
         self._install_files_picked.connect(self._on_install_files_picked)
         self._custom_exe_picked.connect(self._on_custom_exe_picked)
@@ -1021,6 +1022,7 @@ class MainWindow(QMainWindow):
         # compare against GitHub releases, everything else against the AUR.
         self._update_overlay = None
         self._app_update_found.connect(self._on_app_update_found)
+        self._app_update_checked.connect(self._on_app_update_checked)
         QTimer.singleShot(2000, self._check_for_app_update)
         # First-run onboarding: show it (as a fullscreen tab) only when the flag
         # is unset/0 AND no games are configured. Either a completed onboarding
@@ -1054,6 +1056,7 @@ class MainWindow(QMainWindow):
         # icons and rich-text log spans) refresh without rebuilding the UI.
         bind_theme(self, roles={
             "TEXT_MAIN", "TEXT_DIM", "ACCENT", "TEXT_ERR", "TEXT_WARN",
+            "BG_ROW_HOVER",
         })
 
         # Splash watchdog: the splash is normally dismissed by the first
@@ -1185,29 +1188,9 @@ class MainWindow(QMainWindow):
                 self._start_nexus_api_init,
                 wait_label="Settle first visible window events")
 
-    def _start_gl_warmup(self):
-        """Probe the OpenGL path on a worker thread and, if the answer lands
-        before the window is drawn, park a 1px QOpenGLWidget on it.
-
-        The FIRST QOpenGLWidget added to a shown window makes Qt recreate the
-        native window as a GL-composited surface - a full-window flash that
-        reads as an app restart. Doing it while the splash still covers a
-        zero-opacity window hides it, so opening the first mesh is seamless.
-
-        Three rules keep the launch path out of harm's way:
-
-        * The probe runs a child interpreter (see gui_qt/gl_support) and can
-          take a second or more, so it never runs on the GUI thread. It cannot
-          run *in* this process at all: a GLX stack with no matching FBConfig
-          makes Qt qFatal, which killed the app when the probe was inline.
-        * A verdict that arrives after the window is on screen is dropped -
-          the flash would then be visible for no reason, and nif_preview pays
-          it only if a mesh is actually opened.
-        * Only games that ship the NIF Viewer start any of this, so nobody
-          else's launch spawns a probe or composites through GL (a broken GL
-          stack blacks out the whole window - GH#350).
-        """
-        if self._gl_warmup is not None or self._gl_probing:
+    def _start_gl_probe(self):
+        """Cache the child-process probe without enabling GL in this window."""
+        if self._gl_probe_started:
             return
         game = getattr(getattr(self, "_gs", None), "game", None)
         game_id = getattr(game, "game_id", "") or ""
@@ -1222,12 +1205,10 @@ class MainWindow(QMainWindow):
             return
         from gui_qt.gl_support import prime_platform
         prime_platform()      # GUI thread: the worker must not ask Qt itself
-        self._gl_probing = True
-        self._gl_probe_done.connect(self._on_gl_probe_done)
+        self._gl_probe_started = True
         probe_started = _startup_time.perf_counter()
 
         def _run():
-            from gui_qt.safe_emit import safe_emit
             from gui_qt.gl_support import gl_status
             try:
                 ok = gl_status()[0]
@@ -1240,14 +1221,13 @@ class MainWindow(QMainWindow):
                      else "Probe OpenGL support (unavailable)"),
                     phase_started=probe_started,
                     lane="OpenGL probe", category="optional warmup")
-            safe_emit(self._gl_probe_done, ok)
 
         import threading
         threading.Thread(target=_run, daemon=True).start()
 
         # Oblivion-era meshes need the vendored nif.xml interpreter.  Its
         # first parse is a few hundred milliseconds, so pay that once beside
-        # the existing GL warm-up instead of on the first selected mesh.
+        # the GL probe instead of on the first selected mesh.
         def _warm_nif_spec():
             try:
                 from Utils.assets.nif_spec import load_spec
@@ -1258,35 +1238,6 @@ class MainWindow(QMainWindow):
         if game_id == "oblivion":
             threading.Thread(target=_warm_nif_spec, daemon=True,
                              name="nif-spec-warmup").start()
-
-    def _on_gl_probe_done(self, ok: bool):
-        """UI thread: the GL probe answered. Warm composition up only while it
-        is still free to do so - see _start_gl_warmup."""
-        phase_started = _startup_time.perf_counter()
-        result = "Skip hidden OpenGL composition warmup"
-        try:
-            self._gl_probing = False
-            if not ok or self._gl_warmup is not None:
-                return
-            if self.isVisible() and self.windowOpacity() > 0.01:
-                return                # on screen already: the flash would show
-            from PySide6.QtOpenGLWidgets import QOpenGLWidget
-            warm = QOpenGLWidget(self)
-            warm.setFixedSize(1, 1)
-            warm.move(-4, -4)
-            warm.setAttribute(Qt.WA_TransparentForMouseEvents)
-            warm.lower()
-            warm.show()
-            self._gl_warmup = warm
-            result = "Create hidden OpenGL composition surface"
-        except Exception:
-            pass
-        finally:
-            timing = getattr(self, "_startup_timing", None)
-            if timing is not None and timing.active:
-                timing.record(
-                    result, phase_started=phase_started,
-                    category="optional warmup")
 
     def _warn_handler_load_failures(self):
         """If any game handler failed to load during discovery, log each one and
@@ -1581,7 +1532,7 @@ class MainWindow(QMainWindow):
         self._conflict_ui_generation = 0
         mv, pv = self._modlist_view, self._plugin_view
         mv.selectionModel().selectionChanged.connect(
-            lambda *_: self._on_mod_selection_changed())
+            lambda *_: self._on_mod_selection_changed(mv))
         mv.model().groups_changed.connect(
             lambda: self._on_mod_selection_changed()
             if mv.selectionModel().hasSelection() else None)
@@ -1591,12 +1542,17 @@ class MainWindow(QMainWindow):
     def _suppress_xpanel(self) -> bool:
         return getattr(self, "_xpanel_busy", False)
 
-    def _on_mod_selection_changed(self):
+    def _on_mod_selection_changed(self, view=None):
+        tab = getattr(self, "_modlist_tab", None)
+        if tab is not None and (tab.model._syncing or tab.model._publishing
+                                or tab._position is not None):
+            return
         if self._suppress_xpanel():
             return
         self._xpanel_busy = True
         try:
-            mv, pv = self._modlist_view, self._plugin_view
+            mv, pv = view or self._selected_modlist_view(), self._plugin_view
+            self._last_modlist_view = mv
             names = mv.selected_mod_names()
             # Change Version tab (if visible) follows the selection.
             self._follow_selection_change_version()
@@ -1646,11 +1602,12 @@ class MainWindow(QMainWindow):
         mv = getattr(self, "_mod_files_view", None)
         if mv is None:
             return
-        rows = self._modlist_view.selectionModel().selectedRows()
+        mod_view = self._selected_modlist_view()
+        rows = mod_view.selectionModel().selectedRows()
         if len(rows) != 1:
             mv.show_mod(None)
             return
-        e = self._modlist_model.entry(rows[0].row())
+        e = mod_view.model().entry(rows[0].row())
         from gui_qt.modlist_model import _BOUNDARY_NAMES
         # The synthetic Overwrite / Root Folder rows have a real on-disk folder,
         # so they show their files in the Mod Files tab like a mod. Only true
@@ -1993,6 +1950,20 @@ class MainWindow(QMainWindow):
         self._tabs.open_scoped_tab(
             widget, name, self._modlist_panel_stack, key="mf_bsa_preview")
 
+    def _open_download_archive_tab(self, path):
+        from gui_qt.archive_preview import ArchivePreview
+        key = "downloads_archive_preview"
+        existing = self._tabs.content_for_key(key)
+        if existing is not None:
+            existing.set_archive(path)
+            self._tabs.set_tab_title(key, Path(path).name)
+            self._tabs.focus_key(key)
+            return
+        widget = ArchivePreview(path)
+        widget.close_requested.connect(lambda: self._tabs.close_tab(key))
+        self._tabs.open_scoped_tab(
+            widget, Path(path).name, self._modlist_panel_stack, key=key)
+
     def _bsa_preview_conflicts(self, archive_path):
         """Per-member conflict codes from the pinned Filegraph generation."""
         try:
@@ -2019,6 +1990,10 @@ class MainWindow(QMainWindow):
         from pathlib import Path as _P
         from gui_qt.text_editor import TextEditor
         p = _P(path)
+        from Utils.mods.links import path_edit_message
+        staging, profile = self._gs.staging_dir(), self._gs.profile_dir()
+        def write_guard():
+            return path_edit_message(staging, profile, p) if staging and profile else ""
         name = rel_str.replace("\\", "/").rsplit("/", 1)[-1]
         key = "tf_text_editor:" + str(p.resolve() if p.exists() else p)
         editors = getattr(self, "_text_editor_widgets", None)
@@ -2027,11 +2002,13 @@ class MainWindow(QMainWindow):
         # Same file already open → just focus it (and re-apply the search).
         if key in editors and self._tabs.has_key(key):
             widget = editors[key]
+            widget.set_write_guard(write_guard)
             if find_kw:
                 widget.find_text(find_kw)
             self._tabs.focus_key(key)
             return
         widget = TextEditor(p, name)
+        widget.set_write_guard(write_guard)
         widget.setProperty("_te_key", key)
         editors[key] = widget
         widget.dirty_changed.connect(
@@ -2643,17 +2620,17 @@ class MainWindow(QMainWindow):
             self.tr("Move Selected"), compact=True)
         self._dl_move_btn.setFixedHeight(self._FOOT_BTN_H)
         self._dl_move_btn.setEnabled(False)
-        self._dl_move_btn.clicked.connect(self._on_downloads_move)
+        self._dl_move_btn.clicked.connect(lambda: self._on_downloads_move())
         self._dl_hide_btn = self._text_button(
             self.tr("Hide Selected"), compact=True)
         self._dl_hide_btn.setFixedHeight(self._FOOT_BTN_H)
         self._dl_hide_btn.setEnabled(False)
-        self._dl_hide_btn.clicked.connect(self._on_downloads_toggle_hidden)
+        self._dl_hide_btn.clicked.connect(lambda: self._on_downloads_toggle_hidden())
         self._dl_remove_btn = self._color_button(
             self.tr("Remove Selected"), _c(self._pal, "BTN_DANGER"), compact=True)
         self._dl_remove_btn.setFixedHeight(self._FOOT_BTN_H)
         self._dl_remove_btn.setEnabled(False)
-        self._dl_remove_btn.clicked.connect(self._on_downloads_remove)
+        self._dl_remove_btn.clicked.connect(lambda: self._on_downloads_remove())
         self._dl_locations_btn = self._text_button(
             self.tr("Locations"), compact=True)
         self._dl_locations_btn.setFixedHeight(self._FOOT_BTN_H)
@@ -2703,10 +2680,12 @@ class MainWindow(QMainWindow):
         if stack is not None:
             stack.clamp_to_current()
 
-    def _on_downloads_toggle_hidden(self):
-        make_hidden = not self._downloads_view.selected_all_hidden()
+    def _on_downloads_toggle_hidden(self, paths=None, hidden=None):
+        paths = self._downloads_view.checked_paths() if paths is None else paths
+        make_hidden = (not self._downloads_view.selected_all_hidden(paths)
+                       if hidden is None else hidden)
         try:
-            changed = self._downloads_view.set_selected_hidden(make_hidden)
+            changed = self._downloads_view.set_selected_hidden(make_hidden, paths)
         except OSError as exc:
             self._notify(
                 self.tr("Could not update hidden archives: {0}").format(exc),
@@ -2723,8 +2702,95 @@ class MainWindow(QMainWindow):
             self,
             lambda saved: self._downloads_view.refresh() if saved else None)
 
-    def _on_downloads_remove(self):
-        paths = self._downloads_view.checked_paths()
+    def _cancel_downloads_nexus_lookup(self):
+        job = self._downloads_nexus_job
+        if job is not None:
+            job["cancel"].set()
+            self._downloads_nexus_job = None
+
+    def _on_downloads_nexus_page(self, path):
+        from threading import Event
+        from Nexus.archive_lookup import find_archive_pages
+        from gui_qt.worker import run_in_worker
+        game = self._gs.game
+        domains = getattr(game, "nexus_game_domains", ())
+        if not domains:
+            self._notify(self.tr("The selected game has no Nexus Mods domain."), "warning")
+            return
+        if getattr(self, "_nexus_api_init_deferred", False):
+            self._start_nexus_api_init()
+        api = getattr(self, "_nexus_api", None)
+        if api is None:
+            message = (self.tr("Nexus login is still loading. Please try again shortly.")
+                       if getattr(self, "_nexus_api_init_running", False)
+                       else self.tr("Sign in to Nexus Mods to look up this archive."))
+            self._notify(message, "warning")
+            return
+        active = self._downloads_nexus_job
+        if active is not None and active["path"] == path and active["game"] is game:
+            self._notify(self.tr("This archive's Nexus lookup is already running."), "info")
+            return
+        self._cancel_downloads_nexus_lookup()
+        job = {"path": path, "game": game, "api": api, "cancel": Event()}
+        self._downloads_nexus_job = job
+        self._notify(self.tr("Finding the Nexus page for {0}…").format(Path(path).name), "info")
+
+        def worker():
+            try:
+                pages = find_archive_pages(path, domains, api, job["cancel"])
+                return job, pages, None
+            except Exception as exc:
+                return job, None, exc
+
+        run_in_worker(worker, self._downloads_nexus_ready,
+                      name="downloads-nexus-lookup", unpack=True)
+
+    def _on_downloads_nexus_ready(self, job, pages, error):
+        if job is not self._downloads_nexus_job:
+            return
+        if (job["cancel"].is_set() or self._gs.game is not job["game"]
+                or self._nexus_api is not job["api"]):
+            self._downloads_nexus_job = None
+            return
+        if error is not None:
+            self._downloads_nexus_job = None
+            if isinstance(error, InterruptedError):
+                return
+            message = (self.tr("Nexus login has expired. Sign in again to look up this archive.")
+                       if getattr(error, "status_code", 0) == 401
+                       else self.tr("Could not look up the archive on Nexus: {0}").format(error))
+            self._notify(message, "error")
+            return
+        if not pages:
+            self._downloads_nexus_job = None
+            self._notify(self.tr("No matching Nexus mod was found for this archive in the selected game's domains."), "info")
+            return
+
+        def open_page(url):
+            if job is not self._downloads_nexus_job:
+                return
+            self._downloads_nexus_job = None
+            if (not url or job["cancel"].is_set() or self._gs.game is not job["game"]
+                    or self._nexus_api is not job["api"]):
+                return
+            from Utils.environment.xdg import open_url
+            try:
+                open_url(url, log_fn=self._append_log)
+            except Exception as exc:
+                self._notify(self.tr("Could not open the Nexus page: {0}").format(exc), "error")
+
+        if len(pages) == 1:
+            open_page(pages[0]["url"])
+        else:
+            from gui_qt.list_picker_overlay import ListPickerOverlay
+            items = [(f"{page['name']} ({page['domain']}, {page['mod_id']})", page["url"])
+                     for page in pages]
+            ListPickerOverlay.show_over(
+                self, self.tr("Choose a Nexus mod page"), items, open_page,
+                select_label=self.tr("Open page"))
+
+    def _on_downloads_remove(self, paths=None):
+        paths = self._downloads_view.checked_paths() if paths is None else paths
         if not paths:
             return
         names = [Path(p).name for p in paths]
@@ -2749,11 +2815,11 @@ class MainWindow(QMainWindow):
             self.tr("Permanently delete {0} archive(s) from disk?").format(len(paths)),
             _confirmed, confirm_label=self.tr("Delete"), list_items=names)
 
-    def _on_downloads_move(self):
+    def _on_downloads_move(self, paths=None):
         """Move the checked archives between the *configured* download locations.
         Opens a borderless overlay listing those locations (Downloads / Mod
         Manager cache / extras) rather than a native folder browser."""
-        paths = self._downloads_view.checked_paths()
+        paths = self._downloads_view.checked_paths() if paths is None else paths
         if not paths:
             return
         game_name = getattr(self._gs, "game_name", None)
@@ -2961,6 +3027,7 @@ class MainWindow(QMainWindow):
             current=self.tr("Add game"),
             actions=self._game_actions(),
             on_select=self._on_game_changed,
+            allow_reselect=True,
             display_fn=lambda name: self.tr("{0} (unavailable)").format(name)
             if name in getattr(self, "_missing_game_paths", {}) else name,
             icon_provider=self._game_logo_icon,
@@ -3064,6 +3131,7 @@ class MainWindow(QMainWindow):
                 (self.tr("Wine DLL overrides"), self._proton_dll_overrides),
                 (self.tr("Prefix health check…"), self._proton_health_check),
                 None,
+                (self.tr("Install Windows component…"), self._proton_install_component),
                 (self.tr("Install VC++ Redistributable"), self._proton_install_vcredist),
                 (self.tr("Install d3dcompiler_47"), self._proton_install_d3dcompiler),
                 (self.tr("Install XACT audio (XAudio2)"), self._proton_install_xact),
@@ -3084,6 +3152,7 @@ class MainWindow(QMainWindow):
                 None,
                 (self.tr("Login to Nexus"), lambda: self._open_connections("nexus")),
                 (self._nxm_menu_label(), self._nexus_toggle_nxm),
+                (self.tr("Nexus link forwarding…"), self._nexus_link_forwarding),
                 (self.tr("Collections"), [
                     (self.tr("Browse collections…"), self._open_collections_tab),
                     (self.tr("Installed Collections"), self._open_installed_collections_tab),
@@ -3104,6 +3173,8 @@ class MainWindow(QMainWindow):
                  self._open_thunderstore_browser_tab),
                 (self.tr("Open game on Thunderstore"),
                  self._open_game_on_thunderstore),
+                (self.tr("Import r2modman/Gale profile…"),
+                 self._import_r2_profile),
                 None,
                 (self.tr("Identify installed mods"),
                  self._identify_thunderstore_mods),
@@ -3500,11 +3571,9 @@ class MainWindow(QMainWindow):
     # ---- selector handlers -------------------------------------------------
     def _on_game_changed(self, name):
         if name in getattr(self, "_missing_game_paths", {}):
-            paths = self._missing_game_paths[name]
-            self._notify(self.tr("{0} is unavailable. Check {1}, then choose Retry unavailable games.").format(
-                name, paths[0]), "warning")
             if self._gs.game_name:
                 self._game_selector.set_current(self._gs.game_name)
+            self._on_unavailable_game_selected(name)
             return
         if name == self._gs.game_name:
             return
@@ -3515,7 +3584,10 @@ class MainWindow(QMainWindow):
             self._game_selector.set_current(self._gs.game_name)
             return
         self._cancel_req_manual_batch()
+        self._cancel_downloads_nexus_lookup()
         self._gs.set_game(name)
+        if getattr(self, "_fomod_choices_controller", None) is not None:
+            self._fomod_choices_controller.profile_changed()
         # The Profile Settings tab is scoped to the previous game - close it.
         if self._tabs.has_key("profile_settings"):
             self._tabs.close_tab("profile_settings")
@@ -3688,6 +3760,8 @@ class MainWindow(QMainWindow):
         with perftrace.span("switch.sync_total"):
             with perftrace.span("switch.set_profile"):
                 self._gs.set_profile(name)
+                if getattr(self, "_fomod_choices_controller", None) is not None:
+                    self._fomod_choices_controller.profile_changed()
             with perftrace.span("switch.release_filegraph"):
                 filegraph_released = (
                     self._gs.release_filegraph_if_library_changed())
@@ -4124,7 +4198,8 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_run, name="mm-log-prune", daemon=True).start()
 
     def _check_for_app_update(self, force_downgrade_prompt: bool = False,
-                              force_fresh: bool = False):
+                              force_fresh: bool = False,
+                              notify_result: bool = False):
         """Run in background: fetch latest version and prompt if newer.
 
         AppImage installs compare against GitHub releases and offer the
@@ -4151,7 +4226,12 @@ class MainWindow(QMainWindow):
             _fetch_latest_version, _fetch_aur_version, _is_newer_version,
         )
 
-        force_fresh = bool(force_fresh or force_downgrade_prompt)
+        force_fresh = bool(force_fresh or force_downgrade_prompt or notify_result)
+        if notify_result:
+            if getattr(self, "_manual_app_update_running", False):
+                return
+            self._manual_app_update_running = True
+            self._notify(self.tr("Checking for app updates…"))
 
         # Opted out of update notifications (overlay checkbox / Settings):
         # skip the AUTOMATIC startup check (no API call, no banner). User-
@@ -4178,10 +4258,11 @@ class MainWindow(QMainWindow):
                     from Utils.github.app_updates import polish_flatpak_origin
                     polish_flatpak_origin()
                 result = _fetch_latest_version(
-                    allow_prerelease=allow_pre, force=force_fresh)
+                    allow_prerelease=allow_pre, force=force_fresh,
+                    appimage=mode == "appimage")
                 if result is None:
-                    return
-                latest, is_pre = result
+                    return "failed"
+                latest, is_pre, appimage_url = result
                 newer = _is_newer_version(__version__, latest)
                 if newer or (force_downgrade_prompt and latest != __version__):
                     # GitHub Releases decides the *version strings*, but for a
@@ -4203,22 +4284,50 @@ class MainWindow(QMainWindow):
                             # beta-branch updates - no branch hopping needed.
                             branch = "beta" if allow_pre else "stable"
                             if flatpak_remote_update_ready(branch) is False:
-                                return
+                                return "pending"
                     safe_emit(self._app_update_found,
-                              (__version__, latest, mode, is_pre, not newer))
+                              (__version__, latest, mode, is_pre, not newer,
+                               appimage_url))
+                    return "available"
             else:
                 aur_ver = _fetch_aur_version(force=force_fresh)
                 if aur_ver is None:
-                    return
+                    return "failed"
                 if _is_newer_version(__version__, aur_ver):
                     safe_emit(self._app_update_found,
-                              (__version__, aur_ver, "aur", False, False))
+                              (__version__, aur_ver, "aur", False, False, ""))
+                    return "available"
+            return "current"
 
-        threading.Thread(target=_do_check, daemon=True).start()
+        def _run():
+            result = "failed"
+            try:
+                result = _do_check()
+            finally:
+                if notify_result:
+                    safe_emit(self._app_update_checked, result)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_app_update_checked(self, result: str):
+        self._manual_app_update_running = False
+        if result == "available":
+            settings = getattr(self, "_settings_overlay", None)
+            if settings is not None:
+                settings._finish()
+        elif result == "current":
+            self._notify(self.tr("No app updates are available."), "success")
+        elif result == "pending":
+            self._notify(self.tr(
+                "A new release is not yet available from the Flatpak update remote. "
+                "Please try again later."), "info")
+        else:
+            self._notify(self.tr(
+                "Could not check for app updates. Please try again later."), "warning")
 
     def _on_app_update_found(self, payload):
         """Show the update banner over the modlist panel (UI thread)."""
-        current, latest, mode, is_prerelease, is_downgrade = payload
+        current, latest, mode, is_prerelease, is_downgrade, appimage_url = payload
         from gui_qt.update_overlay import UpdateOverlay
 
         # Dismiss any prior banner so re-checking (e.g. after toggling the
@@ -4266,10 +4375,15 @@ class MainWindow(QMainWindow):
                     open_url(_APP_UPDATE_RELEASES_URL)
                     return
             else:
-                from Utils.github.app_updates import run_installer
-                run_installer(allow_prerelease=is_prerelease)
+                from Utils.github.app_updates import run_appimage_update
+                if not run_appimage_update(appimage_url):
+                    self._notify(self.tr(
+                        "Could not start the AppImage update. Check that its folder "
+                        "is writable, or download the update from the releases page."),
+                        state="warning")
+                    return
             # closeEvent handles the rest of the shutdown (NxmIPC etc.); the
-            # installer waits 2s before replacing the running app.
+            # AppImage updater waits for this process to exit before updating.
             self.close()
 
         def _cleared(overlay):
@@ -4387,11 +4501,12 @@ class MainWindow(QMainWindow):
         # Refresh an open Add-Game tab IN PLACE (don't close+reopen - that
         # deletes the view while its scan/image threads may still emit).
         view = self._tabs._keys.get("add_game") if hasattr(self._tabs, "_keys") else None
-        if view is not None and hasattr(view, "refresh_games"):
-            try:
-                view.refresh_games(dict(_GAMES))
-            except Exception:
-                pass
+        for picker in (view, getattr(self, "_onboarding_view", None)):
+            if picker is not None and hasattr(picker, "refresh_games"):
+                try:
+                    picker.refresh_games(dict(_GAMES))
+                except Exception:
+                    pass
         # Now that the definitions are on disk, download their banner images.
         self._download_custom_game_images()
 
@@ -4448,8 +4563,9 @@ class MainWindow(QMainWindow):
         view = (self._tabs._keys.get("add_game")
                 if hasattr(self, "_tabs") and hasattr(self._tabs, "_keys")
                 else None)
-        if view is not None and hasattr(view, "on_image_downloaded"):
-            view.on_image_downloaded(game_id)
+        for picker in (view, getattr(self, "_onboarding_view", None)):
+            if picker is not None and hasattr(picker, "on_image_downloaded"):
+                picker.on_image_downloaded(game_id)
 
     def _open_add_game_tab(self):
         """Open the Add Game card-grid picker as a (detachable) tab."""
@@ -4462,7 +4578,8 @@ class MainWindow(QMainWindow):
         page = AddGameView(dict(_GAMES),
                            on_select=self._on_add_game_select,
                            on_add=self._on_add_game_add,
-                           on_unavailable=self._on_add_game_unavailable)
+                           on_unavailable=self._on_unavailable_game_selected,
+                           on_configure=self._on_add_game_configure)
         self._tabs.open_tab(page, self.tr("Add game"), key="add_game")
         # Pull down any custom-game banner images still missing on disk (e.g.
         # handlers synced on a previous run but their images never fetched).
@@ -4652,6 +4769,13 @@ class MainWindow(QMainWindow):
             self._tabs.focus_key("onboarding")
             return
         from gui_qt.onboarding_view import OnboardingView
+        from Utils.games.registry import _GAMES
+        game_actions = {
+            "select": self._on_add_game_select,
+            "add": self._on_add_game_add,
+            "unavailable": self._on_unavailable_game_selected,
+            "configure": self._on_add_game_configure,
+        }
         view = OnboardingView(
             on_login=self._nexus_login_sso,
             on_add_game=self._open_add_game_tab,
@@ -4659,12 +4783,15 @@ class MainWindow(QMainWindow):
             already_logged_in=self._ensure_nexus_api() is not None,
             on_language_change=self._apply_language,
             on_sync_languages=self._sync_languages_now,
+            games=dict(_GAMES),
+            on_game_action=lambda action, name: game_actions[action](name),
         )
         self._onboarding_view = view
         # ANY dismissal (Skip, Add-Game, tab X, detach-close) tears the view
         # down → mark onboarding done + drop the ref.
         view.destroyed.connect(self._on_onboarding_destroyed)
         self._tabs.open_tab(view, self.tr("Welcome"), key="onboarding")
+        self._download_custom_game_images()
 
     def _finish_onboarding(self):
         """Called by the view's on_done (Skip / Add-a-Game). Just close the tab;
@@ -4965,6 +5092,7 @@ class MainWindow(QMainWindow):
             f"[thunderstore] resolving {link.full_name} "
             f"for '{self._gs.game_name}'…")
         self._notify(self.tr("Checking Thunderstore dependencies…"), "info")
+        community = self._thunderstore_community()
 
         import threading
 
@@ -4978,11 +5106,10 @@ class MainWindow(QMainWindow):
             # versions on every package, so this is precise rather than the
             # best-effort matching the Nexus requirements code has to do.
             try:
-                res = resolve_dependencies(link)
+                res = resolve_dependencies(link, community=community)
             except Exception as exc:
                 self._append_log(
-                    f"[thunderstore] dependency resolution failed ({exc}) - "
-                    "installing the requested mod only")
+                    f"[thunderstore] dependency resolution failed ({exc})")
                 res = None
 
             staging = None
@@ -4991,11 +5118,7 @@ class MainWindow(QMainWindow):
             if res is not None:
                 for missing in res.failed:
                     self._append_log(
-                        f"[thunderstore] could not look up {missing} - skipped")
-                if res.truncated:
-                    self._append_log(
-                        "[thunderstore] dependency graph too large - "
-                        "only the first packages were resolved")
+                        f"[thunderstore] could not look up {missing}")
                 try:
                     staging = Path(resolve_target_staging(
                         game, Path(profile_dir)))
@@ -5043,6 +5166,13 @@ class MainWindow(QMainWindow):
         """
         link, res, wanted, auto_open, version_change = payload
 
+        if res is None or res.failed:
+            self._notify(
+                self.tr("Could not resolve all Thunderstore dependencies. "
+                        "Installation stopped; please try again. See the log for details."),
+                "warning")
+            return
+
         root = None
         deps = []
         for pkg in wanted:
@@ -5052,8 +5182,7 @@ class MainWindow(QMainWindow):
                 deps.append(pkg)
 
         if root is None or not deps:
-            # Nothing extra to install (or resolution failed) - go straight to
-            # the download with whatever we have.
+            # Nothing extra to install - download the requested package.
             self._start_ror2mm_downloads(
                 link, wanted, auto_open=auto_open,
                 version_change=version_change)
@@ -5084,39 +5213,71 @@ class MainWindow(QMainWindow):
 
     def _start_ror2mm_downloads(self, link, packages,
                                 auto_open: bool = True, version_change=None):
-        """Download every package the user accepted, dependencies first."""
+        """Download concurrently, retaining dependency order for the installer."""
         game_name = version_change.game_name if version_change else self._gs.game_name
+        origin = (self._gs.game_name, str(self._gs.profile_dir() or ""))
+        wanted = list(packages) or [None]
+        total = len(wanted)
+        from Utils.ui.config import load_collection_settings
+        try:
+            workers = int(load_collection_settings().get("max_concurrent", 8))
+        except Exception:
+            workers = 8
+        workers = max(1, min(workers, total))
         self._append_log(
-            f"[thunderstore] downloading {len(packages) or 1} package(s) "
-            f"into '{self._gs.game_name}'…")
+            f"[thunderstore] downloading {total} package(s) "
+            f"into '{game_name}' with {workers} worker(s)…")
         self._notify(self.tr("Downloading mod from Thunderstore…"), "info")
         dl_key = self._new_dl_key()
         import threading
+        import time
         from Utils.downloads.control import DownloadControl
+        from gui_qt.safe_emit import safe_emit
         cancel = DownloadControl()
+        progress = [[0, max(0, int(getattr(pkg, "file_size", 0) or 0))]
+                    for pkg in wanted]
+        progress_lock = threading.Lock()
+        completed = 0
+        last_emit = 0.0
+        batch_label = self.tr("{0} ({1}/{2} downloaded)")
+
+        def _label():
+            return (batch_label.format(link.full_name, completed, total)
+                    if total > 1 else f"{link.full_name}.zip")
+
+        def _progress(index, done, size, *, finished=False):
+            nonlocal completed, last_emit
+            with progress_lock:
+                slot = progress[index]
+                slot[0] = int(done)
+                if size:
+                    slot[1] = int(size)
+                if finished:
+                    completed += 1
+                now = time.monotonic()
+                if not finished and now - last_emit < 0.1:
+                    return
+                last_emit = now
+                safe_emit(self._req_install_prog, dl_key, _label(),
+                          sum(p[0] for p in progress), sum(p[1] for p in progress))
+
         self._nexus_download_progress(
-            dl_key, "", 0, 0, cancel=cancel.cancel,
+            dl_key, _label(), 0, sum(p[1] for p in progress), cancel=cancel.cancel,
             pause=cancel.pause, resume=cancel.resume, auto_open=auto_open)
 
         def _worker():
+            from concurrent.futures import ThreadPoolExecutor
             from Thunderstore.ror2mm_handler import Ror2mmLink
-            from Thunderstore.thunderstore_download import download_package
+            from Thunderstore.thunderstore_download import (
+                ThunderstoreDownloadResult, download_package)
             from Utils.config_paths import get_download_cache_dir_for_game
-            from gui_qt.safe_emit import safe_emit
 
             dest = get_download_cache_dir_for_game(game_name or "")
-            downloads = []      # (result, Ror2mmLink, info-dict)
 
-            wanted = list(packages)
-            if not wanted:
-                # Resolution failed entirely - fall back to the single package
-                # the link asked for so a transient API error still installs.
-                wanted = [None]
-
-            total = len(wanted)
-            for idx, pkg in enumerate(wanted, 1):
+            def _one(item):
+                idx, pkg = item
                 if cancel.is_set():
-                    break
+                    return None
                 if pkg is None:
                     sub_link, expected, info = link, 0, None
                 else:
@@ -5136,16 +5297,26 @@ class MainWindow(QMainWindow):
                 label = f"{sub_link.full_name}.zip"
                 if total > 1:
                     self._append_log(
-                        f"[thunderstore] downloading ({idx}/{total}) {label}")
-                result = download_package(
-                    sub_link, dest_dir=dest, expected_size=expected,
-                    progress_cb=lambda d, t, _l=label: safe_emit(
-                        self._req_install_prog, dl_key, _l, int(d), int(t)),
-                    cancel=cancel)
-                downloads.append((result, sub_link, info))
+                        f"[thunderstore] downloading ({idx + 1}/{total}) {label}")
+                try:
+                    result = download_package(
+                        sub_link, dest_dir=dest, expected_size=expected,
+                        progress_cb=lambda d, t: _progress(idx, d, t),
+                        cancel=cancel)
+                    if result.success and result.file_path:
+                        size = result.file_path.stat().st_size
+                        _progress(idx, size, size, finished=True)
+                except Exception as exc:
+                    result = ThunderstoreDownloadResult(error=str(exc))
+                return result, sub_link, info
+
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="thunderstore-dl") as pool:
+                downloads = [item for item in pool.map(_one, enumerate(wanted))
+                             if item is not None]
 
             safe_emit(self._ror2mm_download_done,
-                      (downloads, link, dl_key, cancel.is_set(), version_change))
+                      (downloads, link, dl_key, cancel.is_set(), version_change, origin))
 
         threading.Thread(target=_worker, daemon=True,
                          name="ror2mm-download").start()
@@ -5157,7 +5328,7 @@ class MainWindow(QMainWindow):
         dependencies-first, so installing the list in order satisfies each
         mod's requirements before it lands.
         """
-        downloads, link, dl_key, cancelled, version_change = payload
+        downloads, link, dl_key, cancelled, version_change, origin = payload
         self._nexus_download_progress(dl_key, "", 0, -1)   # hide this card
 
         if cancelled:
@@ -5176,6 +5347,15 @@ class MainWindow(QMainWindow):
             err = downloads[0][0].error if downloads else "no packages resolved"
             self._notify(
                 self.tr("Thunderstore download failed - {0}").format(err), "error")
+            return
+
+        if origin != (self._gs.game_name, str(self._gs.profile_dir() or "")):
+            self._append_log(
+                "[thunderstore] game or profile changed - completed archives "
+                "kept in the original game's download cache.")
+            self._notify(
+                self.tr("Game or profile changed. Downloaded archives were kept "
+                        "in the original game's Downloads tab."), "warning")
             return
 
         game = self._gs.game
@@ -5257,116 +5437,10 @@ class MainWindow(QMainWindow):
 
     def _install_thunderstore_entries(self, entries, game, profile_dir,
                                       control, callbacks, ownership=None):
-        """Download + install a profile import's Thunderstore mods.
-
-        Runs on the collection-install worker thread BEFORE the Nexus pipeline,
-        for two reasons. install_local_bundle restores the exporter's
-        modlist.txt and then drops every row whose folder is missing from disk,
-        so the mods have to be staged by then or the authored load order loses
-        them. And their priority keys have to be merged into the orchestrator's
-        install_order, which it builds as it starts.
-
-        No dependency resolution and no opt-out modal, unlike a ror2mm:// click:
-        the manifest already lists every dependency as its own entry, pinned to
-        the version the exporter had. Re-resolving could only pull in DIFFERENT
-        versions than the profile being reproduced.
-
-        Returns ``(order, installed, failures)`` - ``order`` is the
-        ``(array_index, folder)`` pairs for what actually staged.
-        """
-        from Thunderstore.ror2mm_handler import Ror2mmLink
-        from Thunderstore.thunderstore_download import (
-            download_package, fetch_version_info)
-        from Utils.config_paths import get_download_cache_dir_for_game
-        from Utils.mods.copy import resolve_target_staging
-        from Utils.mods.install import install_collection_archive
-
-        log = callbacks.on_log if callbacks is not None else self._append_log
-        order: list = []
-        failures: list = []
-        installed = 0
-        total = len(entries)
-        dest = get_download_cache_dir_for_game(getattr(game, "name", "") or "")
-        try:
-            staging_root = Path(resolve_target_staging(game, Path(profile_dir)))
-        except Exception as exc:
-            log(f"[thunderstore] no staging folder for the import: {exc}")
-            return [], 0, [(e.get("full_name", "?"), str(exc)) for e in entries]
-
-        for idx, entry in enumerate(entries, 1):
-            if control is not None and control.stop.is_set():
-                break
-            full_name = entry.get("full_name") or entry.get("name") or "?"
-            if callbacks is not None:
-                callbacks.on_status(
-                    f"Thunderstore {idx}/{total}: {full_name}")
-                callbacks.on_progress(float(idx - 1) / max(total, 1))
-            try:
-                link = Ror2mmLink(namespace=entry["namespace"],
-                                  name=entry["package"],
-                                  version=entry["version"])
-            except (ValueError, KeyError) as exc:
-                log(f"[thunderstore] skipping {full_name} - bad package id ({exc})")
-                failures.append((full_name, "bad package id"))
-                continue
-
-            result = download_package(
-                link, dest_dir=dest,
-                expected_size=int(entry.get("file_size") or 0),
-                cancel=(control.stop if control is not None else None))
-            if getattr(result, "cancelled", False):
-                break
-            if not (result.success and result.file_path):
-                log(f"[thunderstore] download failed for {full_name} "
-                    f"- {result.error}")
-                failures.append((full_name, result.error or "download failed"))
-                continue
-
-            # Best effort: the manifest carries no description/dependency list,
-            # and without them the update checker and a later dependency walk
-            # lose fidelity. A failure here still installs the mod.
-            info = None
-            try:
-                info = fetch_version_info(link)
-            except Exception:
-                info = None
-            if not isinstance(info, dict):
-                info = {"full_version_name": full_name,
-                        "download_url": link.download_url,
-                        "size": int(entry.get("file_size") or 0)}
-
-            # prebuilt_meta stays None ON PURPOSE: synthesising a NexusModMeta
-            # here would stamp a Nexus identity onto a Thunderstore mod and
-            # drag it into the missing-requirements checker (which filters on
-            # mod_id > 0). See _check_nexus_flags_after_install.
-            folder = None
-            try:
-                folder = install_collection_archive(
-                    str(result.file_path), game, Path(profile_dir),
-                    log_fn=log,
-                    preferred_name=(entry.get("logical")
-                                    or entry.get("name") or ""),
-                    prebuilt_meta=None,
-                    skip_index_update=False,
-                    cancel=(control.stop if control is not None else None))
-            except Exception as exc:
-                log(f"[thunderstore] install failed for {full_name} - {exc}")
-            if not folder:
-                failures.append((full_name, "install failed"))
-                continue
-
-            self._stamp_thunderstore_meta(link, info, folder,
-                                          staging_root=staging_root)
-            if ownership is not None:
-                ownership.track(folder)
-            order.append((int(entry.get("array_index") or 0), folder))
-            installed += 1
-
-        if failures:
-            log(f"[thunderstore] {len(failures)} package(s) did NOT install:")
-            for name, why in failures:
-                log(f"    • {name} - {why}")
-        return order, installed, failures
+        from Thunderstore.profile_install import install_entries
+        return install_entries(
+            entries, game, profile_dir, stamp_meta=self._stamp_thunderstore_meta,
+            control=control, callbacks=callbacks, ownership=ownership)
 
     def _thunderstore_staging(self):
         """Staging root for the current profile, or None."""
@@ -5387,6 +5461,8 @@ class MainWindow(QMainWindow):
         the Nexus API (per-file model, premium/free split, expiring links),
         none of which Thunderstore has.
         """
+        if not self._allow_mod_file_changes([mod_name]):
+            return
         from Thunderstore.thunderstore_meta import read_meta
         staging = self._thunderstore_staging()
         if staging is None:
@@ -5513,6 +5589,8 @@ class MainWindow(QMainWindow):
         through the same ror2mm pipeline as a fresh install (which also
         resolves any dependencies the new version added).
         """
+        if not self._allow_mod_file_changes([mod_name]):
+            return
         from Thunderstore.thunderstore_meta import read_meta
         from Utils.mods.copy import resolve_target_staging
 
@@ -5738,6 +5816,27 @@ class MainWindow(QMainWindow):
         """Handle an nxm:// link - download a mod or open a collection."""
         from Nexus.nxm_handler import parse_nxm_url, nxm_log
         nxm_log(f"Processing NXM link: {nxm_url}")
+        try:
+            mod_link, coll_link = parse_nxm_url(nxm_url)
+        except ValueError as exc:
+            nxm_log(f"Bad nxm:// URL - {exc}")
+            self._append_log(f"[nexus] bad nxm:// URL - {exc}")
+            self._notify(self.tr("Received a malformed NXM link."), "warning")
+            return
+        if mod_link is not None:
+            from Utils.wabbajack.acquire import route_nxm
+            if route_nxm(mod_link, getattr(self, "_nexus_api", None)):
+                nxm_log("Routed Nexus download to the pending Wabbajack installation")
+                return
+        if not hasattr(self, "_nxm_router"):
+            from gui_qt.nxm_routing import NxmRouter
+            self._nxm_router = NxmRouter(self)
+        domain = (mod_link or coll_link).game_domain
+        if self._nxm_router.route(nxm_url, domain):
+            return
+        if self._match_game_for_domain(domain) is None:
+            self._notify(self.tr("No configured game for Nexus domain '{0}'.").format(domain), "warning")
+            return
         # Normal launches defer optional saved-session restoration until after
         # first paint. A browser link cannot wait for that visual milestone:
         # start the worker now and retain the URL until credentials are ready.
@@ -5756,23 +5855,11 @@ class MainWindow(QMainWindow):
             self._append_log("[nexus] NXM link ignored - not logged in")
             return
 
-        try:
-            mod_link, coll_link = parse_nxm_url(nxm_url)
-        except ValueError as exc:
-            nxm_log(f"Bad nxm:// URL - {exc}")
-            self._append_log(f"[nexus] bad nxm:// URL - {exc}")
-            self._notify(self.tr("Received a malformed NXM link."), "warning")
-            return
-
         if coll_link is not None:
             self._process_nxm_collection_link(coll_link)
             return
 
         link = mod_link
-        from Utils.wabbajack.acquire import route_nxm
-        if route_nxm(link, api):
-            nxm_log("Routed Nexus download to the pending Wabbajack installation")
-            return
         # If the Nexus browser / Change Version tab is watching the download
         # folders for this mod (non-premium install), the user picked
         # 'Download with Mod Manager' instead - this flow installs it, so
@@ -5784,6 +5871,8 @@ class MainWindow(QMainWindow):
                 link.mod_id, link.game_domain, link.file_id)
         pending = getattr(self, "_app_manual_version_changes", {}).get(
             self._app_manual_watch_key(link.game_domain, link.mod_id, link.file_id))
+        fomod_request = getattr(self, "_app_manual_fomod_requests", {}).pop(
+            self._app_manual_watch_key(link.game_domain, link.mod_id, link.file_id), None)
         if pending is not None and pending[0] == link.file_id:
             pending_changes = pending[1] if isinstance(pending[1], list) else [pending[1]]
             version_change = pending_changes + ([version_change] if version_change else [])
@@ -5856,6 +5945,7 @@ class MainWindow(QMainWindow):
                     self._req_install_prog, dl_key, dl_label, int(d), int(t)),
                 cancel=cancel)
             result.version_change = version_change
+            result.fomod_request = fomod_request
             safe_emit(self._nxm_download_done,
                       (result, mod_info, file_info, dl_key, dl_label))
 
@@ -5865,8 +5955,10 @@ class MainWindow(QMainWindow):
         """UI thread: an NXM download finished. Install it (via the shared
         install pipeline) with a prebuilt meta from the link data."""
         result, mod_info, file_info, dl_key, dl_label = payload
+        fomod_request = getattr(result, "fomod_request", None)
         self._nexus_download_progress(dl_key, "", 0, -1)   # hide this download's card
         if not (result.success and result.file_path):
+            self._finish_fomod_reinstall(fomod_request)
             if "cancel" in (result.error or "").lower():
                 self._append_log("[nexus] download cancelled")
                 self._notify(self.tr("Download cancelled."), "info")
@@ -5884,6 +5976,7 @@ class MainWindow(QMainWindow):
             (result.game_domain, result.mod_id, result.file_id), None)
         game = self._gs.game
         if game is None or not game.is_configured():
+            self._finish_fomod_reinstall(fomod_request)
             self._append_log(
                 f"[nexus] downloaded {result.file_name} - no configured game "
                 "selected; install manually from Downloads.")
@@ -5902,6 +5995,17 @@ class MainWindow(QMainWindow):
             self._append_log(f"[nexus] could not build metadata: {exc}")
 
         path = str(result.file_path)
+        if fomod_request is not None:
+            if not self._fomod_controller().valid_target(fomod_request):
+                return
+            from Nexus.nexus_meta import read_meta, merge_reinstall_metadata
+            from Thunderstore.thunderstore_meta import read_meta as read_ts_meta
+            installed_meta_path = Path(fomod_request.target_dir) / "meta.ini"
+            meta = merge_reinstall_metadata(meta, read_meta(installed_meta_path))
+            self._on_reinstall_manual_found((
+                fomod_request.mod_name, path, meta, dl_key,
+                read_ts_meta(installed_meta_path), None, fomod_request))
+            return
         metas = {path: meta} if meta is not None else None
         pending = getattr(result, "version_change", None)
         changes = pending if isinstance(pending, list) else [pending]
@@ -6038,7 +6142,12 @@ class MainWindow(QMainWindow):
                         continue
                     graph = resolve_dependencies(Ror2mmLink(
                         namespace=res.namespace,
-                        name=res.manifest.name, version=version))
+                        name=res.manifest.name, version=version), community=community)
+                    if graph.failed:
+                        self._append_log(
+                            f"[thunderstore] incomplete dependencies for '{name}': "
+                            + ", ".join(graph.failed))
+                        continue
                     todo, _have = filter_already_installed(
                         graph.packages, staging, keep_root=False)
                     for pkg in todo:
@@ -6350,6 +6459,12 @@ class MainWindow(QMainWindow):
                 view.refresh()
             except RuntimeError:
                 self._installed_wabbajack_view = None
+        wabbajack = getattr(self, "_wabbajack_view", None)
+        if wabbajack is not None:
+            try:
+                wabbajack.refresh_installed()
+            except RuntimeError:
+                self._wabbajack_view = None
         self._sync_thunderstore_button()
 
     def _on_installed_wabbajack_removed(self, record, result):
@@ -6615,6 +6730,13 @@ class MainWindow(QMainWindow):
             "were already installed, are shared, or their origin is uncertain.\n\n"
             "The profile and shared download archives will be kept.").format(
                 installation.title, installation.profile_dir.name, len(plan.delete), len(plan.retain))
+        from Utils.games.registry import _GAMES
+        from Utils.mods.copy import resolve_target_staging
+        from Utils.mods.links import dependency_warning
+        game = _GAMES.get(installation.game_name)
+        if game is not None:
+            staging = resolve_target_staging(game, installation.profile_dir)
+            body += dependency_warning(game, [staging / name for name in plan.delete], removing=True)
         def confirmed(ok):
             if not ok:
                 self._set_tool_lock("collection-remove", "", False)
@@ -6749,7 +6871,20 @@ class MainWindow(QMainWindow):
         # or fully-bundled import needs no account, and the Thunderstore-only
         # games have no Nexus domain to log in against (see manifest_needs_nexus).
         _local_manifest_early = getattr(detail_view, "_local_manifest", None)
-        api = self._ensure_nexus_api()
+        r2_import = (_local_manifest_early or {}).get("r2Import")
+        r2_review = getattr(detail_view, "_r2_profile", None) is not None
+        if r2_import is not None:
+            if r2_review and not detail_view.r2_import_ready():
+                return
+            if r2_import["community"] != self._thunderstore_community():
+                self._notify(self.tr("Switch back to this manifest's game before importing."), "warning")
+                return
+            if self._download_only_active():
+                self._notify(self.tr("Turn off Download only to import a new profile."), "warning")
+                return
+        needs_nexus = (_local_manifest_early is None
+                       or profile_export.manifest_needs_nexus(_local_manifest_early))
+        api = self._ensure_nexus_api() if needs_nexus else None
         if api is None and not (install_options.mode == "group" and install_options.reuse_profile):
             if (_local_manifest_early is None
                     or profile_export.manifest_needs_nexus(_local_manifest_early)):
@@ -6841,7 +6976,9 @@ class MainWindow(QMainWindow):
         # Premium gate runs off-thread (validate() is rate-limited); on success it
         # creates the profile + starts the pipeline, all marshaled back to the UI.
         self._col_install_running = True
-        self._notify(self.tr("Checking Nexus account…"), "info")
+        self._notify(self.tr("Checking Nexus account…") if needs_nexus
+                     else self.tr("Preparing profile import…"), "info")
+        r2_target_name = detail_view.r2_destination_name() if r2_review else ""
 
         def _premium_worker():
             from Utils.ui.config import (load_nexus_last_premium,
@@ -6879,7 +7016,7 @@ class MainWindow(QMainWindow):
                 force_manual = False
             self._col_finished.emit(
                 "_premium", {"ok": is_premium and not force_manual,
-                             "manual": not (is_premium and not force_manual),
+                             "manual": needs_nexus and not (is_premium and not force_manual),
                              "collection": collection, "domain": domain,
                              "slug": slug, "dl_path": dl_path,
                              "revision": revision_number, "mods": mods,
@@ -6891,7 +7028,8 @@ class MainWindow(QMainWindow):
                              "local_manifest": local_manifest,
                              "bundle_zip": bundle_zip,
                              "offsite": offsite, "install_options": install_options,
-                             "installed_collection": installed_collection})
+                             "installed_collection": installed_collection,
+                             "r2_target_name": r2_target_name})
 
         threading.Thread(target=_premium_worker, daemon=True,
                          name="col-premium").start()
@@ -6994,7 +7132,7 @@ class MainWindow(QMainWindow):
                     self._col_finished.emit("_group_checked", (info, ready))
                 threading.Thread(target=worker, daemon=True, name="collection-group-check").start()
                 return
-        elif options.mode == "new":
+        elif options.mode == "new" and not info.get("r2_target_name"):
             matches = matching_profiles(game, info["domain"], info["slug"], info["revision"])
             if matches:
                 options = CollectionInstallOptions(mode="continue", target=matches[0])
@@ -7313,6 +7451,13 @@ class MainWindow(QMainWindow):
         # Nexus fetch) and remember the .amethyst so its bundled mods + profile
         # files are extracted once the Nexus mods finish installing.
         local_manifest = info.get("local_manifest")
+        self._col_r2_import = (local_manifest or {}).get("r2Import")
+        if self._col_r2_import is not None:
+            if (self._gs.game_name != game.name or not game.is_configured()
+                    or self._thunderstore_community() != self._col_r2_import["community"]):
+                self._col_install_finished()
+                self._notify(self.tr("Switch back to this manifest's game before importing."), "warning")
+                return
         self._col_bundle_zip = info.get("bundle_zip") or ""
         self._col_offsite = list(info.get("offsite") or [])
 
@@ -7349,7 +7494,12 @@ class MainWindow(QMainWindow):
             update_context = None
         elif created_profile:
             raw = collection.name or slug or "Collection"
-            profile_name = available_name(game, raw)
+            profile_name = info.get("r2_target_name") or available_name(game, raw)
+            if info.get("r2_target_name") and profile_path(game, profile_name).exists():
+                self._col_install_finished()
+                self._refresh_open_collection_buttons()
+                self._notify(self.tr("The destination profile already exists. Review the new name and import again."), "warning")
+                return
             try:
                 profile_dir = Path(_create_profile(
                     game.name, profile_name, profile_specific_mods=True))
@@ -7448,6 +7598,8 @@ class MainWindow(QMainWindow):
         manual_mode = bool(info.get("manual"))
         title = (f"Downloading collection: {collection.name or slug}" if dl_only
                  else f"Installing collection: {collection.name or slug}")
+        if self._col_r2_import is not None:
+            title = f"Importing profile: {collection.name or slug}"
         # A download-only run has no profile to record a resume point in, so it
         # offers Cancel only (which keeps the archives) instead of a Pause that
         # could never be resumed.
@@ -7505,12 +7657,35 @@ class MainWindow(QMainWindow):
                 # drops rows whose folder isn't staged yet, and the orchestrator
                 # needs their priorities as it builds install_order.
                 ts_order = []
+                ts_failed = []
+                config_failures = []
                 if ts_entries and not dl_only:
                     ts_order, ts_installed, ts_failed = \
                         self._install_thunderstore_entries(
                             ts_entries, game, profile_dir, control, callbacks, ownership=ownership)
                     self._col_ts_installed = ts_installed
                     self._col_ts_failed = len(ts_failed)
+                archive = (self._col_r2_import or {}).get("archive")
+                if archive and not dl_only and not control.stop.is_set():
+                    from Thunderstore.r2_archive import restore_configs
+                    config_row = -len(ts_entries) - 1
+                    callbacks.on_status("Restoring bundled configuration files…")
+                    callbacks.on_extract_add(config_row, "Bundled configuration files")
+                    try:
+                        restored = restore_configs(
+                            archive, profile_dir, cancel=control.stop,
+                            progress=lambda done, total: callbacks.on_extract_update(config_row, done, total))
+                        if restored is not None:
+                            from Utils.filegraph.constants import ROOT_FOLDER_NAME
+                            from Utils.filegraph.service import FileGraphService
+                            FileGraphService.open_library(game, profile_dir).refresh(
+                                profile_dir, mod_names=[ROOT_FOLDER_NAME])
+                            callbacks.on_log(f"[thunderstore] Restored {restored} bundled configuration file(s).")
+                    except Exception as exc:
+                        config_failures.append(f"Bundled configuration restore failed: {exc}")
+                        callbacks.on_log(f"[thunderstore] {config_failures[-1]}")
+                    finally:
+                        callbacks.on_extract_remove(config_row)
                 if control.stop.is_set() and not dl_only:
                     ownership.finish("cancelled" if control.cancel.is_set() else "paused")
                     if control.pause.is_set() and not control.cancel.is_set():
@@ -7536,8 +7711,11 @@ class MainWindow(QMainWindow):
                     local_bundle_zip=info.get("bundle_zip") or "",
                     preinstalled_order=ts_order,
                     append_pre_existing=existing_modlist_snapshot if overwrite_existing is not None else None,
-                    preinstall_failures=(["Some Thunderstore mods failed to install."]
-                                         if self._col_ts_failed else []),
+                    preinstall_failures=(
+                        [f"{name}: {reason}" for name, reason in ts_failed]
+                        + config_failures
+                        + (["Partial profile import: " + "; ".join(self._col_r2_import["omitted"])]
+                           if self._col_r2_import and self._col_r2_import["omitted"] else [])),
                     callbacks=callbacks, control=control)
             except Exception as exc:
                 if ownership is not None:
@@ -8113,7 +8291,8 @@ class MainWindow(QMainWindow):
         if report is None or not report.ready:
             self._col_install_finished()
             if ov is not None:
-                ov.finish(self.tr("Installation incomplete"))
+                ov.finish(self.tr("Partial profile import") if self._col_r2_import is not None
+                          else self.tr("Installation incomplete"))
                 QTimer.singleShot(1500, self._dismiss_col_overlay)
             self._auto_deploy_in_progress = True
             self._select_installed_collection_profile(profile_name)
@@ -8121,7 +8300,8 @@ class MainWindow(QMainWindow):
             issues = list(getattr(report, "failed_stages", ()) or ())
             issues.extend(getattr(report, "missing_required", ()) or ())
             detail = issues[0] if issues else self.tr("See the install log for details.")
-            self._notify(self.tr("Collection installation incomplete: {0}").format(detail),
+            self._notify((self.tr("Profile import incomplete: {0}") if self._col_r2_import is not None
+                          else self.tr("Collection installation incomplete: {0}")).format(detail),
                          "warning")
             return
         if self._finish_collection_group(profile_name):
@@ -8134,7 +8314,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self._dismiss_col_overlay)
         self._select_installed_collection_profile(profile_name)
         self._refresh_open_collection_buttons()
-        msg = self.tr("Collection installed - {0}/{1} mod(s)").format(installed, total)
+        msg = (self.tr("Profile imported - {0}/{1} mod(s)") if self._col_r2_import is not None
+               else self.tr("Collection installed - {0}/{1} mod(s)")).format(installed, total)
         self._notify(msg + (self.tr(" ({0} skipped)").format(skipped_n) if skipped_n else ""), "success")
         self._show_offsite_reminder()
 
@@ -8328,6 +8509,7 @@ class MainWindow(QMainWindow):
         self._reset_running = True
         self._set_tool_lock("wabbajack-reset", self.tr("Wabbajack load-order reset"), True)
         self._modlist_view.setEnabled(False)
+        self._refresh_modlist_tab()
         self._plugin_view.setEnabled(False)
         self._notify(self.tr("Resetting Wabbajack load order…"), "info")
         import threading
@@ -8348,6 +8530,7 @@ class MainWindow(QMainWindow):
         self._refresh_restore_backups()
         self._set_tool_lock("wabbajack-reset", "", False)
         self._modlist_view.setEnabled(True)
+        self._refresh_modlist_tab()
         self._plugin_view.setEnabled(True)
         if result.get("error"):
             self._notify(self.tr("Load order reset failed: {0}").format(result["error"]), "warning")
@@ -8824,6 +9007,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._notify(self.tr("NXM handler error: {0}").format(exc), "error")
 
+    def _nexus_link_forwarding(self):
+        from gui_qt.nxm_routing_overlay import NxmRoutingOverlay
+        NxmRoutingOverlay(self)
+
     def _on_oauth_event(self, kind: str, payload):
         """OAuth client callbacks marshalled onto the UI thread."""
         if isinstance(payload, dict) and "generation" in payload:
@@ -9183,7 +9370,20 @@ class MainWindow(QMainWindow):
             used[slot].add(path)
         return batches
 
-    def _reinstall_mods(self, mod_names, *, rollback=False):
+    def _allow_mod_file_changes(self, names):
+        from Utils.mods.links import edit_message
+        staging, profile = self._gs.staging_dir(), self._gs.profile_dir()
+        if staging is None or profile is None:
+            return False
+        messages = [message for name in names
+                    if (message := edit_message(staging, profile, name))]
+        if messages:
+            self._notify("\n\n".join(messages), "warning")
+            return False
+        return True
+
+    def _reinstall_mods(self, mod_names, *, rollback=False, fomod_request=None,
+                        _links_confirmed=False):
         """Reinstall one or more mods from their recorded installation archives
         (Tk parity, gui/modlist_nexus_actions._reinstall_mod). Each mod's archive
         is located across the Downloads dir + configured caches + extra locations
@@ -9191,6 +9391,10 @@ class MainWindow(QMainWindow):
         are skipped with a log line. Resolved archives go through _install_paths
         with the mod's existing folder name forced (silent Replace-All, keeping
         the modlist position + endorsed flag), so no Mod-Already-Exists dialog."""
+        if not self._allow_mod_file_changes(mod_names):
+            if fomod_request is not None:
+                self._finish_fomod_reinstall(fomod_request, message="Switch to the source profile to reinstall this mod.")
+            return
         if getattr(self, "_install_running", False):
             self._notify(self.tr("An install is already in progress."), "warning")
             return
@@ -9209,6 +9413,25 @@ class MainWindow(QMainWindow):
         from gui_qt.modlist_menu import (
             _installation_archive, _find_installation_archive,
             _read_mod_meta, _thunderstore_meta)
+        if rollback and not _links_confirmed:
+            from Utils.mods.links import dependency_warning, operation_paths
+            renaming = []
+            for name in names:
+                previous = getattr(_read_mod_meta(self._modlist_view, name),
+                                   "previous_version", None)
+                if previous is not None and previous.mod_name and previous.mod_name != name:
+                    renaming.append(name)
+            warning = dependency_warning(game, operation_paths(
+                self._gs.profile_dir(), staging, renaming))
+            if warning:
+                from gui_qt.confirm_overlay import ConfirmOverlay
+                ConfirmOverlay.show_over(
+                    self, self.tr("Roll back linked source"), warning.strip(),
+                    lambda ok: self._reinstall_mods(
+                        names, rollback=True, fomod_request=fomod_request,
+                        _links_confirmed=True) if ok else None,
+                    confirm_label=self.tr("Roll back"))
+                return
         preferred: dict[str, str] = {}   # archive path → forced folder name
         metas: dict[str, object] = {}    # archive path → reinstall metadata
         paths: list[str] = []
@@ -9345,7 +9568,7 @@ class MainWindow(QMainWindow):
             self._install_paths(
                 paths, metas=metas or None, preferred_names=preferred,
                 on_all_done=on_done, clear_archives=False,
-                version_changes=archive_changes)
+                version_changes=archive_changes, fomod_request=fomod_request)
         for nm, archive_path, meta, change in duplicate_archives:
             self._install_paths(
                 [archive_path], metas={archive_path: meta},
@@ -9354,11 +9577,14 @@ class MainWindow(QMainWindow):
                 on_all_done=lambda ok, total, names, installed: self._notify_rollback_summary(
                     ok, max(0, total - int(getattr(self, "_install_handoffs", 0))), names))
         if redownload:
-            self._redownload_and_reinstall(redownload, version_changes=changes)
+            self._redownload_and_reinstall(redownload, version_changes=changes,
+                                           fomod_request=fomod_request)
         if ts_redownload:
-            self._redownload_thunderstore_mods(ts_redownload, version_changes=changes)
+            self._redownload_thunderstore_mods(ts_redownload, version_changes=changes,
+                                             fomod_request=fomod_request)
+        return True
 
-    def _redownload_thunderstore_mods(self, items, version_changes=None):
+    def _redownload_thunderstore_mods(self, items, version_changes=None, fomod_request=None):
         """Redownload exact installed Thunderstore versions and reinstall them.
 
         ``items`` is ``[(mod_folder_name, ThunderstoreModMeta), ...]``. Public
@@ -9385,6 +9611,7 @@ class MainWindow(QMainWindow):
             jobs.append((mod_name, link, info, dl_key, label, control))
 
         if not jobs:
+            self._finish_fomod_reinstall(fomod_request)
             for name, reason in failed:
                 self._append_log(
                     f"[thunderstore reinstall] {name}: {reason}")
@@ -9437,7 +9664,7 @@ class MainWindow(QMainWindow):
             safe_emit(
                 self._thunderstore_reinstall_downloaded,
                 (downloads, worker_failed,
-                 cancelled_count == len(jobs)))
+                 cancelled_count == len(jobs), fomod_request))
 
         threading.Thread(
             target=_worker, daemon=True,
@@ -9445,21 +9672,24 @@ class MainWindow(QMainWindow):
 
     def _on_thunderstore_reinstall_downloaded(self, payload):
         """Install completed Thunderstore redownloads on the UI thread."""
-        downloads, failed, cancelled = payload
+        downloads, failed, cancelled, *extra = payload
+        fomod_request = extra[0] if extra else None
         batches = self._rollback_download_batches(downloads, lambda item: item[1].file_path)
         if not cancelled and len(batches) > 1:
             for i, batch in enumerate(batches):
                 self._on_thunderstore_reinstall_downloaded(
-                    (batch, failed if i == 0 else [], False))
+                    (batch, failed if i == 0 else [], False, fomod_request))
             return
         for name, reason in failed:
             self._append_log(f"[thunderstore reinstall] {name}: {reason}")
 
         if cancelled:
+            self._finish_fomod_reinstall(fomod_request)
             self._notify(self.tr("Reinstall download cancelled."), "info")
             return
 
         if not downloads:
+            self._finish_fomod_reinstall(fomod_request)
             if failed:
                 self._notify(
                     self.tr("Reinstall: {0} mod(s) couldn't be redownloaded - "
@@ -9491,13 +9721,14 @@ class MainWindow(QMainWindow):
 
         queued = self._deliver_download(
             paths, preferred_names=preferred, on_all_done=_restamp,
-            clear_archives=False, notify=False, version_changes=changes)
+            clear_archives=False, notify=False, version_changes=changes,
+            fomod_request=fomod_request)
         if not queued:
             self._notify(
                 self.tr("Redownloaded {0} mod(s) - reinstall them from the "
                         "Downloads tab.").format(len(downloads)), "success")
 
-    def _redownload_and_reinstall(self, items, version_changes=None):
+    def _redownload_and_reinstall(self, items, version_changes=None, fomod_request=None):
         """Reinstall mods whose install archive is gone by redownloading the
         exact recorded file from Nexus (modid + fileid from meta.ini), then
         installing via _install_paths with the mod's folder name forced (silent
@@ -9507,6 +9738,7 @@ class MainWindow(QMainWindow):
         filename, installed_meta, installed_thunderstore_meta), …]."""
         api = self._ensure_nexus_api()
         if api is None:
+            self._finish_fomod_reinstall(fomod_request)
             self._notify(
                 self.tr("Log in first: Settings ▸ Connections ▸ Nexus ▸ Login via SSO."),
                 "warning")
@@ -9534,7 +9766,8 @@ class MainWindow(QMainWindow):
             # the download folders so it auto-installs when the browser download
             # lands (nxm:// 'Download with Mod Manager' also works and cancels
             # the watch to avoid a double install).
-            self._start_reinstall_manual(items, version_changes=version_changes)
+            self._start_reinstall_manual(items, version_changes=version_changes,
+                                         fomod_request=fomod_request)
             return
 
         self._append_log(
@@ -9640,13 +9873,13 @@ class MainWindow(QMainWindow):
 
             with _cf.ThreadPoolExecutor(max_workers=dl_workers) as pool:
                 list(pool.map(_one, items))
-            self._reinstall_downloaded.emit(dl_items, failed)
+            self._reinstall_downloaded.emit(dl_items, failed, fomod_request, cancel)
 
         threading.Thread(target=_download_all, daemon=True,
                          name="reinstall-dl").start()
 
     # ---- non-premium reinstall: browser download + folder watch ------------
-    def _start_reinstall_manual(self, items, version_changes=None):
+    def _start_reinstall_manual(self, items, version_changes=None, fomod_request=None):
         """Reinstall missing archives for free users via the shared manual
         browser-download flow (parity with the Nexus browser / Change Version
         tabs). Fetches each file's REAL metadata first (name + size - the folder
@@ -9698,12 +9931,12 @@ class MainWindow(QMainWindow):
                 enriched.append((nm, domain, mod_id, file_id, f, installed_meta,
                                  installed_ts_meta,
                                  (version_changes or {}).get(nm)))
-            safe_emit(self._reinstall_manual_ready, enriched)
+            safe_emit(self._reinstall_manual_ready, enriched, fomod_request)
 
         threading.Thread(target=_prep, daemon=True,
                          name="reinstall-manual-prep").start()
 
-    def _on_reinstall_manual_ready(self, enriched):
+    def _on_reinstall_manual_ready(self, enriched, fomod_request=None):
         """Start one browser download watch per file and deliver its install requests."""
         from Nexus.manual_download_watch import start_manual_install
         from Nexus.nexus_meta import (has_reinstall_carryover,
@@ -9711,6 +9944,8 @@ class MainWindow(QMainWindow):
         from Utils.environment.xdg import open_url
         from gui_qt.safe_emit import safe_emit
 
+        if fomod_request is not None and not self._fomod_controller().valid_target(fomod_request):
+            return
         api = getattr(self, "_nexus_api", None)
         opened = 0
         grouped = {}
@@ -9738,7 +9973,7 @@ class MainWindow(QMainWindow):
                     if meta is not None or has_reinstall_carryover(installed_meta):
                         merged = merge_reinstall_metadata(meta, installed_meta)
                     safe_emit(self._reinstall_manual_found,
-                              (item[0], str(path), merged, _key, installed_ts_meta, change))
+                              (item[0], str(path), merged, _key, installed_ts_meta, change, fomod_request))
 
             def on_progress(done, total, _nm=nm, _key=dl_key):
                 safe_emit(self._req_install_prog, _key, _nm, int(done), int(total))
@@ -9747,6 +9982,9 @@ class MainWindow(QMainWindow):
                            _targets=tuple(targets)):
                 if not self._claim_app_manual_watch(_mid, _domain, _key):
                     return
+                if fomod_request is not None:
+                    self._fomod_choices_controller.finish_from_worker(
+                        fomod_request, self.tr("Stopped waiting for a browser download. Your edited choices are kept."))
                 for item in _targets:
                     self._append_log(
                         f"[reinstall] {item[0]} - stopped waiting for a browser "
@@ -9758,6 +9996,10 @@ class MainWindow(QMainWindow):
             self.cancel_app_manual_watch(mod_id, domain, file_id)
             watch_key = self._app_manual_watch_key(domain, mod_id, file_id)
             self._app_manual_watchers[watch_key] = (None, dl_key)
+            if fomod_request is not None:
+                if not hasattr(self, "_app_manual_fomod_requests"):
+                    self._app_manual_fomod_requests = {}
+                self._app_manual_fomod_requests[watch_key] = fomod_request
             changes = [item[-1] for item in targets if item[-1] is not None]
             if changes:
                 if not hasattr(self, "_app_manual_version_changes"):
@@ -9808,6 +10050,8 @@ class MainWindow(QMainWindow):
             if t is None:
                 continue
             watcher, dl_key = t
+            request = getattr(self, "_app_manual_fomod_requests", {}).pop(key, None)
+            self._finish_fomod_reinstall(request)
             getattr(self, "_app_manual_version_changes", {}).pop(key, None)
             if watcher is not None:
                 watcher.stop()
@@ -9832,6 +10076,7 @@ class MainWindow(QMainWindow):
         if claimed[1] != dl_key:
             self._app_manual_watchers.setdefault(watch_key, claimed)
             return False
+        getattr(self, "_app_manual_fomod_requests", {}).pop(watch_key, None)
         getattr(self, "_app_manual_version_changes", {}).pop(watch_key, None)
         return True
 
@@ -9840,9 +10085,11 @@ class MainWindow(QMainWindow):
         existing archive was found). Install with the folder name forced (silent
         Replace-All), keeping the archive for future reinstalls. *meta* was built
         on the watcher thread."""
-        nm, archive, meta, dl_key, installed_ts_meta, change = payload
+        nm, archive, meta, dl_key, installed_ts_meta, change, *extra = payload
+        fomod_request = extra[0] if extra else None
         self._nexus_download_progress(dl_key, "", 0, -1)   # clear the card
         if not archive:
+            self._finish_fomod_reinstall(fomod_request)
             return
         self._append_log(f"[reinstall] {nm} - redownloaded {archive}")
         metas = {archive: meta} if meta is not None else None
@@ -9873,7 +10120,8 @@ class MainWindow(QMainWindow):
         self._deliver_download([archive], metas=metas,
                                preferred_names={archive: nm},
                                on_all_done=on_done, clear_archives=False,
-                               version_changes={archive: change} if change else None)
+                               version_changes={archive: change} if change else None,
+                               fomod_request=fomod_request)
 
     def _on_reinstall_dl_progress(self, cur: int, tot: int):
         """UI thread: drive the pinned reinstall download progress item."""
@@ -9886,14 +10134,16 @@ class MainWindow(QMainWindow):
                              and not cancel.is_set() else None),
             auto_open=True)
 
-    def _on_reinstall_downloaded(self, dl_items, failed):
+    def _on_reinstall_downloaded(self, dl_items, failed, fomod_request=None, cancel=None):
         """UI thread: redownloads finished. Install the batch via _install_paths
         with the folder name forced per archive (silent Replace-All)."""
-        cancelled = bool(self._reinstall_dl_cancel is not None
-                         and self._reinstall_dl_cancel.is_set())
-        self._reinstall_dl_cancel = None
-        self._download_status.clear_progress("reinstall-dl")
+        control = cancel if cancel is not None else self._reinstall_dl_cancel
+        cancelled = bool(control is not None and control.is_set())
+        if self._reinstall_dl_cancel is control:
+            self._reinstall_dl_cancel = None
+            self._download_status.clear_progress("reinstall-dl")
         if cancelled:
+            self._finish_fomod_reinstall(fomod_request)
             self._append_log("[reinstall] redownload cancelled")
             self._notify(self.tr("Reinstall download cancelled."), "info")
             return
@@ -9902,11 +10152,13 @@ class MainWindow(QMainWindow):
         batches = self._rollback_download_batches(normalised, lambda item: item[1])
         if len(batches) > 1:
             for i, batch in enumerate(batches):
-                self._on_reinstall_downloaded(batch, failed if i == 0 else [])
+                self._on_reinstall_downloaded(batch, failed if i == 0 else [],
+                                              fomod_request, control)
             return
         for name, reason in failed:
             self._append_log(f"[reinstall] {name}: {reason}")
         if not dl_items:
+            self._finish_fomod_reinstall(fomod_request)
             if failed:
                 self._notify(
                     self.tr("Reinstall: {0} mod(s) couldn't be redownloaded - "
@@ -9951,7 +10203,7 @@ class MainWindow(QMainWindow):
         queued = self._deliver_download(
             paths, metas=metas, preferred_names=preferred,
             on_all_done=on_done, clear_archives=False, notify=False,
-            version_changes=changes)
+            version_changes=changes, fomod_request=fomod_request)
         if not queued:
             self._notify(self.tr("Redownloaded {0} mod(s) - reinstall them from the "
                                  "Downloads tab.").format(len(dl_items)), "success")
@@ -9964,6 +10216,8 @@ class MainWindow(QMainWindow):
         file_ids (parallel) → download them (parallel, premium-gated) → install
         the whole batch via _install_paths with the folder name forced (silent
         Replace-All)."""
+        if not self._allow_mod_file_changes(mod_names):
+            return
         if getattr(self, "_quick_updating", False):
             self._notify(self.tr("A Quick Update is already running."), "info")
             return
@@ -10329,6 +10583,8 @@ class MainWindow(QMainWindow):
         """Open the Change Version picker for *mod_name* as a tab that takes over
         the whole plugins panel. Triggered by the update-flag click + the
         right-click 'Change Version' item."""
+        if not self._allow_mod_file_changes([mod_name]):
+            return
         game = self._gs.game
         if game is None or not game.is_configured():
             self._notify(self.tr("No configured game selected."), "warning")
@@ -10439,10 +10695,11 @@ class MainWindow(QMainWindow):
         view = getattr(self, "_change_version_view", None)
         if view is None or not view.isVisible() or view.busy():
             return
-        rows = self._modlist_view.selectionModel().selectedRows()
+        mod_view = self._selected_modlist_view()
+        rows = mod_view.selectionModel().selectedRows()
         if len(rows) != 1:
             return
-        e = self._modlist_model.entry(rows[0].row())
+        e = mod_view.model().entry(rows[0].row())
         if e.is_separator or e.is_group_header or e.name == view.current_mod_name():
             return
         staging = self._gs.staging_dir()
@@ -10474,20 +10731,22 @@ class MainWindow(QMainWindow):
         view = self._tabs.content_for_key("fomod_choices")
         if view is None or not view.isVisible():
             return
-        rows = self._modlist_view.selectionModel().selectedRows()
+        mod_view = self._selected_modlist_view()
+        rows = mod_view.selectionModel().selectedRows()
         if len(rows) != 1:
             return
-        e = self._modlist_model.entry(rows[0].row())
+        e = mod_view.model().entry(rows[0].row())
         if e.is_separator or e.is_group_header or e.name == getattr(view, "current_mod_name", lambda: None)():
             return
         game = self._gs.game
         profile_dir = self._gs.profile_dir()
         game_name = getattr(game, "name", "") or ""
-        # A mod with no FOMOD sidecar leaves the tab on the last one that had
-        # choices, rather than blanking it while scrolling past plain mods.
         from Utils.fomod.choices import has_choices
         if not has_choices(e.name, profile_dir, game_name):
-            return
+            from Nexus.nexus_meta import read_meta
+            staging = self._gs.staging_dir()
+            if staging is None or not read_meta(staging / e.name / "meta.ini").is_fomod:
+                return
         view.set_mod(e.name, profile_dir, game_name)
         self._tabs.set_tab_title(
             "fomod_choices", self.tr("FOMOD: {0}").format(e.name))
@@ -10536,6 +10795,8 @@ class MainWindow(QMainWindow):
         the tab and re-index + rebuild the filemap (Tk parity, gui/modlist_panel.
         _apply_bundle_selection). The rescan skips <mod>/.mm_bundle/ so only the
         materialised selection at the mod root is indexed/deployed."""
+        if not self._allow_mod_file_changes([mod_name]):
+            return
         staging = self._gs.staging_dir()
         if staging is None:
             return
@@ -10750,7 +11011,8 @@ class MainWindow(QMainWindow):
             install_selected_fn=self._install_selected_nexus_requirements,
             ignore_req_fn=self._set_req_ignored,
             enable_target_fn=self._disabled_requirement_mod,
-            enable_fn=self._enable_requirement_mod)
+            enable_fn=self._enable_requirement_mod,
+            open_wizard_fn=self._open_wizard_tool_by_id)
         self._missing_reqs_view = view
         view.prune_installed({key for key, providers in requirement_index.providers.items()
                               if providers})
@@ -10874,7 +11136,7 @@ class MainWindow(QMainWindow):
             self._notify(self.tr("No mod staging folder for this profile."),
                          "warning")
             return
-        seed = self._modlist_view.selected_mod_names()
+        seed = self._selected_modlist_view().selected_mod_names()
         seed = sorted(seed) if name in seed else [name]
         if self._tabs.has_key("view_requirements"):
             self._tabs.focus_key("view_requirements")
@@ -10954,7 +11216,7 @@ class MainWindow(QMainWindow):
         if not self._req_tab_active():
             return
         view = self._view_requirements_view
-        self._modlist_model.set_highlights(
+        self._selected_modlist_view().model().set_highlights(
             requires=view.installed_requires,
             required_by=view.installed_required_by)
 
@@ -11076,6 +11338,18 @@ class MainWindow(QMainWindow):
             return False
 
     # ---- View FOMOD Choices (full detachable tab) ---------------------------
+    def _fomod_controller(self):
+        controller = getattr(self, "_fomod_choices_controller", None)
+        if controller is None:
+            from gui_qt.fomod_choices_controller import FomodChoicesController
+            controller = FomodChoicesController(self)
+            self._fomod_choices_controller = controller
+        return controller
+
+    def _finish_fomod_reinstall(self, request, success=False, message=""):
+        if request is not None:
+            self._fomod_controller().finish(request, success, message)
+
     def _open_fomod_choices_tab(self, mod_name: str):
         """Open the saved-FOMOD-selections view for *mod_name* as a full tab.
         The sidecars are read on a worker thread inside the view."""
@@ -11098,7 +11372,7 @@ class MainWindow(QMainWindow):
         view = FomodChoicesView(
             mod_name, profile_dir, game_name,
             on_close=lambda: self._tabs.close_tab("fomod_choices"),
-            log_fn=self._append_log)
+            log_fn=self._append_log, controller=self._fomod_controller())
         self._tabs.open_tab(
             view, self.tr("FOMOD: {0}").format(mod_name), key="fomod_choices")
 
@@ -11259,7 +11533,7 @@ class MainWindow(QMainWindow):
             self._notify(self.tr("No mods were tracked (no Nexus id)."), "info")
 
     def _copy_mods_to_profile(self, names, enabled_map, target_profile, move,
-                              separator_name=None):
+                              separator_name=None, *, symlink=False, _links_confirmed=False):
         """Copy (or move) the given mods' staging folders into *target_profile*.
         Resolves collisions (single → Replace/Rename/Cancel overlay; multi → one
         Replace-or-skip prompt), copies on a worker thread, and - for a move -
@@ -11279,7 +11553,26 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._notify(self.tr("Could not resolve target profile: {0}").format(exc), "error")
             return
+        from Utils.mods.links import eligible_targets, dependency_warning, operation_paths
+        if symlink and (move or target_profile not in eligible_targets(
+                game, src_profile_dir, src_staging)):
+            self._notify(self.tr("Choose a profile with separate mod storage."), "warning")
+            return
         names = [n for n in names if n]
+        if move and not _links_confirmed:
+            moving = [n for n in names if (src_staging / n).resolve()
+                      != (target_staging / n).resolve()]
+            warning = dependency_warning(
+                game, operation_paths(src_profile_dir, src_staging, moving))
+            if warning:
+                from gui_qt.confirm_overlay import ConfirmOverlay
+                ConfirmOverlay.show_over(
+                    self, self.tr("Move linked source"), warning.strip(),
+                    lambda ok: self._copy_mods_to_profile(
+                        names, enabled_map, target_profile, move, separator_name,
+                        symlink=symlink, _links_confirmed=True) if ok else None,
+                    confirm_label=self.tr("Move"))
+                return
         if not names and not separator_name:
             return
         existing = []
@@ -11297,10 +11590,21 @@ class MainWindow(QMainWindow):
 
         # plan[name] = dest_name (rename) or None (copy as-is / replace after wipe)
         def _launch(plan, replace_set):
-            self._run_copy_to_profile(
-                names, enabled_map, plan, replace_set, move,
-                src_staging, src_profile_dir, target_staging, target_profile_dir,
-                target_profile, game, separator_name, source_groups)
+            def run():
+                self._run_copy_to_profile(
+                    names, enabled_map, plan, replace_set, move,
+                    src_staging, src_profile_dir, target_staging, target_profile_dir,
+                    target_profile, game, separator_name, source_groups, symlink=symlink)
+            warning = dependency_warning(
+                game, [target_staging / (plan[n] or n) for n in replace_set],
+                replacing=True)
+            if warning:
+                from gui_qt.confirm_overlay import ConfirmOverlay
+                ConfirmOverlay.show_over(
+                    self, self.tr("Replace linked source"), warning.strip(),
+                    lambda ok: run() if ok else None, confirm_label=self.tr("Replace"))
+            else:
+                run()
 
         if not existing:
             _launch({n: None for n in names}, set())
@@ -11313,7 +11617,7 @@ class MainWindow(QMainWindow):
 
             def _resolved(action, _nm=nm):
                 if not action or action == "cancel":
-                    self._notify(self.tr("Copy cancelled."), "info")
+                    self._notify(self.tr("Link cancelled.") if symlink else self.tr("Copy cancelled."), "info")
                     return
                 if action == "replace":
                     _launch({_nm: None}, {_nm})
@@ -11345,6 +11649,7 @@ class MainWindow(QMainWindow):
 
             ConfirmOverlay.show_over(
                 self, (self.tr("Copy separator to profile") if separator_name
+                       else self.tr("Symlink to profile") if symlink
                        else self.tr("Copy to profile")),
                 self.tr("{0} of {1} mod(s) already exist in "
                         "'{2}'. Replace them? (Cancel skips those.)").format(
@@ -11355,7 +11660,7 @@ class MainWindow(QMainWindow):
     def _run_copy_to_profile(self, names, enabled_map, plan, replace_set, move,
                              src_staging, src_profile_dir, target_staging,
                              target_profile_dir, target_profile, game,
-                             separator_name=None, source_groups=None):
+                             separator_name=None, source_groups=None, *, symlink=False):
         """Worker: copy each planned mod, then (move) remove the sources."""
         import threading
         from pathlib import Path
@@ -11377,10 +11682,11 @@ class MainWindow(QMainWindow):
         # Serialize: a second copy/move while one runs would write the same
         # target folders concurrently (install has the same guard).
         if getattr(self, "_copy_running", False):
-            self._notify(self.tr("A copy/move is already in progress."), "info")
+            self._notify(self.tr("A profile transfer is already in progress."), "info")
             return
         self._copy_running = True
         self._op_title = (self.tr("Copying separator") if separator_name
+                          else self.tr("Linking") if symlink
                           else self.tr("Moving") if move else self.tr("Copying"))
         self._ensure_feedback()
         if separator_name:
@@ -11390,7 +11696,8 @@ class MainWindow(QMainWindow):
                     display_separator, target_profile), "info")
         else:
             self._notify(
-                (self.tr("Moving {0} mod(s) to '{1}'…") if move
+                (self.tr("Linking {0} mod(s) to '{1}'…") if symlink
+                 else self.tr("Moving {0} mod(s) to '{1}'…") if move
                  else self.tr("Copying {0} mod(s) to '{1}'…"))
                 .format(len(plan), target_profile), "info")
         mod_total = len(plan)
@@ -11411,13 +11718,27 @@ class MainWindow(QMainWindow):
                 try:
                     src_folder = Path(src_staging) / nm
                     dest_folder = Path(target_staging) / (dest_name or nm)
+                    if not src_folder.is_dir():
+                        self._append_log(f"Profile transfer skipped '{nm}': source unavailable.")
+                        continue
+                    if symlink:
+                        from Utils.mods.links import eligible_targets
+                        if target_profile not in eligible_targets(
+                                game, Path(src_profile_dir), Path(src_staging)):
+                            self._append_log("Profile transfer skipped: target storage changed.")
+                            continue
                     # Shared staging, or a group copied into its owning member:
                     # source and destination are the same real folder. There is
                     # nothing to transfer, and Replace must not delete it.
                     if dest_folder.exists() and _os.path.realpath(
                             src_folder) == _os.path.realpath(dest_folder):
                         copied.append(nm)
-                        detached.append(nm)
+                        from Utils.mods.links import operation_paths
+                        source_entry = operation_paths(
+                            Path(src_profile_dir), Path(src_staging), [nm])[0]
+                        if (not source_entry.is_symlink()
+                                or source_entry.absolute() == dest_folder.absolute()):
+                            detached.append(nm)
                         name_map[nm] = dest_name or nm
                         registered.append(
                             (dest_name or nm, enabled_map.get(nm, True)))
@@ -11427,16 +11748,23 @@ class MainWindow(QMainWindow):
                         continue
                     if nm in replace_set:
                         import shutil
-                        shutil.rmtree(dest_folder, ignore_errors=True)
+                        if dest_folder.is_symlink():
+                            dest_folder.unlink()
+                        elif dest_folder.is_dir():
+                            shutil.rmtree(dest_folder)
+                        elif dest_folder.exists():
+                            dest_folder.unlink()
                     out = mod_copy.copy_mod_to_profile(
                         Path(src_staging), Path(src_profile_dir),
                         Path(target_staging), Path(target_profile_dir),
                         nm, enabled_map.get(nm, True), dest_name=dest_name,
-                        game=game, register=False)
+                        game=game, register=False, symlink=symlink)
                     if out:
                         copied.append(nm)
                         name_map[nm] = out
                         registered.append((out, enabled_map.get(nm, True)))
+                    else:
+                        self._append_log(f"Profile transfer failed for '{nm}'.")
                 except Exception as exc:
                     self._append_log(f"Copy to profile failed for '{nm}': {exc}")
             separator_copied = False
@@ -11507,7 +11835,7 @@ class MainWindow(QMainWindow):
                         if full:
                             done += remove_mods_from_group(
                                 game, Path(src_profile_dir), full,
-                                log_fn=_log_cb)
+                                log_fn=_log_cb, remove_links=False)
                         if shared:
                             done += remove_mods_from_group(
                                 game, Path(src_profile_dir), shared,
@@ -11523,14 +11851,15 @@ class MainWindow(QMainWindow):
                         full = [n for n in removable if n not in detached]
                         if full:
                             remove_mods(game, Path(src_profile_dir), full,
-                                        log_fn=_log_cb, staging_root=Path(src_staging))
+                                        log_fn=_log_cb, staging_root=Path(src_staging),
+                                        remove_links=False)
                         removed_names = removable
                     removed = bool(removed_names)
                 except Exception as exc:
                     self._append_log(f"Move: could not remove sources: {exc}")
             transferred = removed_names if move else copied if target_registered else []
             self._copy_done.emit({"copied": len(transferred), "total": mod_total,
-                                  "move": move, "removed": removed,
+                                  "move": move, "symlink": symlink, "removed": removed,
                                   "target": target_profile,
                                   "source_profile_dir": str(src_profile_dir),
                                   "target_profile_dir": str(target_profile_dir),
@@ -11562,7 +11891,9 @@ class MainWindow(QMainWindow):
                 message = self.tr("Could not copy the separator.")
                 severity = "error"
         else:
-            message = (self.tr("Moved {0}/{1} mod(s) to '{2}'.")
+            message = (self.tr("Linked {0}/{1} mod(s) to '{2}'.")
+                       if payload.get("symlink")
+                       else self.tr("Moved {0}/{1} mod(s) to '{2}'.")
                        if payload.get("move")
                        else self.tr("Copied {0}/{1} mod(s) to '{2}'.")) \
                 .format(c, payload.get('total', 0), payload.get('target', ''))
@@ -11616,6 +11947,7 @@ class MainWindow(QMainWindow):
             pass
         target_is_active = (active_profile is not None and target_profile is not None
                             and active_profile.resolve() == target_profile.resolve())
+        self._refresh_mod_links()
         if payload.get("removed") or reconciled or target_is_active:
             self._reload_modlist()
 
@@ -12214,7 +12546,7 @@ class MainWindow(QMainWindow):
         else:
             self._req_installing = False
 
-    def _on_modlist_flag_clicked(self, row: int, flag: int):
+    def _on_modlist_flag_clicked(self, row: int, flag: int, view=None):
         """A flag icon in the modlist Flags column was clicked → its action
         (Tk parity, gui/modlist_panel ~3960): update→Change Version,
         modio-update→open mod.io page, missing→Missing Requirements,
@@ -12222,7 +12554,8 @@ class MainWindow(QMainWindow):
         from gui_qt.modlist_data import (
             FLAG_UPDATE, FLAG_MISSING_REQS, FLAG_NOTE, FLAG_MODIO_UPDATE,
             FLAG_BUNDLE, FLAG_RERUN_FOMOD, FLAG_THUNDERSTORE_UPDATE)
-        e = self._modlist_model.entry(row)
+        view = view or self._modlist_view
+        e = view.model().entry(row)
         if e is None or e.is_separator:
             return
         if flag == FLAG_UPDATE:
@@ -12234,14 +12567,14 @@ class MainWindow(QMainWindow):
             self._reinstall_mods([e.name])
         elif flag == FLAG_MODIO_UPDATE:
             from gui_qt.modlist_menu import _open_on_modio
-            _open_on_modio(self._modlist_view, e.name)
+            _open_on_modio(view, e.name)
         elif flag == FLAG_THUNDERSTORE_UPDATE:
             self._update_thunderstore_mod(e.name)
         elif flag == FLAG_MISSING_REQS:
             self._open_missing_reqs_tab(e.name)
         elif flag == FLAG_NOTE:
             from gui_qt.modlist_menu import _open_note_editor
-            _open_note_editor(self._modlist_view, [e.name])
+            _open_note_editor(view, [e.name])
         elif flag == FLAG_BUNDLE:
             self._open_bundle_tab(e.name)
 
@@ -12264,17 +12597,82 @@ class MainWindow(QMainWindow):
         self._tabs.close_tab("add_game")
         self._open_configure_game_tab(game, from_add_game=True)
 
-    def _on_add_game_unavailable(self, name: str):
+    def _on_add_game_configure(self, name: str):
+        from Utils.games.registry import _GAMES
+        game = _GAMES.get(name)
+        if game is not None:
+            self._open_configure_game_tab(game)
+
+    def _on_unavailable_game_selected(self, name: str):
+        if self._tool_busy:
+            self._notify(self.tr("Wait for {0} to finish before changing saved games.").format(
+                self._tool_busy_label()), "warning")
+            return
         from Utils.games.registry import _GAMES
         game = _GAMES.get(name)
         paths = game.missing_configured_paths() if game is not None else []
         if paths:
-            self._notify(self.tr("{0} is already saved, but {1} is unavailable. Check the location and choose Retry unavailable games.").format(
-                name, paths[0]), "warning")
+            from gui_qt.confirm_overlay import ConfirmOverlay
+
+            def _reconfigure():
+                if self._tool_busy:
+                    self._notify(self.tr("Wait for {0} to finish before changing saved games.").format(
+                        self._tool_busy_label()), "warning")
+                    return
+                self._on_add_game_add(name)
+
+            ConfirmOverlay.show_over(
+                self, self.tr("Game unavailable"),
+                self.tr(
+                    "{0} is unavailable. If its drive is disconnected, reconnect it "
+                    "and choose Retry unavailable games.\n\n"
+                    "If the game has moved, choose Reconfigure game to update "
+                    "its location.\n\n"
+                    "Remove this game from Amethyst? Only its saved configuration "
+                    "will be deleted. Your game files, mods, profiles, and overwrite "
+                    "folders will be kept."
+                ).format(name),
+                lambda ok: self._remove_unavailable_game(name) if ok else None,
+                confirm_label=self.tr("Remove game"), card_h=330,
+                secondary_action=(self.tr("Reconfigure game"), _reconfigure))
         else:
             self._retry_unavailable_games()
             if name in self._gs.game_names:
                 self._on_add_game_select(name)
+
+    def _remove_unavailable_game(self, name: str):
+        if self._tool_busy:
+            self._notify(self.tr("Wait for {0} to finish before removing saved games.").format(
+                self._tool_busy_label()), "warning")
+            return
+        from Utils.games.registry import _clear_game_config, _GAMES
+        try:
+            _clear_game_config(name)
+        except OSError as exc:
+            self._append_log(f"[game] failed to remove {name}: {exc}")
+            self._notify(self.tr("Could not remove {0}. See the log for details.").format(name),
+                         "error")
+            return
+        names = sorted(n for n, game in _GAMES.items() if game.is_configured())
+        self._gs.game_names = names if names else ["No games configured"]
+        if self._gs.game_name == name:
+            if names:
+                self._on_game_changed(names[0])
+            else:
+                self._gs.game_name = None
+                self._gs.profile = None
+                self._reload_modlist()
+                self._reload_plugins()
+        self._populate_selectors()
+        configure = self._tabs.content_for_key("configure_game")
+        if configure is not None and configure._game.name == name:
+            self._tabs.close_tab("configure_game")
+            self._configure_game_view = None
+        view = self._tabs.content_for_key("add_game")
+        if view is not None:
+            view.refresh_games(dict(_GAMES))
+        self._append_log(f"[game] removed unavailable instance: {name}")
+        self._notify(self.tr("Removed {0} from Amethyst.").format(name), "success")
 
     def _open_configure_game_tab(self, game, from_add_game: bool = False):
         """Open the (live) Configure-Game view as a detachable tab.
@@ -12284,7 +12682,9 @@ class MainWindow(QMainWindow):
         reconfiguring an already-configured game, Save keeps the tab open so the
         user can keep tweaking (only Remove/Cancel close it)."""
         from gui_qt.configure_game_view import ConfigureGameView
-        configure_profile = "default" if from_add_game else self._gs.profile
+        configure_profile = (self._gs.profile
+                             if not from_add_game and game.name == self._gs.game_name
+                             else "default")
 
         # open_tab() focuses an existing keyed tab instead of installing the
         # newly-created widget. Resolve that real content first so the cached
@@ -12315,9 +12715,7 @@ class MainWindow(QMainWindow):
             if removed or not saved or from_add_game:
                 self._tabs.close_tab("configure_game")
             if saved or removed:
-                # Refresh the game registry + selector; switch to the game if it
-                # is now configured, else fall back to the current/ first game.
-                from Utils.games.registry import _load_games
+                from Utils.games.registry import _load_games, _GAMES
                 names = _load_games()
                 self._gs.game_names = names
                 # _load_games() replaces every handler object. Restore the
@@ -12325,7 +12723,8 @@ class MainWindow(QMainWindow):
                 # writes profile-scoped paths through it.
                 self._gs.reassert_active_profile()
                 self._refresh_game_selector_entries()
-                if saved and game.name in names:
+                if (saved and game.name in names
+                        and (from_add_game or game.name == self._gs.game_name)):
                     self._on_game_changed(game.name)
                     self._game_selector.set_current(game.name)
                     # The deploy method may have just been switched - a
@@ -12347,12 +12746,16 @@ class MainWindow(QMainWindow):
                     # back to the Add-Game picker if none are left.
                     remaining = [n for n in names
                                  if n != game.name and n != "No games configured"]
-                    if remaining:
-                        fallback = remaining[0]
-                        self._on_game_changed(fallback)
-                        self._game_selector.set_current(fallback)
-                    else:
-                        self._open_add_game_tab()
+                    if game.name == self._gs.game_name:
+                        if remaining:
+                            fallback = remaining[0]
+                            self._on_game_changed(fallback)
+                            self._game_selector.set_current(fallback)
+                        else:
+                            self._open_add_game_tab()
+                picker = self._tabs.content_for_key("add_game")
+                if picker is not None:
+                    picker.refresh_games(dict(_GAMES))
 
             # Staging files moved: re-sync the mods folder and rescan the index
             # against the NEW root (same work as the Refresh Modlist button).
@@ -12373,10 +12776,12 @@ class MainWindow(QMainWindow):
                         # Keep the tab on the replacement handler created by
                         # _load_games(); otherwise its next Save still targets
                         # the old handler's active profile.
-                        if (self._gs.game is not None
-                                and self._gs.game.name == game.name):
-                            v.refresh_for_profile(
-                                self._gs.game, self._gs.profile)
+                        live_game = _GAMES.get(game.name)
+                        if live_game is not None:
+                            profile = (self._gs.profile
+                                       if game.name == self._gs.game_name
+                                       else v._profile_name)
+                            v.refresh_for_profile(live_game, profile)
                         v.notify_saved()
                     except Exception:
                         pass
@@ -12391,7 +12796,9 @@ class MainWindow(QMainWindow):
 
     def _configure_tab_title(self, game, profile_name=None) -> str:
         """Tab label for the configure view, including its actual profile scope."""
-        verb = "Reconfigure" if game.is_configured() else "Add"
+        verb = ("Reconfigure" if game.is_configured()
+                or game.get_game_path() is not None or game.missing_configured_paths()
+                else "Add")
         prof = self._gs.profile if profile_name is None else profile_name
         if prof:
             return self.tr("{0} game - {1}").format(verb, prof)
@@ -12480,6 +12887,38 @@ class MainWindow(QMainWindow):
         self._tabs.open_tab(view, self.tr("My Collections"),
                             key="my_collections")
 
+    def _import_r2_profile(self):
+        game = self._gs.game
+        if game is None or not game.is_configured() or not self._thunderstore_community():
+            self._notify(self.tr("Select a configured Thunderstore game first."), "warning")
+            return
+        origin = self._gs.game_name
+        from Utils.ui.portal import pick_file
+        pick_file(
+            "Import r2modman/Gale profile",
+            lambda path: self._r2_file_picked.emit((origin, path)),
+            filters=[("r2modman/Gale profile (*.r2z *.r2x *.txt)",
+                      ["*.r2z", "*.r2x", "*.txt"])])
+
+    def _on_r2_file_picked(self, payload):
+        origin, path = payload
+        if not path:
+            return
+        if origin != self._gs.game_name:
+            self._notify(self.tr("Game changed. Open the manifest again for the selected game."), "warning")
+            return
+        from Thunderstore.r2_profile import read_profile, check_community
+        try:
+            profile = read_profile(path)
+            check_community(profile, self._thunderstore_community())
+        except Exception as exc:
+            self._notify(self.tr("Could not read manifest: {0}").format(exc), "error")
+            return
+        import uuid
+        self._open_manifest_import(
+            profile.manifest(self._thunderstore_community()),
+            f"r2_{uuid.uuid4().hex}", r2_profile=profile)
+
     def _import_profile(self):
         """Import a .amethyst / manifest: parse it, then reuse the collection detail
         + install pipeline (via CollectionDetailView with a local manifest) to build
@@ -12534,7 +12973,7 @@ class MainWindow(QMainWindow):
         self._open_manifest_import(manifest, Path(path).stem, bundle_zip=bundle_zip)
 
     def _open_manifest_import(self, manifest, source_stem, *, bundle_zip="",
-                              allow_append=False):
+                              allow_append=False, r2_profile=None):
         """Shared import continuation: validate the manifest's game domain against
         the selected game, then open the collection detail tab (which drives the
         install pipeline). Used by both file-import and code-import. *allow_append*
@@ -12548,7 +12987,7 @@ class MainWindow(QMainWindow):
         # A Thunderstore-only / fully-bundled manifest imports with no account:
         # see _on_import_file_picked. api stays None in that case and every
         # Nexus-touching step downstream is skipped along with it.
-        api = self._ensure_nexus_api()
+        api = self._ensure_nexus_api() if _pe.manifest_needs_nexus(manifest) else None
         if api is None and _pe.manifest_needs_nexus(manifest):
             self._notify(self.tr("Log in first: Settings ▸ Connections ▸ Nexus ▸ Login via SSO."),
                          "warning")
@@ -12576,7 +13015,7 @@ class MainWindow(QMainWindow):
         view = CollectionDetailView(
             api, collection, game, log_fn=self._append_log,
             local_manifest=manifest, bundle_zip=bundle_zip,
-            allow_append=allow_append)
+            allow_append=allow_append, r2_profile=r2_profile)
         view.convert_requested.connect(lambda name, v=view: self._convert_collection_profile(v, name))
         view.set_install_handler(
             lambda chosen, skipped, intent="install": self._install_collection(
@@ -12905,6 +13344,7 @@ class MainWindow(QMainWindow):
             print(f"[gui_qt] group remove propagation failed: {exc}", flush=True)
         if self._gs.game is not None:
             import threading
+            from gui_qt.safe_emit import safe_emit
             profile_root = Path(self._gs.game.get_profile_root())
             def cleanup():
                 from Utils.wabbajack.profiles import cleanup_unreferenced
@@ -12913,6 +13353,8 @@ class MainWindow(QMainWindow):
                     cleanup_unreferenced(profile_root)
                 except Exception as exc:
                     app_log(f"Wabbajack storage cleanup: {exc}")
+                finally:
+                    safe_emit(self._wabbajack_cleanup_done)
             threading.Thread(target=cleanup, daemon=True, name="wabbajack-cleanup").start()
         profs = self._gs.profiles()
         if self._gs.profile == name:
@@ -13325,7 +13767,7 @@ class MainWindow(QMainWindow):
             body = self.tr(
                 "Amethyst could not launch {0}.\n\n"
                 "Press Deploy to apply your mods, then start the game from "
-                "Steam, Heroic, Lutris or Faugus instead - the deployed mods "
+                "Steam, Heroic, Lutris, Faugus or Bottles instead - the deployed mods "
                 "stay active however the game is started.").format(target)
             if detail:
                 body += "\n\n" + self.tr("Details: {0}").format(detail)
@@ -13336,7 +13778,7 @@ class MainWindow(QMainWindow):
         height = 420 if actionable else (340 if detail else 280)
         self._warn_popup.emit(self.tr("The game did not launch"), body, height)
 
-    def _do_play(self):
+    def _do_play(self, *, together_choice=None):
         game = self._gs.game
         if game is None or not game.is_configured():
             self._notify(self.tr("No configured game selected."), "warning")
@@ -13353,6 +13795,41 @@ class MainWindow(QMainWindow):
         from Utils.executables import launch as exe_launch
         label = self._play_exe_selector.current()
         exe_path = self._play_exe_paths.get(label)
+        from Utils.bethesda import skyrim_together
+        if exe_path is None and together_choice is not False:
+            together_exe = skyrim_together.find_launcher(game)
+            if together_exe is not None:
+                if together_choice is None:
+                    from gui_qt.confirm_overlay import ConfirmOverlay
+                    profile = self._gs.profile
+
+                    def _choose_together(choice):
+                        if (self._gs.game is game and self._gs.profile == profile
+                                and self._play_exe_selector.current() == label):
+                            try:
+                                self._do_play(together_choice=choice)
+                            except Exception as exc:
+                                self._append_log(f"Play error: {exc!r}")
+                                self._play_failed(str(exc))
+
+                    ConfirmOverlay.show_over(
+                        self, self.tr("Skyrim Together detected"),
+                        self.tr("Skyrim Together was detected. Would you like to launch it?"),
+                        lambda accepted: _choose_together(True) if accepted else None,
+                        confirm_label=self.tr("Launch Together"),
+                        cancel_label=self.tr("Cancel"), danger=False,
+                        secondary_action=(self.tr("Play Skyrim"),
+                                          lambda: _choose_together(False)))
+                    return
+                exe_path = together_exe
+                label = self.tr("Skyrim Together")
+            elif together_choice:
+                self._notify(self.tr("Skyrim Together is no longer available."), "warning")
+                return
+        together_launch = (exe_path is not None
+                           and skyrim_together.is_launcher(game, exe_path))
+        if together_launch:
+            exe_path = skyrim_together.find_launcher(game) or exe_path
         # First breadcrumb of every launch: proves the click reached the
         # handler and records which dropdown entry it resolved to.
         self._append_log(
@@ -13381,7 +13858,7 @@ class MainWindow(QMainWindow):
                     self._open_wizard_tool(tool)
                     return
             # Custom exe → Proton in the game prefix (or per-exe override).
-            is_auto = label in self._play_auto_exe_names
+            is_auto = label in self._play_auto_exe_names or together_launch
             can_deploy = hasattr(game, "deploy")
             if not exe_path.is_file() and not (is_auto and can_deploy):
                 self._play_failed(
@@ -13424,7 +13901,11 @@ class MainWindow(QMainWindow):
                     with game_process.bind(session):
                         with launch_report.report(_failed) as rep:
                             try:
-                                target(run_path, game, log_fn=self._play_log)
+                                if together_choice:
+                                    target(run_path, game, log_fn=self._play_log,
+                                           launch_settings_key=exe_launch.game_exe_key(game))
+                                else:
+                                    target(run_path, game, log_fn=self._play_log)
                             except Exception as exc:
                                 self._append_log(f"Run EXE error: {exc!r}")
                                 rep.mark_failed(f"{exc!r}")
@@ -13456,6 +13937,8 @@ class MainWindow(QMainWindow):
             # Deploy exactly like the Deploy button, then launch once the
             # (final, non-coalesced) deploy succeeds.
             if can_deploy and (force_deploy
+                               or (together_choice
+                                   and exe_launch.load_deploy_before_launch(game))
                                or exe_launch.load_deploy_on_run(game, exe_path.name)):
                 self._set_play_toast(
                     self.tr("Deploying, then launching {0}…").format(label))
@@ -13719,6 +14202,7 @@ class MainWindow(QMainWindow):
             on_close=_close,
             log_fn=self._append_log,
             is_auto=exe_path.name in self._play_auto_exe_names,
+            window=self,
         )
         self._exe_settings_view = view
         self._tabs.open_scoped_tab(view, self.tr("Configure: {0}").format(exe_path.name),
@@ -14114,9 +14598,12 @@ class MainWindow(QMainWindow):
             if not self._wabbajack_shutdown_timer.isActive():
                 self._wabbajack_shutdown_timer.start(100)
             return
+        self._cancel_downloads_nexus_lookup()
+        archive_preview = self._tabs.content_for_key("downloads_archive_preview")
+        if archive_preview is not None:
+            archive_preview.tab_closing()
         self._save_filter_states()
         self._save_window_state()
-        self._discord_presence.stop()
         try:
             from Nexus.nxm_handler import NxmIPC
             NxmIPC.shutdown()      # release the IPC socket(s)
@@ -14154,20 +14641,12 @@ class MainWindow(QMainWindow):
         log_fn = lambda m: print(f"[restore-on-close] {m}", flush=True)
         log_fn(f"restoring {len(games)} game(s)...")
         for game in games:
+            original_profile_dir = getattr(game, "_active_profile_dir", None)
             try:
-                game_root = game.get_game_path()
-                last_deployed = game.get_last_deployed_profile()
-                original_profile_dir = getattr(game, "_active_profile_dir", None)
-                recovery_profile_dir = original_profile_dir
-                if last_deployed:
-                    recovery_profile_dir = (
-                        game.get_profile_root() / "profiles" / last_deployed)
-                    game.set_active_profile_dir(recovery_profile_dir)
-                    # Reload so the last-deployed profile's path overrides drive
-                    # the restore (it may target a different game folder).
-                    game.load_paths()
-                    game_root = game.get_game_path()
+                from Utils.deployment.pipeline import prepare_restore_profile
                 try:
+                    recovery_profile_dir = prepare_restore_profile(game, log_fn=log_fn)
+                    game_root = game.get_game_path()
                     if hasattr(game, "restore"):
                         game.restore(log_fn=log_fn)
                     root_folder_dir = game.get_effective_root_folder_path()
@@ -14184,9 +14663,8 @@ class MainWindow(QMainWindow):
                             game, recovery_profile_dir, log_fn=log_fn)
                     game.clear_deploy_active()
                 finally:
-                    if original_profile_dir is not None:
-                        game.set_active_profile_dir(original_profile_dir)
-                        game.load_paths()
+                    game.set_active_profile_dir(original_profile_dir)
+                    game.load_paths()
             except Exception as e:
                 log_fn(f"error for {game.name}: {e}")
 
@@ -14252,13 +14730,11 @@ class MainWindow(QMainWindow):
                     self._append_log(f"Restore aborted: {err}")
                     ok = False
                 else:
-                    last = game.get_last_deployed_profile()
-                    active_recovery_dir = requested_recovery_dir or (
-                        game.get_profile_root() / "profiles" / (last or profile)
+                    from Utils.deployment.pipeline import prepare_restore_profile
+                    active_recovery_dir = prepare_restore_profile(
+                        game, profile_dir=requested_recovery_dir,
+                        log_fn=self._append_log,
                     )
-                    if requested_recovery_dir is not None or last:
-                        game.set_active_profile_dir(active_recovery_dir)
-                        game.load_paths()
                     self._restore_timing_mark(
                         "preflight and deployed-profile load complete",
                         work="FS I/O",
@@ -14930,6 +15406,17 @@ class MainWindow(QMainWindow):
 
         pick_exe_file(self.tr("Select EXE to run in this prefix"), _picked)
 
+    def _proton_install_component(self):
+        game = self._proton_game()
+        if game is None:
+            return
+        prefix = game.get_prefix_path()
+        if not prefix or not (Path(prefix) / "drive_c").is_dir():
+            self._notify(self.tr("The selected Wine prefix is unavailable."), "warning")
+            return
+        from gui_qt.windows_components_overlay import WindowsComponentsOverlay
+        WindowsComponentsOverlay(self, game, window=self)
+
     def _proton_install_vcredist(self):
         from Utils.wine.proton import install_vcredist
         self._run_proton_installer(
@@ -15304,6 +15791,16 @@ class MainWindow(QMainWindow):
             view, self.tr("Manage Prefixes"), self._plugins_panel_stack,
             key="prefix_manager")
 
+    def _open_wizard_tool_by_id(self, tool_id: str):
+        """Open the current game's wizard tool *tool_id*, if it has one."""
+        game = self._gs.game
+        if game is None:
+            return
+        from Utils.wizards.plugins import get_all_wizard_tools
+        tool = next((t for t in get_all_wizard_tools(game) if t.id == tool_id), None)
+        if tool is not None:
+            self._open_wizard_tool(tool)
+
     def _open_wizard_tool(self, tool, *, extra_kwargs=None, key_suffix="",
                           label=None):
         """Open a ported wizard tool as a panel-scoped tab (plugins panel for
@@ -15342,6 +15839,7 @@ class MainWindow(QMainWindow):
             run_deploy=self._wizard_run_deploy,
             run_restore=self._wizard_run_restore,
             refresh_modlist=self._on_refresh_modlist,
+            refresh_mods=self._wizard_refresh_mods,
             refresh_plugins=self._wizard_refresh_plugins,
             import_manifest=lambda manifest, stem, bundle_zip:
                 self._open_manifest_import(manifest, stem, bundle_zip=bundle_zip),
@@ -15569,6 +16067,10 @@ class MainWindow(QMainWindow):
             return False
         if not self._download_only_active():
             return self._install_paths(list(paths), metas=metas, **install_kw) is not False
+        request = install_kw.get("fomod_request")
+        if request is not None:
+            self._finish_fomod_reinstall(request, message=self.tr(
+                "Archive downloaded. Download only is enabled; click Reinstall with these choices again to use the cached archive."))
         names = [Path(p).name for p in paths]
         for n in names:
             self._append_log(
@@ -15591,7 +16093,8 @@ class MainWindow(QMainWindow):
                        on_all_done=None, clear_archives: bool = True,
                        place: dict | None = None,
                        target_profile_dir: Path | None = None,
-                       version_changes: dict | None = None):
+                       version_changes: dict | None = None,
+                       fomod_request=None):
         """Queue + install a list of archive paths (shared by the Install Mod
         button and the Downloads tab). FOMODs pause for the wizard mid-queue.
         *metas* optionally maps an archive path → a prebuilt NexusModMeta (the
@@ -15616,6 +16119,14 @@ class MainWindow(QMainWindow):
         one, skipping the Profile Group member picker (set by the group update
         routing below when a batch is split across the members that own the
         mods being updated)."""
+        if fomod_request is not None:
+            if not self._fomod_controller().valid_target(fomod_request):
+                return False
+            if len(paths) != 1:
+                self._finish_fomod_reinstall(fomod_request, message=self.tr("Reinstall one FOMOD at a time."))
+                return False
+            target_profile_dir = Path(fomod_request.owner_profile_dir)
+            preferred_names = {paths[0]: fomod_request.owner_mod_name}
         if not paths:
             return False
         game = self._gs.game
@@ -15644,7 +16155,7 @@ class MainWindow(QMainWindow):
                 "clear_archives": clear_archives,
                 "place": place,
                 "target_profile_dir": target_profile_dir,
-                "version_changes": version_changes})
+                "version_changes": version_changes, "fomod_request": fomod_request})
             _busy = self.tr("install") if getattr(self, "_install_running", False) \
                 else (self.tr("deploy") if getattr(self, "_deploy_running", False)
                       else self.tr("install"))
@@ -15701,7 +16212,7 @@ class MainWindow(QMainWindow):
                 previous_mod_name=previous_mod_name,
                 preferred_names=preferred_names, on_all_done=on_all_done,
                 clear_archives=clear_archives, place=place,
-                version_changes=version_changes)
+                version_changes=version_changes, fomod_request=fomod_request)
             return
         # Updating mods that are ALREADY in an active Profile Group (Quick
         # Update / Change Version / Reinstall): each new version goes straight
@@ -15909,9 +16420,11 @@ class MainWindow(QMainWindow):
 
     def _start_install_batch(self, paths, game, profile_dir, *, metas,
                              previous_mod_name, preferred_names, on_all_done,
-                             clear_archives, place, version_changes=None):
+                             clear_archives, place, version_changes=None,
+                             fomod_request=None):
         """Arm the install queue against *profile_dir* (the active profile, or
         a group member chosen in the picker) and start the batch."""
+        self._install_fomod_request = fomod_request
         self._install_running = True
         self._op_is_restore = False
         self._op_title = "Installing"
@@ -16284,8 +16797,12 @@ class MainWindow(QMainWindow):
         forced_name = getattr(self, "_install_preferred", {}).get(path, "")
         change = getattr(self, "_install_version_changes", {}).get(path)
 
+        request = getattr(self, "_install_fomod_request", None)
+        live = self._fomod_controller().live_plugins() if request is not None else None
+
         def worker():
             from Utils.mods.install import prepare_archive
+            prepared = None
             try:
                 prepared = prepare_archive(
                     path, self._install_game, self._install_profile_dir,
@@ -16294,9 +16811,14 @@ class MainWindow(QMainWindow):
                     prebuilt_meta=meta,
                     preferred_name=forced_name,
                     on_need_prefix=self._make_need_prefix_cb(),
-                    version_change=change)
+                    version_change=change, load_fomod_context=request is None)
+                if prepared is not None and request is not None:
+                    prepared.fomod_context = self._fomod_controller().context(
+                        prepared.game, Path(request.profile_dir), prepared.fomod_config, live)
             except Exception as exc:
                 self._append_log(f"Prepare error ({Path(path).name}): {exc}")
+                if prepared is not None:
+                    prepared.cleanup()
                 prepared = None
             self._prepared_ready.emit(prepared)
 
@@ -16470,6 +16992,26 @@ class MainWindow(QMainWindow):
     def _on_prepared_ready(self, prepared):
         if prepared is None:
             self._one_install_done.emit(None)
+            return
+        request = getattr(self, "_install_fomod_request", None)
+        if request is not None:
+            try:
+                if not self._fomod_controller().valid_target(request):
+                    prepared.cleanup()
+                    self._one_install_done.emit(None)
+                    return
+                installed, active, loose = prepared.fomod_context
+                live_all, live_active = self._fomod_controller().live_plugins()
+                prepared.fomod_context = (installed | live_all,
+                    (active | live_active) - (live_all - live_active), loose)
+                selections = request.validate(prepared.fomod_config, prepared.fomod_context)
+            except Exception as exc:
+                prepared.cleanup()
+                self._finish_fomod_reinstall(request, message=str(exc))
+                self._one_install_done.emit(None)
+                return
+            self._fomod_controller().executing.add(request)
+            self._run_finish_install(prepared, selections)
             return
         if prepared.is_fomod() and not prepared.fomod_has_steps():
             # FOMOD with no install steps (only requiredInstallFiles /
@@ -16856,7 +17398,8 @@ class MainWindow(QMainWindow):
             # Optional post-install rename prompt (Tk parity). Modal, before the
             # next queued install - keeps one dialog at a time.
             change = self._install_version_changes.get(self._install_current_path)
-            if change is not None and change.operation == "rollback":
+            if (getattr(self, "_install_fomod_request", None) is not None
+                    or (change is not None and change.operation == "rollback")):
                 self._finish_one_install(name)
             else:
                 self._maybe_prompt_rename(
@@ -16961,21 +17504,28 @@ class MainWindow(QMainWindow):
             return
         from gui_qt.remove_previous_overlay import RemovePreviousOverlay
 
-        def _done(result):
+        def remove_and_continue():
             try:
-                if result == "remove":
-                    # Resolved NOW, not when the user answers: the install's
-                    # group reconcile runs first and renames the group entry to
-                    # the new version in place (same identity, newer version),
-                    # so a late lookup of the old name would find nothing and
-                    # fall back to the group - where the old row no longer
-                    # exists and the new mod would move to the top.
-                    self._remove_previous_version(
-                        old_name, new_name, profile_dir=old_dir,
-                        old_folder=old_folder,
-                        reload_modlist=not defer_reload)
+                self._remove_previous_version(
+                    old_name, new_name, profile_dir=old_dir, old_folder=old_folder,
+                    reload_modlist=not defer_reload)
             finally:
                 _continue()
+
+        def _done(result):
+            if result != "remove":
+                _continue()
+                return
+            from Utils.mods.links import dependency_warning
+            warning = dependency_warning(game, [old_staging / old_folder], removing=True)
+            if warning:
+                from gui_qt.confirm_overlay import ConfirmOverlay
+                ConfirmOverlay.show_over(
+                    self, self.tr("Remove linked source"), warning.strip(),
+                    lambda ok: remove_and_continue() if ok else _continue(),
+                    confirm_label=self.tr("Remove"))
+            else:
+                remove_and_continue()
 
         RemovePreviousOverlay.show_over(self, old_name, new_name, _done)
 
@@ -17099,7 +17649,7 @@ class MainWindow(QMainWindow):
 
     def _rename_mod_on_disk(self, old_name: str, new_name: str, *,
                             reload_modlist: bool = True,
-                            on_done=None) -> str | None:
+                            on_done=None, _links_confirmed=False) -> str | None:
         """Rename a mod: staging folder → new, modindex entry, modlist entry,
         then optionally reload. Returns the sanitised new name on success, else
         None. ``on_done`` also covers the asynchronous collision overlay.
@@ -17140,7 +17690,19 @@ class MainWindow(QMainWindow):
         if staging is None:
             return _finish(None)
         new_folder = staging / new_name
-        if new_folder.exists():
+        if not _links_confirmed:
+            from Utils.mods.links import dependency_warning
+            warning = dependency_warning(self._gs.game, [staging / old_name])
+            if warning:
+                from gui_qt.confirm_overlay import ConfirmOverlay
+                ConfirmOverlay.show_over(
+                    self, self.tr("Rename linked source"), warning.strip(),
+                    lambda ok: self._rename_mod_on_disk(
+                        old_name, new_name, reload_modlist=reload_modlist,
+                        on_done=on_done, _links_confirmed=True) if ok else _finish(None),
+                    confirm_label=self.tr("Rename"))
+                return None
+        if new_folder.exists() or new_folder.is_symlink():
             # Collision → let the user Replace the existing mod, pick another
             # name, or cancel (same overlay the installer uses).
             from gui_qt.mod_exists_overlay import ModExistsOverlay
@@ -17170,12 +17732,37 @@ class MainWindow(QMainWindow):
 
     def _replace_then_rename(self, old_name: str, new_name: str, *,
                              reload_modlist: bool = True,
-                             on_done=None) -> None:
+                             on_done=None, _links_confirmed=False) -> None:
         """Replace *new_name* with *old_name*, preserving the target's modlist row."""
+        controller = getattr(self, "_fomod_choices_controller", None)
+        staging = self._gs.staging_dir()
+        if staging is not None and not _links_confirmed:
+            from Utils.mods.links import dependency_warning
+            warning = dependency_warning(self._gs.game, [staging / new_name], replacing=True)
+            if warning:
+                from gui_qt.confirm_overlay import ConfirmOverlay
+                def confirmed(ok):
+                    if ok:
+                        self._replace_then_rename(
+                            old_name, new_name, reload_modlist=reload_modlist,
+                            on_done=on_done, _links_confirmed=True)
+                    elif on_done is not None:
+                        on_done(None)
+                ConfirmOverlay.show_over(
+                    self, self.tr("Replace linked source"), warning.strip(),
+                    confirmed, confirm_label=self.tr("Replace"))
+                return
+        if controller is not None and staging is not None and any(
+                Path(request.target_dir) in (staging / old_name, staging / new_name)
+                for request in controller.executing):
+            self._notify(self.tr("Wait for the FOMOD reinstall to finish before renaming this mod."), "warning")
+            if on_done is not None:
+                on_done(None)
+            return
         try:
             from Utils.mods.remove import remove_mods
             remove_mods(self._gs.game, self._gs.profile_dir(), [new_name],
-                        log_fn=self._append_log)
+                        log_fn=self._append_log, remove_links=False)
         except Exception as exc:
             self._notify(self.tr("Replace failed: {0}").format(exc), "warning")
             if on_done is not None:
@@ -17200,8 +17787,16 @@ class MainWindow(QMainWindow):
             return None
         old_folder = staging / old_name
         new_folder = staging / new_name
+        controller = getattr(self, "_fomod_choices_controller", None)
+        if controller is not None and any(
+                Path(request.target_dir) in (old_folder, new_folder)
+                for request in controller.executing):
+            self._notify(self.tr("Wait for the FOMOD reinstall to finish before renaming this mod."), "warning")
+            return None
         try:
-            if old_folder.is_dir():
+            from Utils.mods.links import invalidate_dependents
+            invalidate_dependents(self._gs.game, [old_folder])
+            if old_folder.is_dir() or old_folder.is_symlink():
                 old_folder.rename(new_folder)
         except OSError as exc:
             self._notify(self.tr("Rename failed: {0}").format(exc), "warning")
@@ -17222,6 +17817,9 @@ class MainWindow(QMainWindow):
             from Utils.mods.rename import migrate_mod_state
             migrate_mod_state(self._gs.profile_dir(), old_name, new_name,
                               log_fn=self._append_log)
+            from Utils.mods.rename import rename_installer_choices
+            rename_installer_choices(self._gs.profile_dir(), old_name, new_name,
+                                     self._gs.game.name, self._append_log, mod_dir=new_folder)
         except Exception as exc:
             print(f"[gui_qt] rename state migration failed: {exc}", flush=True)
         try:
@@ -17260,6 +17858,9 @@ class MainWindow(QMainWindow):
                     write_modlist(ml_path, entries)
         except Exception as exc:
             print(f"[gui_qt] rename modlist update failed: {exc}", flush=True)
+        if controller is not None:
+            controller.mod_renamed(self._gs.game.name, self._gs.profile_dir(),
+                                   old_name, new_name)
         if reload_modlist:
             self._reload_modlist()
         self._notify(self.tr("Renamed to '{0}'.").format(new_name), "info")
@@ -17321,6 +17922,10 @@ class MainWindow(QMainWindow):
             chv.clear_install_status()
         # A batch owner (Quick Update) reports its own summary; skip the generic
         # install toast and hand control back to it.
+        request = getattr(self, "_install_fomod_request", None)
+        self._install_fomod_request = None
+        if request is not None:
+            self._finish_fomod_reinstall(request, bool(ok))
         cb = getattr(self, "_install_all_done_cb", None)
         self._install_all_done_cb = None
         if cb is not None:
@@ -17384,14 +17989,17 @@ class MainWindow(QMainWindow):
                 or self._staged_finish_queue:
             return
         b = self._pending_install_batches.pop(0)
-        self._install_paths(b["paths"], metas=b["metas"],
+        result = self._install_paths(b["paths"], metas=b["metas"],
                             previous_mod_name=b["previous_mod_name"],
                             preferred_names=b["preferred_names"],
                             version_changes=b.get("version_changes"),
                             on_all_done=b["on_all_done"],
                             clear_archives=b.get("clear_archives", True),
                             place=b.get("place"),
-                            target_profile_dir=b.get("target_profile_dir"))
+                            target_profile_dir=b.get("target_profile_dir"),
+                            fomod_request=b.get("fomod_request"))
+        if result is False and self._pending_install_batches:
+            QTimer.singleShot(0, self._drain_pending_installs)
 
     def _build_modlist(self) -> QWidget:
         self._modlist_model = ModListModel([])
@@ -17399,6 +18007,7 @@ class MainWindow(QMainWindow):
         self._modlist_model.save_failed.connect(
             lambda msg: self._notify(msg, "error"))
         self._modlist_view = ModListView(self._modlist_model)
+        self._modlist_view.on_open_as_tab = self._open_modlist_tab
         # Drag-install: archives dropped from the Downloads tab install at the
         # drop position (drop slot → name-anchored placement).
         self._modlist_view.on_archives_dropped = self._on_archives_dropped
@@ -17416,29 +18025,90 @@ class MainWindow(QMainWindow):
             sig.connect(self._on_modlist_layout_changed)
         return self._modlist_view
 
+    def _selected_modlist_view(self):
+        return getattr(self, "_last_modlist_view", None) or self._modlist_view
+
+    def _modlist_column_visible(self, column):
+        tab = getattr(self, "_modlist_tab", None)
+        return (not self._modlist_view.isColumnHidden(column)
+                or (tab is not None and not tab.view.isColumnHidden(column)))
+
+    def _refresh_modlist_tab(self, *, reset_view=False):
+        tab = getattr(self, "_modlist_tab", None)
+        if tab is not None:
+            if reset_view:
+                tab.reset_context()
+            tab.refresh()
+
+    def _open_modlist_tab(self):
+        tab = getattr(self, "_modlist_tab", None)
+        if tab is None:
+            from gui_qt.modlist_tab import ModListTab
+            from gui_qt.modlist_drag import ModListDrag
+            from gui_qt.shortcuts import register_modlist_tab_shortcuts
+            position = self._modlist_view.capture_position()
+            tab = ModListTab(self)
+            self._modlist_tab = tab
+            tab.drag = ModListDrag([self._modlist_view, tab.view], tab)
+            register_modlist_tab_shortcuts(self, tab.view)
+            self._right_col.show()
+            self._tabs.open_scoped_tab(tab, self.tr("Modlist"),
+                                       self._plugins_panel_stack, key="modlist")
+            QTimer.singleShot(0, lambda: tab.view.restore_position(position)
+                              if getattr(self, "_modlist_tab", None) is tab else None)
+        else:
+            self._right_col.show()
+            self._tabs.focus_key("modlist")
+            floating = tab.view.window()
+            if floating is not self.window():
+                floating.show()
+                floating.raise_()
+                floating.activateWindow()
+
+    def _close_modlist_tab(self):
+        self._tabs.close_tab("modlist")
+
     def _on_modlist_layout_changed(self, *_a):
         self._apply_modlist_search()
         self._apply_modlist_filters()
         self._refresh_footer_toggle_labels()
 
-    def _on_archives_dropped(self, paths: list[str], slot: int):
-        """Archives dragged from the Downloads tab were dropped on the modlist
-        at display row *slot* - install them there."""
+    def _on_archives_dropped(self, paths: list[str], slot: int, separator=None):
+        """Install at the drop position or highest priority in the separator."""
         self._install_paths(paths, clear_archives=False,
-                            place=self._placement_from_slot(slot))
+                            place=self._placement_from_slot(slot, separator))
 
-    def _placement_from_slot(self, slot: int) -> dict | None:
-        """Translate a modlist display drop slot into a name-anchored placement
-        for _install_paths (None = default top placement). The anchor is the
-        first real entry at/below the slot: mod names are stable across the
-        install (row indices are not - the batch prepends rows)."""
-        m = self._modlist_model
+    def _placement_from_slot(self, slot: int, separator=None, *, model=None) -> dict | None:
+        """Anchor placement by name so it survives rows shifting during install."""
+        m = model if model is not None else self._modlist_model
         key, _asc = m.sort_state()
         if key not in (None, "priority"):
             # A non-priority column sort shows a permutation of the load order,
             # so a visual slot has no load-order meaning. Install normally.
             return None
-        from gui_qt.modlist_model import _PINNED_NAMES, ROOT_FOLDER_NAME
+        if separator is not None:
+            return {"anchor": separator, "after": True}
+        from gui_qt.modlist_model import (
+            _PINNED_NAMES, ROOT_FOLDER_NAME, OVERWRITE_NAME,
+        )
+        if m.reverse_mode_active:
+            from gui_qt.modlist_sort import DIVIDER_NAME, resolve_reverse_drop
+            slot = resolve_reverse_drop(m._entries, slot, set(), False)
+            if slot >= m.rowCount():
+                return None
+            entry = m.entry(slot)
+            if entry.is_separator:
+                if entry.name == OVERWRITE_NAME:
+                    return None
+                for row in range(slot - 1, -1, -1):
+                    above = m.entry(row)
+                    if above.is_separator:
+                        if above.name not in _PINNED_NAMES:
+                            return {"anchor": above.name, "after": True}
+                        break
+                if entry.name == DIVIDER_NAME:
+                    return None
+                return {"at_end": True}
         anchor = None
         at_end = False
         for r in range(max(0, slot), m.rowCount()):
@@ -18175,6 +18845,8 @@ class MainWindow(QMainWindow):
         })
 
     def _run_archive_batch(self, game, request, on_progress=None, on_done=None):
+        if not self._allow_mod_file_changes(request.get("mod_names", [])):
+            return None
         import threading
         import Utils.bsa.pack as ops
         from Utils.mods.copy import resolve_target_staging
@@ -18368,24 +19040,32 @@ class MainWindow(QMainWindow):
         if nb is not None:
             nb.setText(self.tr("Disable all") if m.all_mods_enabled() else self.tr("Enable all"))
 
+    def _wizard_refresh_mods(self, names):
+        self._refresh_modlist_files(tuple(names))
+
     def _on_refresh_modlist(self):
         """Refresh: re-sync the mods folder, reload the modlist + plugins, and
         force a full index rescan (picks up files added/removed inside mods)."""
+        self._refresh_modlist_files()
+
+    def _refresh_modlist_files(self, names=None):
         from Utils.mods.modlist import sync_modlist_with_mods_folder
         self._reassert_profile_paths()
         # Refresh doubles as the user's "reconcile my group now" button; must
         # run before the folder sync (which drops entries with missing dirs).
+        group_refreshed = False
         try:
             from Utils.profiles.groups import materialize_if_group
-            materialize_if_group(self._gs.game, self._gs.profile_dir(),
-                                 log_fn=self._append_log)
+            group_refreshed = materialize_if_group(
+                self._gs.game, self._gs.profile_dir(), log_fn=self._append_log)
         except Exception as exc:
             print(f"[gui_qt] group reconcile on refresh failed: {exc}", flush=True)
         ml = self._gs.modlist_path()
         staging = self._gs.staging_dir()
+        renamed = {}
         if ml is not None and staging is not None:
             try:
-                sync_modlist_with_mods_folder(ml, staging)
+                renamed = sync_modlist_with_mods_folder(ml, staging)
             except Exception as exc:
                 print(f"[gui_qt] modlist sync failed: {exc}", flush=True)
         # Arm the mass phantom-prune offer: if the reload finds more stale
@@ -18393,8 +19073,14 @@ class MainWindow(QMainWindow):
         # refresh asks the user instead of silently keeping them forever
         # (see _on_plugins_loaded / plugin_state SAFETY 3).
         self._offer_mass_prune = True
-        self._reload_modlist(rescan_index=True, preserve_overlays=True)
-        self._reload_plugins()
+        if names is not None:
+            self._gs.queue_mod_refresh(names)
+            self._conflict_maps_current = False
+        self._reload_modlist(
+            rescan_index=names is None or bool(renamed) or group_refreshed,
+            preserve_overlays=True)
+        if names is None:
+            self._reload_plugins()
         self._refresh_footer_toggle_labels()
         self._notify(self.tr("Modlist refreshed"), "info")
 
@@ -18451,7 +19137,9 @@ class MainWindow(QMainWindow):
     def _modlist_token_search_active(self) -> bool:
         """True when the search box holds a `!token` filter - those key off the
         live FilterData, so callers must rebuild/reapply it like a panel filter."""
-        return "!" in (getattr(self, "_modlist_search_text", "") or "")
+        tab = getattr(self, "_modlist_tab", None)
+        return ("!" in (getattr(self, "_modlist_search_text", "") or "")
+                or (tab is not None and "!" in tab.search.text()))
 
     def _modlist_id_search_active(self) -> bool:
         """True when the plain-text part of the search is numeric."""
@@ -18529,6 +19217,7 @@ class MainWindow(QMainWindow):
             self._update_filters_btn_active()
 
     def _apply_modlist_filters(self):
+        self._refresh_modlist_tab()
         from gui_qt.modlist_filter import (
             compute_hidden_rows, conflict_filter_hidden_rows,
         )
@@ -19072,6 +19761,7 @@ class MainWindow(QMainWindow):
             self._modlist_model.set_entries(entries, mod_groups=mod_groups)
         if not preserve_overlays:
             self._modlist_model.set_flags({})
+            self._modlist_model.set_mod_links({})
             self._modlist_model.set_skse_issues({})
         with span("reload_modlist.read_notes"):
             self._modlist_model.set_notes(self._read_mod_notes())
@@ -19167,11 +19857,12 @@ class MainWindow(QMainWindow):
         self._modlist_view.filters_active = self._modlist_filters_active
         self._modlist_view.on_clear_filters = self._clear_modlist_filters
         self._modlist_model._sizes = {}
-        if not self._modlist_view.isColumnHidden(COL_SIZE):
+        if self._modlist_column_visible(COL_SIZE):
             self._apply_modlist_sizes()
         self._modlist_model._content = {}
         with span("reload_modlist.load_separator_state"):
             self._modlist_view.load_separator_state()
+        self._refresh_modlist_tab(reset_view=context_changed)
         # Point the Mod Files tab at this game/profile.
         if hasattr(self, "_mod_files_view"):
             self._mod_files_view.configure(
@@ -19263,6 +19954,7 @@ class MainWindow(QMainWindow):
             if context_changed:
                 self._set_filegraph_loading(True)
             ignored = self._ignored_missing_reqs
+            game_meta = self._gs.game
             pdir_meta = self._gs.profile_dir()
             is_bg3 = (getattr(self._gs.game, "game_id", "") == "baldurs_gate_3")
             meta_entries = list(entries)
@@ -19286,7 +19978,11 @@ class MainWindow(QMainWindow):
                             meta_entries, staging, ignored,
                             profile_dir=pdir_meta, is_bg3=is_bg3,
                             requirement_index=requirement_index)
-                        payload = payload, requirement_index
+                        from Utils.mods.links import relationships
+                        links = relationships(game_meta, pdir_meta, staging,
+                                              [e.name for e in meta_entries
+                                               if not e.is_separator and not e.is_group_header])
+                        payload = payload, requirement_index, links
                 except Exception as exc:
                     print(f"[gui_qt] meta read failed: {exc}", flush=True)
                     payload = None   # still emit - the conflict rebuild chains
@@ -19370,6 +20066,8 @@ class MainWindow(QMainWindow):
         # AFTER the meta read, so its root-flag collect hits the warm read_meta
         # cache instead of racing the worker over the same 400+ ini files.
         pend = getattr(self, "_conflicts_after_meta", None)
+        if pend and payload is not None and any(link.source is not None for link in payload[2].values()):
+            pend = (pend[0], True, *pend[2:])
         if pend is not None and pend[0] == gen:
             self._conflicts_after_meta = None
             self._rebuild_conflicts_async(
@@ -19381,7 +20079,8 @@ class MainWindow(QMainWindow):
                     "Handle failed mod metadata read",
                     phase_started=callback_started, category="mod data")
             return
-        payload, self._requirement_index = payload
+        payload, self._requirement_index, links = payload
+        self._modlist_model.set_mod_links(links)
         (versions, installed, flags, categories, updates,
          fomod, bain, missing_reqs, descriptions, authors, source_locations,
          nexus_mod_ids, nexus_file_ids, updated) = payload
@@ -19416,6 +20115,8 @@ class MainWindow(QMainWindow):
         # reapplies "!updates" against the just-cleared sets and blanks the list.
         panel = getattr(self, "_modlist_filter_panel", None)
         panel_active = panel is not None and panel.any_active()
+        tab = getattr(self, "_modlist_tab", None)
+        panel_active = panel_active or (tab is not None and tab.filters.any_active())
         if panel_active or self._modlist_token_search_active():
             self._rebuild_filter_data()
         elif self._modlist_id_search_active():
@@ -19469,7 +20170,7 @@ class MainWindow(QMainWindow):
 
         Only runs while the Content column is visible; a generation counter
         drops a result whose profile has since been switched."""
-        if self._modlist_view.isColumnHidden(COL_CONTENT):
+        if not self._modlist_column_visible(COL_CONTENT):
             return
         data = getattr(self, "_modlist_filter_data", None)
         if data is None:
@@ -19679,6 +20380,16 @@ class MainWindow(QMainWindow):
             self._append_log(f"[nexus] could not save missing requirements: {error}")
         self._schedule_requirement_save()
 
+    def _refresh_mod_links(self):
+        from Utils.mods.links import relationships
+        game, profile, staging = self._gs.game, self._gs.profile_dir(), self._gs.staging_dir()
+        model = self._modlist_model
+        links = relationships(game, profile, staging,
+                              [e.name for e in model.natural_entries()
+                               if not e.is_separator and not e.is_group_header]) \
+            if game is not None and profile is not None and staging is not None else {}
+        model.set_mod_links(links)
+
     def _refresh_modlist_flags(self, names=None):
         """Re-read the meta/profile-derived flags and push them into the model
         WITHOUT the full modlist reset (keeps selection + scroll). Call after any
@@ -19687,6 +20398,7 @@ class MainWindow(QMainWindow):
         existing state (endorsing one mod shouldn't re-read 500 meta files).
         The filemap-derived overlays (pre-RTX / root-rule) refresh via the
         conflict-ready path instead."""
+        self._refresh_mod_links()
         from gui_qt.modlist_data import read_meta_for_entries
         staging = self._gs.staging_dir()
         if staging is None:
@@ -19850,10 +20562,14 @@ class MainWindow(QMainWindow):
         load order, so it runs on a daemon worker → _plugins_loaded → the
         UI applies the rows. A generation counter drops results from a
         superseded reload (game/profile switched mid-read)."""
-        startup_timing = (getattr(self, "_startup_timing", None)
-                          if startup_stage else None)
+        startup_pending = self._startup_plugins_pending
+        self._startup_plugins_pending = False
+        startup_timing = getattr(self, "_startup_timing", None)
         if startup_timing is not None and not startup_timing.active:
             startup_timing = None
+        if startup_stage is None and (startup_pending or startup_timing is not None):
+            startup_stage = ("post-conflict" if self._conflict_maps_current
+                             else "initial")
         startup_queued = (_startup_time.perf_counter()
                           if startup_timing is not None else None)
         self._reassert_profile_paths()
@@ -19912,8 +20628,7 @@ class MainWindow(QMainWindow):
                     phase_started=startup_queued,
                     phase_finished=startup_worker_started,
                     lane=startup_lane, category="plugins")
-            from gui_qt.plugin_state import (
-                load_plugins, resolve_plugin_paths_for_game)
+            from gui_qt.plugin_state import load_plugins
             from Utils.plugins.userlist import read_userlist_state
             from Utils.diagnostics.performance import span
             # Poll for supersession between the load's expensive phases: a
@@ -19921,6 +20636,7 @@ class MainWindow(QMainWindow):
             # arrival (dropped in _on_plugins_loaded), so stop working on it.
             stale = lambda: gen != self._plugins_gen
             report = {}
+            paths = {}
             phase_started = timing.now() if timing is not None else None
             if timing is not None:
                 timing.mark("Plugins reload worker entered",
@@ -19931,7 +20647,8 @@ class MainWindow(QMainWindow):
                     rows = load_plugins(game, profile, cancelled=stale,
                                         report=report,
                                         snapshot=graph_snapshot,
-                                        include_bos_sp=include_bos_sp)
+                                        include_bos_sp=include_bos_sp,
+                                        resolved_paths=paths)
                 if timing is not None:
                     timing.mark(
                         f"plugin rows discovered and parsed ({len(rows or [])} rows)",
@@ -19956,13 +20673,9 @@ class MainWindow(QMainWindow):
                                   lane="worker")
                 return
             phase_started = timing.now() if timing is not None else None
-            with span("plugins.resolve_paths(worker)"):
-                paths = (resolve_plugin_paths_for_game(
-                    game, snapshot=graph_snapshot)
-                         if game is not None else {})
             if timing is not None:
                 timing.mark(
-                    f"plugin winner paths resolved ({len(paths)} paths)",
+                    f"plugin winner paths reused ({len(paths)} paths)",
                     phase_started=phase_started, lane="worker")
             phase_started = timing.now() if timing is not None else None
             try:
@@ -20319,8 +21032,7 @@ class MainWindow(QMainWindow):
         """Compute the ESL-safe/unsafe filter bits on a worker AFTER the plugin
         rows are applied. A cold libloot eligibility scan is seconds of
         full-record parsing, isolated in a LOOT helper process.
-        Results are mtime-cached (plugin_state._ESL_ELIG_CACHE), so repeat
-        loads resolve instantly."""
+        Validated results are cached across launches by LOOT.eligibility."""
         game = self._gs.game
         if game is None or not getattr(game, "supports_esl_conversion", False):
             return False
@@ -20349,7 +21061,8 @@ class MainWindow(QMainWindow):
             try:
                 with span("plugins.esl_eligibility(deferred)"):
                     kinds = compute_esl_eligibility(
-                        names, resolved, data_dir, game)
+                        names, resolved, data_dir, game,
+                        cancelled=lambda: gen != self._plugins_gen)
             except Exception as exc:
                 print(f"[gui_qt] deferred ESL scan failed: {exc}", flush=True)
                 getattr(self, "_esl_conflict_timings", {}).pop(gen, None)
@@ -20401,7 +21114,7 @@ class MainWindow(QMainWindow):
                      else "Finish deferred ESL scan (no UI changes)"),
                     phase_started=startup_apply_started,
                     category="plugins")
-                if startup_final:
+                if startup_final and gen == self._plugins_gen:
                     QTimer.singleShot(
                         0, lambda: self._finish_startup_timing(
                             "Mod list, plugins, and deferred ESL data ready"))
@@ -21690,6 +22403,8 @@ class MainWindow(QMainWindow):
         self._set_filegraph_loading(False)
         self._conflict_maps_current = False
         self._startup_wait_for_conflicts = False
+        if self._startup_plugins_pending:
+            self._reload_plugins(startup_stage="initial")
         from Utils.filegraph.models import FileGraphRecoveryRequired
         if isinstance(error, FileGraphRecoveryRequired) \
                 and self._offer_filegraph_recovery():
@@ -21846,7 +22561,8 @@ class MainWindow(QMainWindow):
             )
             timing.mark(f"Qt conflict update classified ({detail})")
         plugins_reload_needed = (
-            not self._plugins_supported()
+            self._startup_plugins_pending
+            or not self._plugins_supported()
             or self._conflict_needs_plugin_reload(
                 data, incremental_delta, edit_kind))
         with span("on_conflicts_ready"):
@@ -21895,6 +22611,9 @@ class MainWindow(QMainWindow):
                     self._modlist_view.set_conflict_maps(
                         data.overrides, data.overridden_by,
                         data.bsa_overrides, data.bsa_overridden_by)
+            modlist_tab = getattr(self, "_modlist_tab", None)
+            if modlist_tab is not None:
+                modlist_tab.refresh_conflicts(changed_conflict_mods if incremental_delta else None)
             if timing is not None:
                 timing.mark("selection highlight partner maps updated",
                             phase_started=phase_started)
@@ -22207,9 +22926,11 @@ class MainWindow(QMainWindow):
         tabs.addStretch(1)
         self._plugin_tab_labels = []
         for i, t in enumerate(self._plugin_tab_names):
-            lbl = QLabel(t)
+            lbl = QPushButton(t)
             lbl.setCursor(Qt.PointingHandCursor)
-            lbl.mousePressEvent = lambda _e, idx=i: self._select_plugin_tab(idx)
+            lbl.setFocusPolicy(Qt.NoFocus)
+            lbl.clicked.connect(
+                lambda _checked=False, idx=i: self._select_plugin_tab(idx))
             self._plugin_tab_labels.append(lbl)
         # Layout in display order: the Overrides label leads the strip (where
         # Plugins sits - the two are never visible together), and Saves sits
@@ -22295,9 +23016,15 @@ class MainWindow(QMainWindow):
         elif idx == 4:
             from gui_qt.downloads_view import DownloadsView
             view = DownloadsView()
+            view.archive_drop_target = self._modlist_view
             attr = "_downloads_view"
             view.on_install = lambda paths: self._install_paths(
                 paths, clear_archives=False)
+            view.on_move = self._on_downloads_move
+            view.on_toggle_hidden = self._on_downloads_toggle_hidden
+            view.on_remove = self._on_downloads_remove
+            view.on_inspect = self._open_download_archive_tab
+            view.on_nexus_page = self._on_downloads_nexus_page
             view.on_cancel_download = self._cancel_download
             view.on_pause_download = self._pause_download
             view.on_resume_download = self._resume_download
@@ -22400,13 +23127,14 @@ class MainWindow(QMainWindow):
             svv.set_visible_tab(idx == sv_idx)
         for i, lbl in enumerate(self._plugin_tab_labels):
             sel = i == idx
-            # Theme foreground (dim when unselected) so the tab strip reads on
-            # the light panel too; selected tab gets the accent underline.
             col = _c(self._pal, "TEXT_MAIN" if sel else "TEXT_DIM")
+            underline = _c(self._pal, "ACCENT") if sel else "transparent"
             lbl.setStyleSheet(
-                f"padding:4px 8px; color:{col};" + (
-                    f"border-bottom:2px solid {_c(self._pal,'ACCENT')};"
-                    if sel else ""))
+                f"QPushButton {{ padding:4px 8px; color:{col};"
+                f" background:transparent; border:none; border-radius:0;"
+                f" border-bottom:2px solid {underline}; }}"
+                f"QPushButton:hover {{ background:{_c(self._pal, 'BG_ROW_HOVER')};"
+                f" color:{_c(self._pal, 'TEXT_MAIN')}; }}")
 
     # --------------------------------------------------------------- widgets
     def _action_button(self, text: str, icon_name: str,
@@ -23374,6 +24102,7 @@ def run(startup_timing=None) -> int:
             nxm_current = NxmHandler.registration_is_current()
             if nxm_current:
                 nxm_log("nxm:// registration unchanged - skipping desktop refresh")
+                NxmHandler.repair_portal_handler()
             else:
                 NxmHandler.register()
         except Exception:
@@ -23517,12 +24246,10 @@ def run(startup_timing=None) -> int:
             "Apply UI scale environment",
             phase_started=phase_started, category="configuration")
 
-    # Qt <= 6.9 eagerly creates the global share context in QApplication's
-    # constructor. A broken sandbox GLX stack can qFatal there, before our
-    # child-process GL probe can protect the app. The viewport already rebuilds
-    # its context after a reparent, so Flatpak does not need global sharing.
-    if not Path("/.flatpak-info").is_file():
-        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+    # Avoid eager GL contexts; previews rebuild their resources after reparenting.
+    from gui_qt.gl_support import preview_surface_format
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, False)
+    QSurfaceFormat.setDefaultFormat(preview_surface_format())
     # We used to force QT_XCB_GL_INTEGRATION=xcb_egl here, to dodge a GLX/DRI3
     # swap that can hang forever in xcb_wait_for_special_event when the window
     # is resized mid-swap (dragging the NIF viewer's splitter froze the app).
@@ -23585,6 +24312,19 @@ def run(startup_timing=None) -> int:
             "Create startup splash", phase_started=phase_started,
             category="UI")
 
+    phase_started = _startup_time.perf_counter()
+    from gui_qt.instance_check import check_running_instances
+    if not check_running_instances(_splash):
+        if _splash is not None:
+            _splash.close()
+        return 0
+    if _splash is not None:
+        _splash.set_message(_splash.tr("Starting Amethyst…"))
+    if startup_timing is not None:
+        startup_timing.record(
+            "Check for other Amethyst instances", phase_started=phase_started,
+            category="services")
+
     import threading as _threading
     phase_started = _startup_time.perf_counter()
     _threading.Thread(
@@ -23627,13 +24367,9 @@ def run(startup_timing=None) -> int:
     # opacity so nothing is visibly rendered behind the splash while it loads.
     # _dismiss_splash restores opacity once the plugin panel - the last render
     # step - is populated, so the window appears fully drawn, not mid-render.
-    # Nothing GL runs on this thread. The warmup that pre-empts the first-mesh
-    # composition flash now waits on an out-of-process probe handed to a worker
-    # thread, and only lands if it beats the window onto the screen; the inline
-    # version of that probe aborted the process on GLX stacks that can't serve
-    # the format (qFatal, uncatchable - it took the AppImage down under Xvfb).
+    # The background probe never adds an OpenGL widget to the main window.
     phase_started = _startup_time.perf_counter()
-    win._start_gl_warmup()
+    win._start_gl_probe()
     if _splash is not None:
         win.setWindowOpacity(0.0)
     win.show()
@@ -23644,7 +24380,7 @@ def run(startup_timing=None) -> int:
             pass
     if startup_timing is not None:
         startup_timing.record(
-            "Start GL warmup and show window",
+            "Start GL probe and show window",
             phase_started=phase_started, category="UI")
     # Listen for NXM links handed off by future instances (after the window is
     # up so the received-link handler has a live UI to drive).

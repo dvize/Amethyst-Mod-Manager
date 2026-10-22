@@ -32,6 +32,7 @@ from typing import Iterable
 
 from Utils.diagnostics import performance as perftrace
 from Utils.atomic_write import write_atomic_text
+from Utils.filegraph import link_changes
 from Utils.deployment import (
     LinkMode,
     compute_rule_claims,
@@ -276,7 +277,7 @@ def _remove_tree(path: Path) -> None:
                 child.chmod(0o700)
             except OSError:
                 pass
-    shutil.rmtree(path)
+    link_changes.rmtree(path)
 
 
 def _remove_artifacts(parent: Path, names: Iterable[str]) -> None:
@@ -590,8 +591,8 @@ def _merge_tree(source: Path, destination: Path) -> None:
         if dst.is_dir() and not dst.is_symlink():
             _remove_tree(dst)
         else:
-            dst.unlink(missing_ok=True)
-        src.rename(dst)
+            link_changes.unlink(dst, missing_ok=True)
+        link_changes.rename(src, dst)
     _remove_tree(source)
 
 
@@ -600,7 +601,7 @@ def _remove_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
         _remove_tree(path)
     else:
-        path.unlink(missing_ok=True)
+        link_changes.unlink(path, missing_ok=True)
 
 
 def _resolved_parent(destination: Path, rel: Path, cache: dict) -> Path:
@@ -688,7 +689,7 @@ def _materialize_tree(
                 continue
 
             if move:
-                src.rename(dst)
+                link_changes.rename(src, dst)
                 linked += 1
                 continue
 
@@ -714,31 +715,33 @@ def _links_into_root(view: Path, game_root: Path, *, relocated: bool = False) ->
     root_text = os.path.normpath(str(game_root.resolve(strict=False)))
     view_text = os.path.normpath(str(view.resolve(strict=False)))
     count = 0
-    for dirpath, dirnames, filenames in os.walk(view, followlinks=False):
-        base = Path(dirpath)
-        link_names = [
-            name for name in dirnames
-            if (base / name).is_symlink()
-        ]
-        for name in (*link_names, *filenames):
-            path = base / name
-            if not path.is_symlink():
-                continue
-            try:
-                raw_target = os.readlink(path)
-            except OSError:
-                continue
-            target = os.path.normpath(
-                raw_target if os.path.isabs(raw_target)
-                else os.path.join(dirpath, raw_target)
-            )
-            try:
-                if (os.path.commonpath((root_text, target)) == root_text
-                        or (relocated and not os.path.isabs(raw_target)
-                            and os.path.commonpath((view_text, target)) != view_text)):
-                    count += 1
-            except ValueError:
-                continue
+    stack = [str(view)]
+    while stack:
+        dirpath = stack.pop()
+        try:
+            with os.scandir(dirpath) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_symlink():
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(entry.path)
+                            continue
+                        raw_target = os.readlink(entry.path)
+                    except OSError:
+                        continue
+                    target = os.path.normpath(
+                        raw_target if os.path.isabs(raw_target)
+                        else os.path.join(dirpath, raw_target)
+                    )
+                    try:
+                        if (os.path.commonpath((root_text, target)) == root_text
+                                or (relocated and not os.path.isabs(raw_target)
+                                    and os.path.commonpath((view_text, target)) != view_text)):
+                            count += 1
+                    except ValueError:
+                        continue
+        except OSError:
+            continue
     return count
 
 
@@ -1387,6 +1390,7 @@ def _create_vfs_case_aliases(
     return created
 
 
+@link_changes.track_game_links
 def build_layers(
     game,
     *,
@@ -1407,6 +1411,8 @@ def build_layers(
 ) -> tuple[int, int]:
     """Build and publish the active profile's resolved private game view."""
     _log = log_fn or (lambda _message: None)
+    from Utils.deployment.vortex_deploy import validate_routes
+    vortex_entries = validate_routes(game)
 
     game_root_getter = getattr(game, "get_vfs_game_root", None)
     raw_game_root = (
@@ -1540,7 +1546,7 @@ def build_layers(
     if projected_data_prefix is not None:
         from Utils.filegraph.deploy import entries as filegraph_entries
         game_claims, prefix_claims = set(), set()
-        for entry in filegraph_entries():
+        for entry in filegraph_entries(include_vortex=False):
             if entry.target == "prefix":
                 prefix_claims.add(entry.legacy_rel.lower())
             elif (entry.target == "game" and not entry.destination.lower().startswith(
@@ -1709,7 +1715,27 @@ def build_layers(
         if not callable(populate_data_layer) and not external_deploy_mods:
             _remove_artifacts(metadata_dir, _CUSTOM_DEPLOY_ARTIFACTS)
 
-    linked_root = 0
+    from Utils.deployment.vortex_deploy import deploy_routes
+    vortex_layer = build / "vortex"
+    vortex_layer.mkdir()
+    vortex_metadata = build / "vortex-metadata"
+    deploy_routes(game, external_deploy_mode, _log, game_layer=vortex_layer,
+                  data_layer=data_layer, temporary_state=vortex_metadata)
+    if data_rel.parts:
+        _merge_tree(vortex_layer.joinpath(*data_rel.parts), data_layer)
+        _merge_tree(vortex_layer, root_layer)
+    else:
+        _merge_tree(vortex_layer, data_layer)
+    if vortex_metadata.exists():
+        _safe_clear(vortex_metadata, build)
+
+    vortex_data_prefix = data_rel.as_posix().strip("./").lower()
+    vortex_game_entries = [entry for entry in vortex_entries if entry.target == "game"]
+    vortex_data_count = sum(
+        not vortex_data_prefix or entry.destination.lower().startswith(vortex_data_prefix + "/")
+        for entry in vortex_game_entries)
+    linked_data += vortex_data_count
+    linked_root = len(vortex_game_entries) - vortex_data_count
     # Root_Folder and root-flagged deployment share one recovery journal.
     # Keep the synthetic build's journal inside lower.build so it cannot
     # overwrite/delete recovery state belonging to a coexisting physical
@@ -2009,19 +2035,21 @@ def _retarget_shadow_paths(command: list[str], game_root: Path,
     launch_cwd: Path | None = None
     resolved_root = game_root.resolve()
     for index, token in enumerate(direct):
-        candidate = Path(token)
+        wine_path = token[:3].lower() == "z:\\"
+        candidate = Path(token[2:].replace("\\", "/") if wine_path else token)
         if not candidate.is_absolute():
             continue
         try:
-            # Manifests deliberately store canonical paths. A launcher may
-            # still pass the user's saved spelling through a symlinked Steam
-            # library or custom install alias, so canonicalize the argument
-            # before deriving its position in the shadow tree. strict=False
-            # also handles mod-only executables that do not exist physically.
-            relative = candidate.resolve(strict=False).relative_to(
-                resolved_root)
-        except (OSError, ValueError):
-            continue
+            relative = Path(os.path.abspath(candidate)).relative_to(resolved_root)
+        except ValueError:
+            try:
+                relative = (candidate.parent.resolve(strict=False) / candidate.name
+                            ).relative_to(resolved_root)
+            except (OSError, ValueError):
+                try:
+                    relative = candidate.resolve(strict=False).relative_to(resolved_root)
+                except (OSError, ValueError):
+                    continue
         shadow_candidate = view / relative
         if not shadow_candidate.exists():
             # Wine paths are case-insensitive, while the materialized Linux
@@ -2030,7 +2058,8 @@ def _retarget_shadow_paths(command: list[str], game_root: Path,
             if resolved_shadow is None:
                 continue
             shadow_candidate = resolved_shadow
-        direct[index] = str(shadow_candidate)
+        direct[index] = ("Z:" + str(shadow_candidate).replace("/", "\\")
+                         if wine_path else str(shadow_candidate))
         replaced = True
         if launch_cwd is None and shadow_candidate.is_file():
             launch_cwd = shadow_candidate.parent
@@ -2045,7 +2074,8 @@ def _retarget_bound_paths(command: list[str], game_root: Path,
     resolved_root = game_root.resolve(strict=False)
     resolved_view = view.resolve(strict=False)
     for index, token in enumerate(direct):
-        candidate = Path(token)
+        wine_path = token[:3].lower() == "z:\\"
+        candidate = Path(token[2:].replace("\\", "/") if wine_path else token)
         if not candidate.is_absolute():
             continue
         # Preserve deployed symlinks at their game-visible location.
@@ -2053,9 +2083,13 @@ def _retarget_bound_paths(command: list[str], game_root: Path,
             relative = Path(os.path.abspath(candidate)).relative_to(resolved_root)
         except ValueError:
             try:
-                relative = candidate.resolve(strict=False).relative_to(resolved_root)
+                relative = (candidate.parent.resolve(strict=False) / candidate.name
+                            ).relative_to(resolved_root)
             except (OSError, ValueError):
-                continue
+                try:
+                    relative = candidate.resolve(strict=False).relative_to(resolved_root)
+                except (OSError, ValueError):
+                    continue
         shadow_candidate = resolved_view / relative
         if not shadow_candidate.exists():
             resolved_shadow = _resolve_nocase(view, relative.as_posix())
@@ -2063,7 +2097,8 @@ def _retarget_bound_paths(command: list[str], game_root: Path,
                 continue
             shadow_candidate = resolved_shadow
         shadow_relative = shadow_candidate.relative_to(resolved_view)
-        direct[index] = str(bind_root.joinpath(*shadow_relative.parts))
+        target = str(bind_root.joinpath(*shadow_relative.parts))
+        direct[index] = "Z:" + target.replace("/", "\\") if wine_path else target
         replaced = True
     return direct, replaced
 
@@ -2209,7 +2244,8 @@ def _steam_runtime_shadow_env(source: dict[str, str], game_root: Path,
 
 def _direct_shadow_steam_runtime_command(
         command: list[str], game_root: Path, view: Path,
-        env: dict[str, str] | None) -> list[str] | None:
+        env: dict[str, str] | None, *,
+        cwd: Path | None = None) -> list[str] | None:
     """Run pressure-vessel directly against the materialized shadow tree."""
     if not _uses_steam_linux_runtime(command):
         return None
@@ -2217,6 +2253,9 @@ def _direct_shadow_steam_runtime_command(
         command, game_root, view)
     if not replaced:
         return None
+    if cwd is not None:
+        mapped_cwd, _, _ = _retarget_shadow_paths([str(cwd)], game_root, view)
+        launch_cwd = Path(mapped_cwd[0])
 
     shadow_env = _steam_runtime_shadow_env(
         env if env is not None else os.environ, game_root, view)
@@ -2260,6 +2299,10 @@ def _bound_shadow_steam_runtime_command(
     if bind_root != game_root:
         bound_command, _replaced = _retarget_bound_paths(
             command, game_root, view, bind_root)
+        if launch_cwd is not None:
+            mapped_cwd, _ = _retarget_bound_paths(
+                [str(launch_cwd)], game_root, view, bind_root)
+            launch_cwd = Path(mapped_cwd[0])
 
     runtime_index = next(
         (index for index, token in enumerate(bound_command)
@@ -2414,7 +2457,7 @@ def _direct_shadow_opt_in_command(command: list[str], game_root: Path,
 
 
 def wrap_command(game, command: list[str], env: dict[str, str] | None = None,
-                 log_fn=None) -> list[str]:
+                 log_fn=None, *, cwd: Path | None = None) -> list[str]:
     """Wrap *command* in the deployed profile's private game view."""
     if not command:
         raise RuntimeError("No launch command was supplied to the profile VFS.")
@@ -2484,7 +2527,7 @@ def wrap_command(game, command: list[str], env: dict[str, str] | None = None,
             )
         if bind_at_game_root and bind_is_safe:
             bound_runtime = _bound_shadow_steam_runtime_command(
-                command, game_root, view, env, bind_root)
+                command, game_root, view, env, bind_root, launch_cwd=cwd)
             if bound_runtime is not None:
                 return routed("shadow Steam Runtime bind", bound_runtime)
         if not bind_at_game_root or not bind_is_safe:
@@ -2493,7 +2536,7 @@ def wrap_command(game, command: list[str], env: dict[str, str] | None = None,
             if direct_umu is not None:
                 return routed("direct shadow UMU", direct_umu)
             direct_runtime = _direct_shadow_steam_runtime_command(
-                command, game_root, view, env)
+                command, game_root, view, env, cwd=cwd)
             if direct_runtime is not None:
                 return routed("direct shadow Steam Runtime", direct_runtime)
         if ((not bind_at_game_root
@@ -2731,6 +2774,7 @@ def prefer_virtual_executable(game, command: list[str], relative: str) -> list[s
     )
 
 
+@link_changes.track_game_links
 def cleanup_deployment(game, *, preserve_upper: bool = True, log_fn=None) -> None:
     """Remove the published view/layers; optionally retain profile writes."""
     _log = log_fn or (lambda _message: None)

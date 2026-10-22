@@ -142,6 +142,21 @@ def build_quick_configure_options(game) -> list[dict[str, Any]]:
                    "Automatic archive invalidation (prefer loose files over BSAs)",
                    val, apply)
 
+    if hasattr(game, "manage_archive_load_order"):
+        val, apply = _toggle_attr(game, "manage_archive_load_order", False)
+        add_toggle("manage_archive_load_order",
+                   "Use mod priority for archive load order", val, apply)
+
+    if hasattr(game, "preserve_mod_load_order"):
+        val, apply = _toggle_attr(game, "preserve_mod_load_order", True)
+        add_toggle("preserve_mod_load_order",
+                   "Preserve Witcher 3 mod load order", val, apply)
+
+    if hasattr(game, "manage_lml_load_order"):
+        val, apply = _toggle_attr(game, "manage_lml_load_order", True)
+        add_toggle("manage_lml_load_order",
+                   "Use mod priority for LML load order", val, apply)
+
     if getattr(game, "case_alias_dirs", None):
         val, apply = _toggle_attr(game, "case_alias_links", True)
         add_toggle("case_alias_links",
