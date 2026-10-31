@@ -69,5 +69,7 @@ py.install_sources(
   'Voices_Of_The_Void.png',
   'warhammer_40k_rogue_trader.png',
   'witcher_3.png',
+  'nivalis_nights.png',
+  'Prey_2017.png',
   subdir: 'icons' / 'games',
 )
