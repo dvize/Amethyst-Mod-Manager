@@ -1003,6 +1003,14 @@ def _small_zip_fast_path_eligible(archive_path: str) -> bool:
         expanded = 0
         conventional = size_ok and len(members) <= _SMALL_ZIP_MAX_MEMBERS
         for member in members:
+            # Some packers emit a bare archive-root entry ("/", "./", "\\").
+            # It normalises to nothing and every extractor drops it; it is the
+            # archive's own root, not a path escape, so tolerate it instead of
+            # aborting the whole install over it (Armoury of the Expanse ZIP).
+            if not [part for part in
+                    member.filename.replace("\\", "/").split("/")
+                    if part not in ("", ".")]:
+                continue
             _normalise_relative_install_path(
                 member.filename, label="archive member", allow_empty=False)
             expanded += max(0, member.file_size)

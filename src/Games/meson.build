@@ -28,6 +28,7 @@ subdir('Stardew Valley')
 subdir('The Sims')
 subdir('The Witcher 3')
 subdir('Voices Of The Void')
+subdir('Warhammer 40K Rogue Trader')
 
 py.install_sources(
   '__init__.py',

@@ -52,6 +52,8 @@
 - Removed the Discord rpc feature
 - Added the pgpatcher wizard for Skyrim VR
 ### Bug Fixes
+- Fixed Warhammer 40,000: Rogue Trader Owlcat mods failing with "DirectoryNotFoundException: Assemblies", and empty placeholder folders hiding every Owlcat mod from the in-game manager
+- Fixed archives that contain a bare root ("/") entry failing to install with "Unsafe archive path rejected"
 - Fixed an issue where renaming a mod would remove the view Fomod choices menu entry
 - Fixed moving multiple mods with CTRL+Click when no mod groups are present in the mod list
 - Fixed an issue where some mods that are a only a few KB in size would not install for free Nexus users from the Nexus browser
@@ -144,6 +146,7 @@
 - Added the ability to browse and install Wabbajack modlists
 ### Game Support
 - Added Project Zomboid #488
+- Added Warhammer 40,000: Rogue Trader
 ### Additions
 - Added UI options to hide top bar buttons
 - Added an option in the profile settings to hide profiles from the profile dropdown
