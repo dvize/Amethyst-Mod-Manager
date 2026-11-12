@@ -4,6 +4,8 @@ py.install_sources(
   'base.py',
   'confirm.py',
   'date_picker.py',
+  'deployment_repair.py',
+  'duplicate_instance.py',
   'file_pickers.py',
   'portal_picker.py',
   'list_picker.py',

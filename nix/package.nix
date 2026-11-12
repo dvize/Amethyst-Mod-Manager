@@ -25,6 +25,7 @@ let
     ps.pyside6
     ps.requests
     ps.py7zr
+    ps.rarfile
     ps.pillow
     ps.lz4
     ps.zstandard
@@ -32,6 +33,8 @@ let
     ps.keyring
     ps.msgpack
     ps.bsdiff4
+    ps.xxhash
+    ps.pyyaml
     libloot
   ]);
 in
